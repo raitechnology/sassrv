@@ -13,7 +13,7 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <sass_rv/ev_rv.h>
+#include <sassrv/ev_rv.h>
 #include <raikv/key_hash.h>
 #include <raikv/util.h>
 #include <raikv/ev_publish.h>
@@ -28,7 +28,7 @@
 #include <raimd/rv_msg.h>
 
 using namespace rai;
-using namespace sass_rv;
+using namespace sassrv;
 using namespace kv;
 using namespace md;
 

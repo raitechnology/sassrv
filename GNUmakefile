@@ -180,7 +180,7 @@ all_libs    += $(libd)/libsassrv.a
 all_dlls    += $(libd)/libsassrv.so
 all_depends += $(libsassrv_deps)
 
-rv_server_defines := -DSASS_RV_VER=$(ver_build)
+server_defines := -DSASSRV_VER=$(ver_build)
 rv_server_files := server
 rv_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_server_files)))
 rv_server_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_server_files)))

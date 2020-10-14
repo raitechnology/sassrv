@@ -1,5 +1,5 @@
-#ifndef __rai_sass_rv__ev_rv_h__
-#define __rai_sass_rv__ev_rv_h__
+#ifndef __rai_sassrv__ev_rv_h__
+#define __rai_sassrv__ev_rv_h__
 
 extern "C" {
   struct pcre2_real_code_8;
@@ -11,7 +11,7 @@ extern "C" {
 #include <raimd/rv_msg.h>
 
 namespace rai {
-namespace sass_rv {
+namespace sassrv {
 
 struct RvSession;
 

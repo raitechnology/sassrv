@@ -10,11 +10,11 @@
 #include <netdb.h>
 #include <pthread.h>
 #include <signal.h>
-#include <sass_rv/ev_rv.h>
+#include <sassrv/ev_rv.h>
 #include <raikv/kv_pubsub.h>
 
 using namespace rai;
-using namespace sass_rv;
+using namespace sassrv;
 using namespace kv;
 
 struct MainArgs { /* argv[] parsed args */
@@ -234,7 +234,7 @@ main( int argc, char *argv[] )
     r.udp_opts &= ~OPT_AF_INET6;
   }
 
-  printf( "sass_rv_version:      %s\n", kv_stringify( SASS_RV_VER ) );
+  printf( "sassrv_version:       %s\n", kv_stringify( SASSRV_VER ) );
   printf( "max_fds:              %d\n", r.maxfd );
   printf( "keepalive_timeout:    %d\n", r.timeout );
   printf( "prefetch:             %s\n", r.use_prefetch  ? "true" : "false" );
