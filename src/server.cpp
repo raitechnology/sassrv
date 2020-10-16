@@ -18,8 +18,8 @@ struct Args : public MainLoopVars { /* argv[] parsed args */
 };
 
 struct Loop : public MainLoop<Args> {
-  Loop( EvShm &m,  Args &args,  int num ) :
-    MainLoop<Args>( m, args, num ) {}
+  Loop( EvShm &m,  Args &args,  int num, bool (*ini)( void * ) ) :
+    MainLoop<Args>( m, args, num, ini ) {}
 
  EvRvListen * rv_sv;
   bool rv_init( void ) {
@@ -34,13 +34,14 @@ struct Loop : public MainLoop<Args> {
       fflush( stdout );
     return cnt > 0;
   }
+
+  static bool initialize( void *me ) noexcept;
 };
 
-template<>
 bool
-MainLoop<Args>::initialize( void ) noexcept
+Loop::initialize( void *me ) noexcept
 {
-  return ((Loop *) this)->init();
+  return ((Loop *) me)->init();
 }
 
 int
@@ -57,7 +58,7 @@ main( int argc, const char *argv[] )
   printf( "rv_version:           " kv_stringify( SASSRV_VER ) "\n" );
   shm.print();
   r.rv_port = r.parse_port( argc, argv, "-r", "7500" );
-  Runner<Args, Loop> runner( r, shm );
+  Runner<Args, Loop> runner( r, shm, Loop::initialize );
   if ( r.thr_error == 0 )
     return 0;
   return 1;
