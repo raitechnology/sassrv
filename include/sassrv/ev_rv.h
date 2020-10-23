@@ -16,7 +16,6 @@ namespace sassrv {
 struct RvSession;
 
 struct EvRvListen : public kv::EvTcpListen {
-  uint64_t timer_id;
   uint32_t ipaddr;
   uint16_t ipport;
   void * operator new( size_t, void *ptr ) { return ptr; }
