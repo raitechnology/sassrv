@@ -202,7 +202,6 @@ struct RvMsgIn {
 };
 
 struct EvRvService : public kv::EvConnection {
-  static const uint8_t EV_RV_SOCK = 8;
   void * operator new( size_t, void *ptr ) { return ptr; }
   enum ProtoState {
     VERS_RECV,
@@ -227,7 +226,7 @@ struct EvRvService : public kv::EvConnection {
                vmin,
                vupd;
 
-  EvRvService( kv::EvPoll &p ) : kv::EvConnection( p, EV_RV_SOCK ) {}
+  EvRvService( kv::EvPoll &p,  const uint8_t t ) : kv::EvConnection( p, t ) {}
   void initialize_state( uint64_t id ) {
     this->state = VERS_RECV;
     this->ms = this->bs = 0;
