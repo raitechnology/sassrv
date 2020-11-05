@@ -151,6 +151,9 @@ clean_md:
 	$(MAKE) -C raimd clean
 clean_subs += clean_md
 endif
+ifneq (.,$(sd))
+clean_subs :=
+endif
 
 # copr/fedora build (with version env vars)
 # copr uses this to generate a source rpm with the srpm target
