@@ -52,7 +52,7 @@ CFLAGS := $(default_cflags)
 cflags := $(gcc_wflags) $(CFLAGS) $(arch_cflags)
 
 # where to find the raids/xyz.h files
-INCLUDES    ?= -Iinclude -Iraikv/include -Iraimd/include
+INCLUDES    ?= -Iinclude -I$(sd)/raikv/include -I$(sd)/raimd/include
 includes    := $(INCLUDES)
 DEFINES     ?=
 defines     := $(DEFINES)
@@ -61,10 +61,13 @@ sock_lib    :=
 math_lib    := -lm
 thread_lib  := -pthread -lrt
 
+# submodule dir
+sd          ?= .
+
 # test submodules exist (they don't exist for dist_rpm, dist_dpkg targets)
-have_md_submodule    := $(shell if [ -f ./raimd/GNUmakefile ]; then echo yes; else echo no; fi )
-have_dec_submodule   := $(shell if [ -f ./raimd/libdecnumber/GNUmakefile ]; then echo yes; else echo no; fi )
-have_kv_submodule    := $(shell if [ -f ./raikv/GNUmakefile ]; then echo yes; else echo no; fi )
+have_md_submodule    := $(shell if [ -f $(sd)/raimd/GNUmakefile ]; then echo yes; else echo no; fi )
+have_dec_submodule   := $(shell if [ -f $(sd)/raimd/libdecnumber/GNUmakefile ]; then echo yes; else echo no; fi )
+have_kv_submodule    := $(shell if [ -f $(sd)/raikv/GNUmakefile ]; then echo yes; else echo no; fi )
 
 lnk_lib     :=
 dlnk_lib    :=
@@ -73,39 +76,39 @@ dlnk_dep    :=
 
 # if building submodules, reference them rather than the libs installed
 ifeq (yes,$(have_kv_submodule))
-kv_lib      := raikv/$(libd)/libraikv.a
-kv_dll      := raikv/$(libd)/libraikv.so
+kv_lib      := $(sd)/raikv/$(libd)/libraikv.a
+kv_dll      := $(sd)/raikv/$(libd)/libraikv.so
 lnk_lib     += $(kv_lib)
 lnk_dep     += $(kv_lib)
-dlnk_lib    += -Lraikv/$(libd) -lraikv
+dlnk_lib    += -L$(sd)/raikv/$(libd) -lraikv
 dlnk_dep    += $(kv_dll)
-rpath1       = ,-rpath,$(pwd)/raikv/$(libd)
+rpath1       = ,-rpath,$(pwd)/$(sd)/raikv/$(libd)
 else
 lnk_lib     += -lraikv
 dlnk_lib    += -lraikv
 endif
 
 ifeq (yes,$(have_md_submodule))
-md_lib      := raimd/$(libd)/libraimd.a
-md_dll      := raimd/$(libd)/libraimd.so
+md_lib      := $(sd)/raimd/$(libd)/libraimd.a
+md_dll      := $(sd)/raimd/$(libd)/libraimd.so
 lnk_lib     += $(md_lib)
 lnk_dep     += $(md_lib)
-dlnk_lib    += -Lraimd/$(libd) -lraimd
+dlnk_lib    += -L$(sd)/raimd/$(libd) -lraimd
 dlnk_dep    += $(md_dll)
-rpath3       = ,-rpath,$(pwd)/raimd/$(libd)
+rpath3       = ,-rpath,$(pwd)/$(sd)/raimd/$(libd)
 else
 lnk_lib     += -lraimd
 dlnk_lib    += -lraimd
 endif
 
 ifeq (yes,$(have_dec_submodule))
-dec_lib     := raimd/libdecnumber/$(libd)/libdecnumber.a
-dec_dll     := raimd/libdecnumber/$(libd)/libdecnumber.so
+dec_lib     := $(sd)/raimd/libdecnumber/$(libd)/libdecnumber.a
+dec_dll     := $(sd)/raimd/libdecnumber/$(libd)/libdecnumber.so
 lnk_lib     += $(dec_lib)
 lnk_dep     += $(dec_lib)
-dlnk_lib    += -Lraimd/libdecnumber/$(libd) -ldecnumber
+dlnk_lib    += -L$(sd)/raimd/libdecnumber/$(libd) -ldecnumber
 dlnk_dep    += $(dec_dll)
-rpath5       = ,-rpath,$(pwd)/raimd/libdecnumber/$(libd)
+rpath5       = ,-rpath,$(pwd)/$(sd)/raimd/libdecnumber/$(libd)
 else
 lnk_lib     += -ldecnumber
 dlnk_lib    += -ldecnumber
