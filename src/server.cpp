@@ -17,18 +17,35 @@ struct Args : public MainLoopVars { /* argv[] parsed args */
   Args() : rv_port( 0 ) {}
 };
 
+struct MyListener : public EvRvListen {
+  MyListener( kv::EvPoll &p ) : EvRvListen( p ) {}
+
+  virtual int start_host( void ) noexcept final {
+    printf( "start_network:        service %.*s, \"%.*s\"\n",
+            (int) this->service_len, this->service, (int) this->network_len,
+            this->network );
+    return this->EvRvListen::start_host();
+  }
+  virtual int stop_host( void ) noexcept final {
+    printf( "stop_network:         service %.*s, \"%.*s\"\n",
+            (int) this->service_len, this->service, (int) this->network_len,
+            this->network );
+    return this->EvRvListen::stop_host();
+  }
+};
+
 struct Loop : public MainLoop<Args> {
   Loop( EvShm &m,  Args &args,  int num, bool (*ini)( void * ) ) :
     MainLoop<Args>( m, args, num, ini ) {}
 
- EvRvListen * rv_sv;
+ MyListener * rv_sv;
   bool rv_init( void ) {
-    return Listen<EvRvListen>( 0, this->r.rv_port, this->rv_sv,
+    return Listen<MyListener>( 0, this->r.rv_port, this->rv_sv,
                                this->r.tcp_opts ); }
 
   bool init( void ) {
     if ( this->thr_num == 0 )
-      printf( "rv:                   %d\n", this->r.rv_port );
+      printf( "rv_daemon:            %d\n", this->r.rv_port );
     int cnt = this->rv_init();
     if ( this->thr_num == 0 )
       fflush( stdout );
@@ -50,7 +67,12 @@ main( int argc, const char *argv[] )
   EvShm shm;
   Args  r;
 
-  r.add_desc( "  -r rv    = listen rv port        (7500)\n" );
+  r.no_threads   = true;
+  r.no_reuseport = true;
+  r.no_map       = true;
+  r.no_default   = true;
+  r.all          = true;
+  r.add_desc( "  -r rv    = listen rv port          (7500)" );
   if ( ! r.parse_args( argc, argv ) )
     return 1;
   if ( shm.open( r.map_name, r.db_num ) != 0 )

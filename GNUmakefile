@@ -51,6 +51,9 @@ CFLAGS := $(default_cflags)
 #CFLAGS ?= $(RPM_OPT_FLAGS)
 cflags := $(gcc_wflags) $(CFLAGS) $(arch_cflags)
 
+# submodule dir
+sd          ?= .
+
 # where to find the raids/xyz.h files
 INCLUDES    ?= -Iinclude -I$(sd)/raikv/include -I$(sd)/raimd/include
 includes    := $(INCLUDES)
@@ -60,9 +63,6 @@ cpp_lnk     :=
 sock_lib    :=
 math_lib    := -lm
 thread_lib  := -pthread -lrt
-
-# submodule dir
-sd          ?= .
 
 # test submodules exist (they don't exist for dist_rpm, dist_dpkg targets)
 have_md_submodule    := $(shell if [ -f $(sd)/raimd/GNUmakefile ]; then echo yes; else echo no; fi )
@@ -170,7 +170,7 @@ all_dlls    :=
 all_depends :=
 gen_files   :=
 
-libsassrv_files := ev_rv
+libsassrv_files := ev_rv rv_host
 libsassrv_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libsassrv_files)))
 libsassrv_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libsassrv_files)))
 libsassrv_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(libsassrv_files))) \

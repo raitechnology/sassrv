@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
@@ -17,7 +16,6 @@
 #include <raikv/key_hash.h>
 #include <raikv/util.h>
 #include <raikv/ev_publish.h>
-#include <raikv/kv_pubsub.h>
 #include <raikv/timer_queue.h>
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
@@ -25,7 +23,6 @@
 #include <raimd/json_msg.h>
 #include <raimd/tib_msg.h>
 #include <raimd/tib_sass_msg.h>
-#include <raimd/rv_msg.h>
 
 using namespace rai;
 using namespace sassrv;
@@ -73,32 +70,27 @@ using namespace md;
  *   D = publish data on a subject
  *   C = cancel listen
  */
-static uint64_t uptime_stamp;
+/* string constant + strlen() + 1 */
 
 EvRvListen::EvRvListen( EvPoll &p ) noexcept
-  : EvTcpListen( p, "rv_listen", "rv_sock" ),
-    ipaddr( 0 ), ipport( 0 )
+  : EvTcpListen( p, "rv_listen", "rv_sock" ), RvHost( *this )
 {
-  if ( uptime_stamp == 0 )
-    uptime_stamp = kv_current_realtime_ns();
   md_init_auto_unpack();
+}
 
-  char host[ 1024 ];
-  if ( ::gethostname( host, sizeof( host ) ) == 0 ) {
-    struct addrinfo * h = NULL,
-                    * res;
-    if ( ::getaddrinfo( host, NULL, NULL, &h ) == 0 ) {
-      for ( res = h; res != NULL; res = res->ai_next ) {
-        if ( res->ai_family == AF_INET &&
-             res->ai_addrlen >= sizeof( struct sockaddr_in ) ) {
-          struct sockaddr_in * in = (struct sockaddr_in *) res->ai_addr;
-          ::memcpy( &this->ipaddr, &in->sin_addr.s_addr, 4 );
-          break;
-        }
-      }
-      ::freeaddrinfo( h );
-    }
+int
+EvRvListen::listen( const char *ip,  int port,  int opts )
+{
+  int status;
+  status = this->kv::EvTcpListen::listen( ip, port, opts, "rv_listen" );
+  if ( status == 0 ) {
+    this->ipport = htons( port ); /* network order */
+#if 0
+    this->poll.add_timer_seconds( this->fd, 1, this->timer_id, 0 );
+    this->idle_push( EV_PROCESS );
+#endif
   }
+  return status;
 }
 
 bool
@@ -116,7 +108,8 @@ EvRvListen::accept( void ) noexcept
     return false;
   }
   EvRvService *c =
-    this->poll.get_free_list<EvRvService>( this->accept_sock_type );
+    this->poll.get_free_list2<EvRvService, RvHost>(
+      this->accept_sock_type, *this );
   if ( c == NULL ) {
     perror( "accept: no memory" );
     ::close( sock );
@@ -125,39 +118,317 @@ EvRvListen::accept( void ) noexcept
   EvTcpListen::set_sock_opts( this->poll, sock, this->sock_opts );
   ::fcntl( sock, F_SETFL, O_NONBLOCK | ::fcntl( sock, F_GETFL ) );
 
-  if ( this->ipport == 0 ) {
-    struct sockaddr_storage xaddr;
-    addrlen = sizeof( xaddr );
-    if ( ::getsockname( this->fd, (struct sockaddr *) &xaddr,
-                        &addrlen ) == 0 ) {
-      if ( xaddr.ss_family == AF_INET ) {
-        struct sockaddr_in * sin = (struct sockaddr_in *) &xaddr;
-        ::memcpy( &this->ipport, &sin->sin_port, 2 );
-      }
-      else if ( xaddr.ss_family == AF_INET6 ) {
-        struct sockaddr_in6 * sin6 = (struct sockaddr_in6 *) &xaddr;
-        ::memcpy( &this->ipport, &sin6->sin6_port, 2 );
-      }
-    }
-  }
-  c->ipaddr = this->ipaddr;
-  c->ipport = this->ipport;
-
   c->PeerData::init_peer( sock, (struct sockaddr *) &addr, "rv" );
   c->initialize_state( ++this->timer_id );
-  c->idle_push( EV_WRITE_HI );
   if ( this->poll.add_sock( c ) < 0 ) {
     fprintf( stderr, "failed to add sock %d\n", sock );
     ::close( sock );
     this->poll.push_free_list( c );
     return false;
   }
+  this->active_clients++;
   uint32_t ver_rec[ 3 ] = { 0, 4, 0 };
   ver_rec[ 1 ] = get_u32<MD_BIG>( &ver_rec[ 1 ] ); /* flip */
   c->append( ver_rec, sizeof( ver_rec ) );
+  c->idle_push( EV_WRITE_HI );
+  /*this->poll.add_timer_seconds( c->fd, 5, c->timer_id, 0 );*/
   return true;
-  /*this->poll.timer_queue->add_timer( c->fd, RV_SESSION_IVAL, c->timer_id,
-                                       IVAL_SECS, 0 );*/
+}
+
+bool
+EvRvListen::timer_expire( uint64_t, uint64_t eid ) noexcept
+{
+  /* stop timer when host stops */
+  if ( eid != (uint64_t) this->host_status_timer )
+    return false;
+  this->host_status(); /* still going */
+  return true;
+}
+
+void
+EvRvListen::host_status( void ) noexcept
+{
+  static const char status[] = "_RV.INFO.SYSTEM.HOST.STATUS.";
+  uint8_t     buf[ 1024 ];
+  char        subj[ 64 ];
+  size_t      sublen,
+              size;
+  RvMsgWriter msg( buf, sizeof( buf ) );
+
+  sublen = this->pack_advisory( msg, status, subj, ADV_HOST_STATUS, NULL );
+  size   = msg.update_hdr();
+  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
+                 kv_crc_c( subj, sublen, 0 ), NULL, 0,
+                 (uint8_t) RVMSG_TYPE_ID, 'p' );
+  this->poll.forward_msg( pub, NULL, 0, NULL );
+}
+
+int
+EvRvListen::start_host( void ) noexcept
+{
+  static const char start[] = "_RV.INFO.SYSTEM.HOST.START.";
+  uint8_t     buf[ 1024 ];
+  char        subj[ 64 ];
+  size_t      sublen,
+              size;
+  RvMsgWriter msg( buf, sizeof( buf ) );
+  /* subscribe _INBOX.DAEMON.iphex */
+  this->subscribe_daemon_inbox();
+  sublen = this->pack_advisory( msg, start, subj, ADV_HOST_START, NULL );
+  size   = msg.update_hdr();
+  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
+                 kv_crc_c( subj, sublen, 0 ), NULL, 0,
+                 (uint8_t) RVMSG_TYPE_ID, 'p' );
+  this->poll.forward_msg( pub, NULL, 0, NULL );
+  /* start timer to send the status every 90 seconds */
+  this->host_status_timer = ++this->host_network_start;
+  this->poll.add_timer_seconds( this->fd, RV_STATUS_IVAL, 0,
+                                this->host_status_timer );
+  return 0;
+}
+
+int
+EvRvListen::stop_host( void ) noexcept
+{
+  static const char stop[] = "_RV.INFO.SYSTEM.HOST.STOP.";
+  uint8_t     buf[ 1024 ];
+  char        subj[ 64 ];
+  size_t      sublen,
+              size;
+  RvMsgWriter msg( buf, sizeof( buf ) );
+  /* unsubscribe _INBOX.DAEMON.iphex */
+  this->unsubscribe_daemon_inbox();
+  sublen = this->pack_advisory( msg, stop, subj, ADV_HOST_STOP, NULL );
+  size   = msg.update_hdr();
+  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
+                 kv_crc_c( subj, sublen, 0 ), NULL, 0,
+                 (uint8_t) RVMSG_TYPE_ID, 'p' );
+  this->poll.forward_msg( pub, NULL, 0, NULL );
+  /* stop the timer, the timer_expire() function tests this */
+  this->host_status_timer = 0;
+  return 0;
+}
+
+void
+EvRvListen::subscribe_daemon_inbox( void ) noexcept
+{
+  char daemon_inbox[ 24 ];
+  uint32_t h, rcnt;
+  ::memcpy( daemon_inbox, "_INBOX.", 7 );
+  ::memcpy( &daemon_inbox[ 7 ], this->session_ip, 8 );
+  ::memcpy( &daemon_inbox[ 15 ], ".DAEMON", 8 );
+  const size_t len = 22;
+  h = kv_crc_c( daemon_inbox, len, 0 );
+  if ( ! this->poll.sub_route.is_sub_member( h, this->fd ) ) {
+    rcnt = this->poll.sub_route.add_sub_route( h, this->fd );
+    this->poll.notify_sub( h, daemon_inbox, len, this->fd, rcnt, 'V', NULL, 0 );
+  }
+}
+
+void
+EvRvListen::unsubscribe_daemon_inbox( void ) noexcept
+{
+  char daemon_inbox[ 24 ];
+  uint32_t h, rcnt;
+  ::memcpy( daemon_inbox, "_INBOX.", 7 );
+  ::memcpy( &daemon_inbox[ 7 ], this->session_ip, 8 );
+  ::memcpy( &daemon_inbox[ 15 ], ".DAEMON", 8 );
+  const size_t len = 22;
+  h = kv_crc_c( daemon_inbox, len, 0 );
+  if ( this->poll.sub_route.is_sub_member( h, this->fd ) ) {
+    rcnt = this->poll.sub_route.del_sub_route( h, this->fd );
+    this->poll.notify_unsub( h, daemon_inbox, len, this->fd, rcnt, 'V' );
+  }
+}
+
+void
+EvRvListen::process( void ) noexcept
+{
+  this->pop( EV_PROCESS );
+}
+
+void
+EvRvListen::process_close( void ) noexcept
+{
+  this->unsubscribe_daemon_inbox();
+}
+
+static bool
+match_string( const char *s,  size_t len,  const MDReference &mref )
+{
+  return len == mref.fsize && mref.ftype == MD_STRING &&
+         ::memcmp( s, mref.fptr, len ) == 0;
+}
+
+void
+EvRvListen::send_sessions( const void *reply,  size_t reply_len ) noexcept
+{
+  PeerMatchArgs ka;
+  PeerMatchIter iter( *this, ka );
+  PeerData    * p;
+  MDMsgMem      mem;
+  size_t        buflen = 8; /* header of rvmsg */
+  uint8_t     * buf = NULL;
+  bool          have_daemon;
+
+  ka.type     = "rv";
+  ka.type_len = 2;
+  have_daemon = false; /* include daemon onlly once */
+  for ( p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService * svc = (EvRvService *) p;
+    if ( svc->state == EvRvService::DATA_RECV_DAEMON && have_daemon )
+      continue;
+    buflen += svc->session_len + 8; /* field + type + session str */
+    if ( svc->state == EvRvService::DATA_RECV_DAEMON )
+      have_daemon = true;
+  }
+  mem.alloc( buflen, &buf );
+  RvMsgWriter msg( buf, buflen );
+  have_daemon = false;
+  for ( p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService * svc = (EvRvService *) p;
+    if ( svc->state == EvRvService::DATA_RECV_DAEMON && have_daemon )
+      continue;
+    msg.append_string( NULL, 0, svc->session, svc->session_len + 1 );
+    if ( svc->state == EvRvService::DATA_RECV_DAEMON )
+      have_daemon = true;
+  }
+  buflen = msg.update_hdr();
+  EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
+                 this->fd, kv_crc_c( reply, reply_len, 0 ), NULL, 0,
+                 (uint8_t) RVMSG_TYPE_ID, 'p' );
+  this->poll.forward_msg( pub, NULL, 0, NULL );
+}
+
+void
+EvRvListen::send_subscriptions( const char *session,  size_t session_len,
+                                const void *reply,  size_t reply_len ) noexcept
+{
+  DLinkList<RvServiceLink> list;
+  PeerMatchArgs     ka;
+  PeerMatchIter     iter( *this, ka );
+  RvSubRoutePos     pos;
+  RvPatternRoutePos ppos;
+  MDMsgMem          mem;
+  uint8_t         * buf = NULL;
+  size_t            buflen,
+                    subcnt;
+  ka.type     = "rv";
+  ka.type_len = 2;
+  subcnt      = 0;
+  for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService *svc = (EvRvService *) p;
+    if ( (size_t) svc->session_len + 1 == session_len &&
+         ::memcmp( session, svc->session, svc->session_len ) == 0 ) {
+      void * p;
+      mem.alloc( sizeof( RvServiceLink ), &p );
+      RvServiceLink *link = new ( p ) RvServiceLink( svc );
+      size_t n = svc->sub_tab.sub_count() + svc->pat_tab.sub_count();
+      if ( n > subcnt ) {
+        list.push_hd( link );
+        subcnt = n;
+      }
+      else {
+        list.push_tl( link );
+      }
+      if ( svc->state != EvRvService::DATA_RECV_DAEMON )
+        break;
+    }
+  }
+  if ( list.hd != NULL ) {
+    /* hdr + "user" : "name", "end" : 1 */
+    buflen = 8 + list.hd->svc.userid_len + 12 + 12;
+    for ( RvServiceLink *link = list.hd; link != NULL; link = link->next ) {
+      EvRvService & s = link->svc;
+      ::memset( link->bits, 0, sizeof( link->bits ) );
+      if ( s.sub_tab.first( pos ) ) {
+        do {
+          if ( link->check_subject( pos.rt->value, pos.rt->len, pos.rt->hash ) )
+            buflen += pos.rt->len + 8 + pos.rt->segments() * 2;
+        } while ( s.sub_tab.next( pos ) );
+      }
+      if ( s.pat_tab.first( ppos ) ) {
+        do {
+          if ( link->check_pattern( ppos.rt->value, ppos.rt->len,
+                                    ppos.rt->hash ) )
+            buflen += ppos.rt->len + 8 + ppos.rt->segments() * 2;
+        } while ( s.pat_tab.next( ppos ) );
+      }
+    }
+  }
+  else {
+    buflen = 8 + 8 + 12 + 12;
+  }
+  mem.alloc( buflen, &buf );
+  RvMsgWriter msg( buf, buflen );
+
+  if ( list.hd != NULL ) {
+    msg.append_string( SARG( "user" ), list.hd->svc.userid,
+                                       list.hd->svc.userid_len + 1 );
+    for ( RvServiceLink *link = list.hd; link != NULL; link = link->next ) {
+      EvRvService & s = link->svc;
+      ::memset( link->bits, 0, sizeof( link->bits ) );
+      if ( s.sub_tab.first( pos ) ) {
+        do {
+          if ( link->check_subject( pos.rt->value, pos.rt->len, pos.rt->hash ) )
+            msg.append_subject( NULL, 0, pos.rt->value, pos.rt->len );
+        } while ( s.sub_tab.next( pos ) );
+      }
+      if ( s.pat_tab.first( ppos ) ) {
+        do {
+          if ( link->check_pattern( ppos.rt->value, ppos.rt->len,
+                                    ppos.rt->hash ) )
+            msg.append_subject( NULL, 0, ppos.rt->value, ppos.rt->len );
+        } while ( s.pat_tab.next( ppos ) );
+      }
+    }
+  }
+  else {
+    msg.append_string( SARG( "user" ), SARG( "nobody" ) );
+  }
+  msg.append_int<int32_t>( SARG( "end" ), 1 );
+  buflen = msg.update_hdr();
+  EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
+                 this->fd, kv_crc_c( reply, reply_len, 0 ), NULL, 0,
+                 (uint8_t) RVMSG_TYPE_ID, 'p' );
+  this->poll.forward_msg( pub, NULL, 0, NULL );
+}
+
+bool
+EvRvListen::on_msg( EvPublish &pub ) noexcept
+{
+  if ( pub.reply_len == 0 || pub.msg_enc != (uint8_t) RVMSG_TYPE_ID )
+    return true;
+  MDMsgMem     mem;
+  MDOutput     mout;
+  RvMsg       * m;
+  MDFieldIter * it;
+  MDReference   mref;
+
+  m = RvMsg::unpack_rv( (void *) pub.msg, 0, pub.msg_len, 0, NULL, &mem );
+  if ( m != NULL ) {
+    /*m->print( &mout );*/
+    /* "op":"get", "what":"sessions"
+     * "op":"get", "what":"subscriptions", "session":"0A040416.5FCC7B705B5" */
+    if ( m->get_field_iter( it ) == 0 ) {
+      if ( it->find( SARG( "op" ), mref ) == 0 &&
+           match_string( SARG( "get" ), mref ) ) {
+        if ( it->find( SARG( "what" ), mref ) == 0 ) {
+          if ( match_string( SARG( "sessions" ), mref ) ) {
+            this->send_sessions( pub.reply, pub.reply_len );
+          }
+          else if ( match_string( SARG( "subscriptions" ), mref ) ) {
+            if ( it->find( SARG( "session" ), mref ) == 0 ) {
+              if ( mref.ftype == MD_STRING )
+                this->send_subscriptions( (const char *) mref.fptr,
+                                         mref.fsize, pub.reply, pub.reply_len );
+            }
+          }
+        }
+      }
+    }
+  }
+  return true;
 }
 
 void
@@ -175,11 +446,6 @@ EvRvService::send_info( bool agree ) noexcept
   for ( ; i < sizeof( info_rec ) / 4; i++ )
     info_rec[ i ] = 0; /* zero rest */
   this->append( info_rec, sizeof( info_rec ) );
-#if 0
-  MDOutput out;
-  printf( "-> %lu ->\n", sizeof( info_rec ) );
-  out.print_hex( info_rec, sizeof( info_rec ) );
-#endif
 }
 
 void
@@ -188,119 +454,158 @@ EvRvService::process( void ) noexcept
   size_t  buflen, msglen;
   int32_t status = 0;
 
-  do {
-    buflen = this->len - this->off;
-    if ( buflen < 8 )
-      goto break_loop;
-#if 0
-    MDOutput out;
-    printf( "<- %lu <-\n", buflen );
-    out.print_hex( &this->recv[ this->off ], buflen );
-#endif
-    switch ( this->state ) {
-      case VERS_RECV:
+  /* state trasition from VERS_RECV -> INFO_RECV -> DATA_RECV */
+  if ( this->state >= DATA_RECV ) { /* main state */
+  data_recv_loop:;
+    do {
+      buflen = this->len - this->off;
+      if ( buflen < 8 )
+        goto break_loop;
+      msglen = get_u32<MD_BIG>( &this->recv[ this->off ] );
+      if ( buflen < msglen )
+        goto break_loop;
+      status = this->dispatch_msg( &this->recv[ this->off ], msglen );
+      this->off     += msglen;
+      this->stat.br += msglen;
+      this->stat.mr++;
+    } while ( status == 0 );
+  }
+  else { /* initial connection states */
+    for (;;) {
+      buflen = this->len - this->off;
+      if ( buflen < 8 )
+        goto break_loop;
+      if ( this->state == VERS_RECV ) {
         if ( buflen < 3 * 4 )
           goto break_loop;
         this->off += 3 * 4;
         this->send_info( false );
         this->state = INFO_RECV;
-        break;
-
-      case INFO_RECV:
+      }
+      else { /* INFO_RECV */
         if ( buflen < 16 * 4 )
           goto break_loop;
         this->off += 16 * 4;
         this->send_info( true );
         this->state = DATA_RECV;
-        break;
-
-      case DATA_RECV:
-        msglen = get_u32<MD_BIG>( &this->recv[ this->off ] );
-        if ( buflen < msglen )
-          goto break_loop;
-        status = this->recv_data( &this->recv[ this->off ], msglen );
-        this->off += msglen;
-        this->br  += msglen;
-        this->mr++;
-        break;
+        goto data_recv_loop;
+      }
     }
-  } while ( status == 0 );
+  }
 break_loop:;
   this->pop( EV_PROCESS );
   this->push_write();
   if ( status != 0 )
     this->push( EV_CLOSE );
 }
-
+/* dispatch a msg: 'C' - unsubscribe subject
+ *                 'L' - subscribe subject
+ *                 'I' - information for connection
+ *                 'D' - data, forward to subscriptions */
 int
-EvRvService::recv_data( void *msgbuf, size_t msglen ) noexcept
+EvRvService::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
 {
   static const char *rv_status_string[] = RV_STATUS_STRINGS;
   int status;
   if ( (status = this->msg_in.unpack( msgbuf, msglen )) != 0 ) {
-    if ( msglen != 0 )
+    if ( msglen == 8 ) /* empty msg */
+      return 0;
+    if ( msglen != 0 ) {
+      MDOutput mout;
       fprintf( stderr, "rv status %d: \"%s\"\n", status,
                rv_status_string[ status ] );
+      mout.print_hex( msgbuf, msglen );
+    }
     return status;
   }
-  switch ( this->msg_in.mtype ) {
+  /*this->msg_in.print();*/
+  if ( this->msg_in.mtype == 'D' ) { /* publish */
+    this->fwd_pub();
+    return 0;
+  }
+  switch ( this->msg_in.mtype ) { /* publish */
     case 'C': /* unsubscribe */
       this->rem_sub();
       return 0;
-    case 'D': /* publish */
-      this->fwd_pub();
-      return 0;
-    case 'I': /* info */
-      return this->respond_info();
     case 'L': /* subscribe */
       this->add_sub();
       return 0;
+    case 'I': /* info */
+      return this->respond_info();
     default:
       return -1;
   }
-  return 0;
 }
-
+/* match a field string in a message */
 static bool
 match_str( MDName &nm,  MDReference &mref,  const char *s,  char *buf,
            size_t buflen )
 {
   if ( ::memcmp( nm.fname, s, nm.fnamelen ) != 0 )
     return false;
-  if ( mref.ftype == MD_STRING && mref.fsize < buflen ) {
+  if ( mref.ftype == MD_STRING && mref.fsize > 0 && mref.fsize < buflen ) {
     ::memcpy( buf, mref.fptr, mref.fsize );
     buf[ mref.fsize ] = '\0';
+    return true;
   }
-  else {
-    buf[ 0 ] = '\0';
-  }
-  return true;
+  return false;
 }
-
+/* match a field int in a message */
 static bool
-match_int( MDName &nm,  MDReference &mref,  const char *s,  uint32_t &ival )
+match_int( MDName &nm,  MDReference &mref,  const char *s,  uint16_t &ival )
 {
   if ( ::memcmp( nm.fname, s, nm.fnamelen ) != 0 )
     return false;
   if ( mref.ftype == MD_INT || mref.ftype == MD_UINT ) {
-    ival = get_uint<uint32_t>( mref );
+    ival = get_uint<uint16_t>( mref );
+    return true;
   }
-  else {
-    ival = 0;
-  }
-  return true;
+  return false;
 }
-
+/* information msg informs user, session, service and network in two passes,
+ * the first msg:
+ *
+ *  { mtype: I, userid: nobody, service: 7500, network: 127.0.0.1,
+ *    vmaj: 5, vmin: 4, vupd: 2 }
+ *
+ * causes this process to try open or at least validate the network and
+ * service, if successful, then the reply is:
+ *
+ * { sub: RVD.INITRESP, mtype: R, data : { ipaddr : 127.0.0.1, ipport : 7500,
+ *   vmaj : 5, vmin : 4, vupd : 1, gob : unique-id } }
+ *
+ * then the client responds with the session id it wants to use, either by
+ * creating one (older rv5 clients), or by using the gob param sent to it
+ * (newer rv7+ clients)
+ *
+ * { mtype: I, userid: nobody, session: 7F000001.2202C25FE975070A48320,
+ *   service: 7500, network: 127.0.0.1,
+ *   control: _INBOX.7F000001.2202C25FE975070A48320.1,
+ *   vmaj: 5, vmin: 4, vupd: 2 }
+ *
+ * the session parameter in this second message will start the session
+ * and the host network if necessary
+ */
 int
 EvRvService::respond_info( void ) noexcept
 {
   RvFieldIter * iter = this->msg_in.iter;
   MDName        nm;
   MDReference   mref;
-  uint8_t       buf[ 256 ];
+  char          net[ RvHost::MAX_NETWORK_LEN ],
+                svc[ RvHost::MAX_SERVICE_LEN ];
+  uint8_t       buf[ 8 * 1024 ];
   RvMsgWriter   rvmsg( buf, sizeof( buf ) ),
                 submsg( NULL, 0 );
-  size_t        sz;
+  size_t        size;
+  uint32_t      net_len = 0, svc_len = 0;
+  bool          has_session = false;
+  RvHostError   status = HOST_OK;
+
+  if ( this->gob_len == 0 )
+    this->gob_len = RvHost::time_to_str( this->active_ns, this->gob );
+  net[ 0 ] = 0;
+  svc[ 0 ] = 0;
 
   if ( iter->first() == 0 ) {
     do {
@@ -308,17 +613,23 @@ EvRvService::respond_info( void ) noexcept
         return ERR_RV_REF;
       switch ( nm.fnamelen ) {
         case 7:
-          match_str( nm, mref, "userid", this->userid, sizeof( this->userid ) );
+          if ( match_str( nm, mref, "userid", this->userid,
+                          sizeof( this->userid ) ) )
+            this->userid_len = mref.fsize - 1;
           break;
         case 8:
-          if ( ! match_str( nm, mref, "session", this->session,
-                            sizeof( this->session ) ) )
-            if ( ! match_str( nm, mref, "control", this->control,
-                              sizeof( this->control ) ) )
-              if ( ! match_str( nm, mref, "service", this->service,
-                                sizeof( this->service ) ) )
-                match_str( nm, mref, "network", this->network,
-                           sizeof( this->network ) );
+          if ( match_str( nm, mref, "session", this->session,
+                          sizeof( this->session ) ) ) {
+            has_session = true;
+            this->session_len = mref.fsize - 1;
+          }
+          else if ( match_str( nm, mref, "control", this->control,
+                               sizeof( this->control ) ) )
+            this->control_len = mref.fsize - 1;
+          else if ( match_str( nm, mref, "service", svc , sizeof( svc ) ) )
+            svc_len = mref.fsize - 1;
+          else if ( match_str( nm, mref, "network", net, sizeof( net ) ) )
+            net_len = mref.fsize - 1;
           break;
         case 5:
           if ( ! match_int( nm, mref, "vmaj", this->vmaj ) )
@@ -331,49 +642,82 @@ EvRvService::respond_info( void ) noexcept
     } while ( iter->next() == 0 );
   }
 
-  if ( this->session[ 0 ] == 0 ) {
+  RvMcast mc;
+  if ( svc_len == 0 ) {
+    ::strcpy( svc, "7500" );
+    svc_len = 4;
+  }
+  status = mc.parse_network( net );
+  /* check that the network is valid and start it */
+  if ( status == HOST_OK )
+    status = this->stat.start_network( mc, net, net_len, svc, svc_len );
+  if ( status != HOST_OK ) {
+    /* { sub: RVD.INITREFUSED, mtype: R,
+     *   data: { error: 17 } } */
+    rvmsg.append_subject( SARG( "sub" ), "RVD.INITREFUSED" );
+    rvmsg.append_string( SARG( "mtype" ), SARG( "R" ) );
+    rvmsg.append_msg( SARG( "data" ), submsg );
+    submsg.append_int<int32_t>( SARG( "error" ), status );
+    size = rvmsg.update_hdr( submsg );
+    this->push( EV_SHUTDOWN );
+  }
+  else if ( ! has_session ) {
     /* { sub: RVD.INITRESP, mtype: R,
      *   data: { ipaddr: a.b.c.d, ipport: 7500, vmaj: 5, vmin: 4, vupd: 2 } } */
-    rvmsg.append_subject( "sub", 4, "RVD.INITRESP" );
-    rvmsg.append_string( "mtype", 6, "R", 2 );
-    rvmsg.append_msg( "data", 5, submsg );
-    submsg.append_type( "ipaddr", 7, this->ipaddr, MD_IPDATA );
-    submsg.append_type( "ipport", 7, this->ipport, MD_IPDATA );
-    submsg.append_int<int32_t>( "vmaj", 5, 5 );
-    submsg.append_int<int32_t>( "vmin", 5, 4 );
-    submsg.append_int<int32_t>( "vupd", 5, 2 );
+    rvmsg.append_subject( SARG( "sub" ), "RVD.INITRESP" );
+    rvmsg.append_string( SARG( "mtype" ), SARG( "R" ) );
+    rvmsg.append_msg( SARG( "data" ), submsg );
+    submsg.append_ipdata( SARG( "ipaddr" ), this->stat.mcast.host_ip );
+    submsg.append_ipdata( SARG( "ipport" ), this->stat.service_port );
+    submsg.append_int<int32_t>( SARG( "vmaj" ), 5 );
+    submsg.append_int<int32_t>( SARG( "vmin" ), 4 );
+    submsg.append_int<int32_t>( SARG( "vupd" ), 2 );
 
-    struct timeval tv;
-    uint64_t n;
-    char     gob_buf[ 24 ];
-    uint8_t  j, k;
-    ::gettimeofday( &tv, NULL );
-    n = ( (uint64_t) tv.tv_sec << 12 ) |
-        ( ( (uint64_t) tv.tv_usec * 4096 / 1000000 ) &
-          ( ( (uint64_t) 1 << 12 ) - 1 ) );
-    for ( j = 0; ( n >> j ) != 0; j += 4 )
-      ;
-    for ( k = 0; j > 0; ) {
-      j -= 4;
-      uint8_t d = ( n >> j ) & 0xf;
-      gob_buf[ k++ ] = ( d < 10 ? d + '0' : d - 10 + 'A' );
-    }
-    gob_buf[ k++ ] = 0;
-    submsg.append_string( "gob", 4, gob_buf, k );
-    sz = rvmsg.update_hdr( submsg );
+    submsg.append_string( SARG( "gob" ), this->gob, this->gob_len + 1 );
+    size = rvmsg.update_hdr( submsg );
   }
   else {
     /* { sub: _RV.INFO.SYSTEM.RVD.CONNECTED, mtype: D,
      *   data: { ADV_CLASS: INFO, ADV_SOURCE: SYSTEM, ADV_NAME: RVD.CONNECTED } } */
-    rvmsg.append_subject( "sub", 4, "_RV.INFO.SYSTEM.RVD.CONNECTED" );
-    rvmsg.append_string( "mtype", 6, "D", 2 );
-    rvmsg.append_msg( "data", 5, submsg );
-    submsg.append_string( "ADV_CLASS", 10, "INFO", 5 );
-    submsg.append_string( "ADV_SOURCE", 11, "SYSTEM", 7 );
-    submsg.append_string( "ADV_NAME", 9, "RVD.CONNECTED", 14 );
-    sz = rvmsg.update_hdr( submsg );
+    rvmsg.append_subject( SARG( "sub" ), "_RV.INFO.SYSTEM.RVD.CONNECTED" );
+    rvmsg.append_string( SARG( "mtype" ), SARG( "D" ) );
+    rvmsg.append_msg( SARG( "data" ), submsg );
+    submsg.append_string( SARG( "ADV_CLASS" ), SARG( "INFO" ) );
+    submsg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
+    submsg.append_string( SARG( "ADV_NAME" ), SARG( "RVD.CONNECTED" ) );
+    size = rvmsg.update_hdr( submsg );
   }
-  this->append( buf, sz );
+  /* send the result */
+  this->append( buf, size );
+
+  if ( status == HOST_OK ) {
+    if ( has_session ) {
+      if ( this->session_len > 9 &&
+          ::strcmp( this->gob, &this->session[ 9 ] ) == 0 ) {
+        ::memcpy( this->session, this->stat.daemon_id,
+                  this->stat.daemon_len + 1 );
+        this->session_len = this->stat.daemon_len;
+        this->state = DATA_RECV_DAEMON;   /* use the iphex.DAEMON.session */
+      }
+      else
+        this->state = DATA_RECV_SESSION; /* use the session as specified */
+    }
+    else {
+      this->state = DATA_RECV; /* continue, need another info message */
+    }
+  }
+  if ( this->state == DATA_RECV_SESSION ) { /* start the session, only rv5 */
+    char   subj[ 64 ];
+    size_t sublen;
+    rvmsg.reset();
+    sublen = this->stat.pack_advisory( rvmsg, "_RV.INFO.SYSTEM.SESSION.START.",
+                                       subj, ADV_SESSION, this );
+    size = rvmsg.update_hdr();
+    EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
+                   kv_crc_c( subj, sublen, 0 ), NULL, 0,
+                   (uint8_t) RVMSG_TYPE_ID, 'p' );
+    this->poll.forward_msg( pub, NULL, 0, NULL );
+  }
   return 0;
 }
 
@@ -382,39 +726,54 @@ EvRvService::timer_expire( uint64_t tid,  uint64_t ) noexcept
 {
   if ( this->timer_id != tid )
     return false;
-  this->idle_push( EV_WRITE );
+#if 0
+  int err = 0;
+  socklen_t errsz = sizeof( err );
+  if ( ::getsockopt( this->fd, SOL_SOCKET, SO_ERROR, &err, &errsz ) != 0 )
+    perror( "getsockopt" );
+  else {
+    printf( "err %s : %d, state %x sock_flags %x\n",
+            this->peer_address, err, this->EvSocket::state, this->sock_flags );
+    printf( "off %u len %u recv_size %u recv_highwater %u\n",
+            this->off, this->len, this->recv_size, this->recv_highwater );
+    printf( "bytes_recv %lu bytes_sent %lu poll_sent %ld\n", this->bytes_recv,
+            this->bytes_sent, this->poll_bytes_sent );
+    printf( "wr_pending %lu\n", this->pending() );
+  }
+#endif
   return true;
 }
-
+/* when a 'L' message is received from the client, remember the subject and
+ * notify with by publishing a LISTEN.START */
 void
 EvRvService::add_sub( void ) noexcept
 {
-  char   * sub = this->msg_in.sub;
-  uint32_t len = this->msg_in.sublen;
+  const char   * sub = this->msg_in.sub;
+  const uint32_t len = this->msg_in.sublen;
+  uint32_t refcnt = 0;
 
   if ( ! this->msg_in.is_wild ) {
     uint32_t h = kv_crc_c( sub, len, 0 ),
              rcnt;
-    if ( this->sub_tab.put( h, sub, len ) == RV_SUB_OK ) {
-      rcnt = this->poll.sub_route.add_route( h, this->fd );
+    if ( this->sub_tab.put( h, sub, len, refcnt ) == RV_SUB_OK ) {
+      rcnt = this->poll.sub_route.add_sub_route( h, this->fd );
       this->poll.notify_sub( h, sub, len, this->fd, rcnt, 'V',
                              this->msg_in.reply, this->msg_in.replylen );
     }
   }
   else {
     RvPatternRoute * rt;
-    char       buf[ 1024 ];
-    PatternCvt cvt( buf, sizeof( buf ) );
+    PatternCvt cvt;
     uint32_t   h, rcnt;
 
     if ( cvt.convert_rv( sub, len ) == 0 ) {
       h = kv_crc_c( sub, cvt.prefixlen,
                     this->poll.sub_route.prefix_seed( cvt.prefixlen ) );
-      if ( this->pat_tab.put( h, sub, len, rt ) == RV_SUB_OK ) {
+      if ( this->pat_tab.put( h, sub, len, rt, refcnt ) == RV_SUB_OK ) {
         size_t erroff;
         int    error;
         rt->re =
-          pcre2_compile( (uint8_t *) buf, cvt.off, 0, &error, &erroff, 0 );
+          pcre2_compile( (uint8_t *) cvt.out, cvt.off, 0, &error, &erroff, 0 );
         if ( rt->re == NULL ) {
           fprintf( stderr, "re failed\n" );
         }
@@ -431,32 +790,66 @@ EvRvService::add_sub( void ) noexcept
         else {
           rcnt = this->poll.sub_route.add_pattern_route( h, this->fd,
                                                          cvt.prefixlen );
-          this->poll.notify_psub( h, buf, cvt.off, sub, cvt.prefixlen,
+          this->poll.notify_psub( h, cvt.out, cvt.off, sub, cvt.prefixlen,
                                   this->fd, rcnt, 'V' );
         }
       }
     }
   }
-}
 
+  if ( refcnt != 0 && ! is_restricted_subject( sub, len ) ) {
+    static const char start[] = "_RV.INFO.SYSTEM.LISTEN.START."; /* 16+13=29 */
+    uint8_t * buf;
+    char    * listen;
+    size_t    listenlen = 29 + len, /* start strlen + subject len */
+              size      = 256 + len + listenlen + 10; /* session size max 64 */
+
+    size   = align<size_t>( size, 8 );
+    this->msg_in.mem.alloc( size, &buf );
+    size  -= align<size_t>( listenlen + 1, 8 );
+    listen = (char *) &buf[ size ];
+    RvMsgWriter msg( buf, size );
+
+    msg.append_string( SARG( "ADV_CLASS" ), SARG( "INFO" ) );
+    msg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
+    /* skip prefix: _RV.INFO.SYSTEM. */
+    ::memcpy( listen, start, 29 );
+    ::memcpy( &listen[ 29 ], sub, len );
+    listen[ listenlen ] = '\0';
+    /* ADV_NAME is LISTEN.START.subject */
+    msg.append_string( SARG( "ADV_NAME" ), &listen[ 16 ], 13 + len + 1 );
+    msg.append_string( SARG( "id" ), this->session, this->session_len + 1 );
+    msg.append_string( SARG( "sub" ), sub, len + 1 );
+    msg.append_uint( SARG( "refcnt" ), refcnt );
+    size = msg.update_hdr();
+    EvPublish pub( listen, listenlen, NULL, 0, buf, size, this->fd,
+                   kv_crc_c( listen, listenlen, 0 ), NULL, 0,
+                   (uint8_t) RVMSG_TYPE_ID, 'p' );
+    this->poll.forward_msg( pub, NULL, 0, NULL );
+  }
+}
+/* when a 'C' message is received from the client, remove the subject and
+ * notify with by publishing a LISTEN.STOP */
 void
 EvRvService::rem_sub( void ) noexcept
 {
-  char   * sub = this->msg_in.sub;
-  uint32_t len = this->msg_in.sublen;
+  const char   * sub = this->msg_in.sub;
+  const uint32_t len = this->msg_in.sublen;
+  uint32_t refcnt = 0xffffffffU;
 
   if ( ! this->msg_in.is_wild ) {
     uint32_t h    = kv_crc_c( sub, len, 0 ),
              rcnt = 0;
-    if ( this->sub_tab.rem( h, sub, len ) == RV_SUB_OK ) {
-      if ( this->sub_tab.tab.find_by_hash( h ) == NULL )
-        rcnt = this->poll.sub_route.del_route( h, this->fd );
-      this->poll.notify_unsub( h, sub, len, this->fd, rcnt, 'V' );
+    if ( this->sub_tab.rem( h, sub, len, refcnt ) == RV_SUB_OK ) {
+      if ( refcnt == 0 ) {
+        if ( this->sub_tab.tab.find_by_hash( h ) == NULL )
+          rcnt = this->poll.sub_route.del_sub_route( h, this->fd );
+        this->poll.notify_unsub( h, sub, len, this->fd, rcnt, 'V' );
+      }
     }
   }
   else {
-    char             buf[ 1024 ];
-    PatternCvt       cvt( buf, sizeof( buf ) );
+    PatternCvt       cvt;
     RouteLoc         loc;
     RvPatternRoute * rt;
     uint32_t         h, rcnt;
@@ -465,24 +858,58 @@ EvRvService::rem_sub( void ) noexcept
       h = kv_crc_c( sub, cvt.prefixlen,
                     this->poll.sub_route.prefix_seed( cvt.prefixlen ) );
       if ( (rt = this->pat_tab.tab.find( h, sub, len, loc )) != NULL ) {
-        if ( rt->md != NULL ) {
-          pcre2_match_data_free( rt->md );
-          rt->md = NULL;
+        refcnt = --rt->refcnt;
+        if ( refcnt == 0 ) {
+          if ( rt->md != NULL ) {
+            pcre2_match_data_free( rt->md );
+            rt->md = NULL;
+          }
+          if ( rt->re != NULL ) {
+            pcre2_code_free( rt->re );
+            rt->re = NULL;
+          }
+          this->pat_tab.tab.remove( loc );
+          rcnt = this->poll.sub_route.del_pattern_route( h, this->fd,
+                                                         cvt.prefixlen );
+          this->poll.notify_punsub( h, cvt.out, cvt.off, sub, cvt.prefixlen,
+                                    this->fd, rcnt, 'V' );
         }
-        if ( rt->re != NULL ) {
-          pcre2_code_free( rt->re );
-          rt->re = NULL;
-        }
-        this->pat_tab.tab.remove( loc );
-        rcnt = this->poll.sub_route.del_pattern_route( h, this->fd,
-                                                       cvt.prefixlen );
-        this->poll.notify_punsub( h, buf, cvt.off, sub, cvt.prefixlen,
-                                  this->fd, rcnt, 'V' );
       }
     }
   }
-}
+  if ( refcnt != 0xffffffffU && ! is_restricted_subject( sub, len ) ) {
+    static const char stop[] = "_RV.INFO.SYSTEM.LISTEN.STOP."; /* 16+12=28 */
+    uint8_t * buf;
+    char    * listen;
+    size_t    listenlen = 28 + len, /* stop strlen + subject len */
+              size      = 256 + len + listenlen + 10; /* session size max 64 */
 
+    size   = align<size_t>( size, 8 );
+    this->msg_in.mem.alloc( size, &buf );
+    size  -= align<size_t>( listenlen + 1, 8 );
+    listen = (char *) &buf[ size ];
+    RvMsgWriter msg( buf, size );
+
+    msg.append_string( SARG( "ADV_CLASS" ), SARG( "INFO" ) );
+    msg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
+    /* skip prefix: _RV.INFO.SYSTEM. */
+    ::memcpy( listen, stop, 28 );
+    ::memcpy( &listen[ 28 ], sub, len );
+    listen[ listenlen ] = '\0';
+    /* ADV_NAME is LISTEN.START.subject */
+    msg.append_string( SARG( "ADV_NAME" ), &listen[ 16 ], 12 + len + 1 );
+    msg.append_string( SARG( "id" ), this->session, this->session_len + 1 );
+    msg.append_string( SARG( "sub" ), sub, len + 1 );
+    msg.append_uint( SARG( "refcnt" ), refcnt );
+    size = msg.update_hdr();
+
+    EvPublish pub( listen, listenlen, NULL, 0, buf, size, this->fd,
+                   kv_crc_c( listen, listenlen, 0 ), NULL, 0,
+                   (uint8_t) RVMSG_TYPE_ID, 'p' );
+    this->poll.forward_msg( pub, NULL, 0, NULL );
+  }
+}
+/* when client disconnects, unsubscribe everything */
 void
 EvRvService::rem_all_sub( void ) noexcept
 {
@@ -492,26 +919,29 @@ EvRvService::rem_all_sub( void ) noexcept
 
   if ( this->sub_tab.first( pos ) ) {
     do {
-      rcnt = this->poll.sub_route.del_route( pos.rt->hash, this->fd );
+      rcnt = this->poll.sub_route.del_sub_route( pos.rt->hash, this->fd );
       this->poll.notify_unsub( pos.rt->hash, pos.rt->value, pos.rt->len,
                                this->fd, rcnt, 'V' );
     } while ( this->sub_tab.next( pos ) );
   }
   if ( this->pat_tab.first( ppos ) ) {
-    char       buf[ 1024 ];
-    PatternCvt cvt( buf, sizeof( buf ) );
+    PatternCvt cvt;
     do {
       if ( cvt.convert_rv( ppos.rt->value, ppos.rt->len ) == 0 ) {
         rcnt = this->poll.sub_route.del_pattern_route( ppos.rt->hash,
                                                   this->fd, cvt.prefixlen );
-        this->poll.notify_punsub( ppos.rt->hash, buf, cvt.off,
+        this->poll.notify_punsub( ppos.rt->hash, cvt.out, cvt.off,
                                   ppos.rt->value, cvt.prefixlen,
                                   this->fd, rcnt, 'V' );
       }
     } while ( this->pat_tab.next( ppos ) );
   }
 }
-
+/* when a 'D' message is received from client, forward the message data,
+ * this also decapsulates the opaque data field and forwards the message
+ * with the correct message type attribute:
+ * old style { sub: FD.SEC.INST.EX, mtype: 'D', data: <message> }
+ * new style { sub: FD.SEC.INST.EX, mtype: 'D', data: { _data_ : <message> } }*/
 bool
 EvRvService::fwd_pub( void ) noexcept
 {
@@ -524,6 +954,7 @@ EvRvService::fwd_pub( void ) noexcept
   uint32_t msg_len = this->msg_in.data.fsize;
   uint8_t  ftype   = this->msg_in.data.ftype;
 
+/*  printf( "fwd %.*s\n", (int) sublen, sub );*/
   if ( ftype == MD_MESSAGE || ftype == (uint8_t) RVMSG_TYPE_ID ) {
     ftype = (uint8_t) RVMSG_TYPE_ID;
     MDMsg * m = RvMsg::opaque_extract( (uint8_t *) msg, 8, msg_len, NULL,
@@ -543,7 +974,9 @@ EvRvService::fwd_pub( void ) noexcept
                  this->fd, h, NULL, 0, ftype, 'p' );
   return this->poll.forward_msg( pub, NULL, 0, NULL );
 }
-
+/* a message from the network, forward if matched by a subscription only once
+ * as it may match multiple wild subscriptions as well as a normal sub
+ * each sub is looked up in order to increment the msg count */
 bool
 EvRvService::on_msg( EvPublish &pub ) noexcept
 {
@@ -578,7 +1011,8 @@ EvRvService::on_msg( EvPublish &pub ) noexcept
   }
   return true;
 }
-
+/* convert a hash into a subject, this does not process collisions,
+ * it is only informational */
 bool
 EvRvService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
 {
@@ -590,51 +1024,46 @@ EvRvService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
   ::memcpy( key, rt->value, keylen );
   return true;
 }
-
-void
-EvRvService::send( void *hdr,  size_t off,   const void *data,
-                   size_t data_len ) noexcept
-{
-#if 0
-  if ( off + data_len < 8 * 1024 ) {
-    uint8_t buf[ 8 * 1024 ];
-    MDOutput out;
-    ::memcpy( buf, hdr, off );
-    ::memcpy( &buf[ off ], data, data_len );
-    printf( "-> %lu ->\n", off + data_len );
-    out.print_hex( buf, off + data_len );
-  }
-#endif
-  this->append2( hdr, off, data, data_len );
-  this->bs += off + data_len;
-  this->ms++;
-}
-
+/* message from network, encapsulate the message into the client format:
+ * { mtype: 'D', sub: <subject>, data: <msg-data> }
+ */
 bool
 EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
 {
-  uint8_t      buf[ 8 * 1024 ];
-  RvMsgWriter  rvmsg( buf, sizeof( buf ) ),
+  uint8_t buf[ 2 * 1024 ], * b = buf;
+  size_t  buf_len = sizeof( buf );
+
+  if ( pub.subject_len > 2 * 1024 - 512 ) {
+    buf_len = pub.subject_len + 512;
+    b = (uint8_t *) this->alloc_temp( buf_len );
+    if ( b == NULL )
+      return true;
+  }
+
+  RvMsgWriter  rvmsg( b, buf_len ),
                submsg( NULL, 0 );
   size_t       off, msg_len;
   const void * msg;
 
-  rvmsg.append_string( "mtype", 6, "D", 2 );
+  rvmsg.append_string( SARG( "mtype" ), SARG( "D" ) );
   /* some subjects may not encode */
-  if ( rvmsg.append_subject( "sub", 4, pub.subject ) == 0 ) {
+  if ( rvmsg.append_subject( SARG( "sub" ), pub.subject,
+                             pub.subject_len ) == 0 ) {
     uint8_t msg_enc = pub.msg_enc;
+    /* depending on message type, encode the hdr to send to the client */
     switch ( msg_enc ) {
       case (uint8_t) RVMSG_TYPE_ID:
       do_rvmsg:;
-        rvmsg.append_msg( "data", 5, submsg );
-        off = rvmsg.off + submsg.off;
+        rvmsg.append_msg( SARG( "data" ), submsg );
+        off         = rvmsg.off + submsg.off;
         submsg.off += pub.msg_len - 8;
-        msg     = &((const uint8_t *) pub.msg)[ 8 ];
-        msg_len = pub.msg_len - 8;
+        msg         = &((const uint8_t *) pub.msg)[ 8 ];
+        msg_len     = pub.msg_len - 8;
         rvmsg.update_hdr( submsg );
         break;
 
       case MD_OPAQUE:
+      case MD_STRING:
       case (uint8_t) RAIMSG_TYPE_ID:
       case (uint8_t) TIB_SASS_TYPE_ID:
       case (uint8_t) TIB_SASS_FORM_TYPE_ID:
@@ -645,7 +1074,7 @@ EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
         static const char data_hdr[] = "\005data";
         ::memcpy( &buf[ rvmsg.off ], data_hdr, sizeof( data_hdr ) );
         rvmsg.off += sizeof( data_hdr );
-        buf[ rvmsg.off++ ] = 7/*RV_OPAQUE*/;
+        buf[ rvmsg.off++ ] = ( msg_enc == MD_STRING ) ? 8 : 7/*RV_OPAQUE*/;
         if ( msg_len <= 120 )
           buf[ rvmsg.off++ ] = (uint8_t) msg_len;
         else if ( msg_len + 2 < 30000 ) {
@@ -680,7 +1109,10 @@ EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
         break;
     }
     if ( off > 0 ) {
-      this->send( buf, off, msg, msg_len );
+      this->append2( buf, off, msg, msg_len );
+      this->stat.bs += off + msg_len;
+      this->stat.ms++;
+      /*this->send( buf, off, msg, msg_len );*/
       bool flow_good = ( this->pending() <= this->send_highwater );
       this->idle_push( flow_good ? EV_WRITE : EV_WRITE_HI );
       return flow_good;
@@ -710,48 +1142,110 @@ RvPatternMap::release( void ) noexcept
 }
 
 void
+EvRvService::process_close( void ) noexcept
+{
+  if ( this->state == DATA_RECV_SESSION ) {
+    uint8_t       buf[ 8 * 1024 ];
+    RvMsgWriter   rvmsg( buf, sizeof( buf ) );
+    char          subj[ 64 ];
+    size_t        sublen, size;
+    sublen = this->stat.pack_advisory( rvmsg, "_RV.INFO.SYSTEM.SESSION.STOP.",
+                                       subj, ADV_SESSION, this );
+    size  = rvmsg.update_hdr();
+    EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
+                   kv_crc_c( subj, sublen, 0 ), NULL, 0,
+                   (uint8_t) RVMSG_TYPE_ID, 'p' );
+    this->poll.forward_msg( pub, NULL, 0, NULL );
+  }
+  if ( --this->stat.active_clients == 0 )
+    this->stat.stop_network();
+}
+
+void
 EvRvService::release( void ) noexcept
 {
   this->rem_all_sub();
   this->sub_tab.release();
   this->pat_tab.release();
+  this->msg_in.release();
   this->EvConnection::release_buffers();
   this->poll.push_free_list( this );
 }
 
-void
-EvRvService::pub_session( uint8_t ) noexcept
+bool
+RvMsgIn::subject_to_string( const uint8_t *buf,  size_t buflen ) noexcept
 {
+  uint8_t segs;
+  size_t  i, j, k;
+
+  this->is_wild = false;
+  if ( buflen == 0 || buf[ 0 ] == 0 )
+    goto bad_subject;
+
+  j    = 1;
+  segs = buf[ 0 ];
+  k    = segs - 1;
+  for (;;) {
+    if ( j >= buflen || buf[ j ] < 2 ) {
+      if ( segs != 0 || j != buflen )
+        goto bad_subject;
+      break;
+    }
+    i  = j + 1;
+    j += buf[ j ];
+    k += j - ( i + 1 );
+    segs -= 1;
+  } 
+  if ( k > 0xffffU )
+    goto bad_subject;
+  if ( k + 1 > sizeof( this->sub_buf ) )
+    this->mem.alloc( k + 1, &this->sub );
+  else
+    this->sub = this->sub_buf;
+  segs = buf[ 0 ];
+  j = 1;
+  k = 0;
+  for (;;) {
+    i  = j + 1;
+    j += buf[ j ]; /* segment size is j - 1 - i */
+    /* if segment size is 1 */
+    if ( i + 2 == j ) {
+      if ( buf[ i ] == '*' ||
+           ( buf[ i ] == '>' && segs == 1 ) )
+        this->is_wild = true;
+    }
+    /* copy segment */
+    while ( i + 1 < j )
+      this->sub[ k++ ] = (char) buf[ i++ ];
+    /* terminate with . or \0 */
+    if ( --segs > 0 )
+      this->sub[ k++ ] = '.';
+    else
+      break;
+  } 
+  this->sub[ k ] = '\0';
+  this->sublen = k;
+  return true;
+
+bad_subject:;
+  this->sub      = this->sub_buf;
+  this->sub[ 0 ] = 0;
+  this->sublen   = 0;
+  return false;
 }
 
-static inline uint32_t
-copy_subj_in( const uint8_t *buf,  char *subj,  bool &is_wild )
+void
+RvMsgIn::print( void ) noexcept
 {
-  uint8_t segs = buf[ 0 ];
-  uint32_t i, j = 1, k = 0;
-
-  is_wild = false;
-  if ( segs > 0 ) {
-    for (;;) {
-      i  = j + 1;
-      j += buf[ j ];
-      if ( k + j - i >= RV_MAX_SUBJ_LEN - 2 )
-        break;
-      if ( i + 2 == j ) {
-        if ( buf[ i ] == '*' ||
-             ( buf[ i ] == '>' && segs == 1 ) )
-          is_wild = true;
-      }
-      while ( i + 1 < j )
-        subj[ k++ ] = (char) buf[ i++ ];
-      if ( --segs > 0 )
-        subj[ k++ ] = '.';
-      else
-        break;
-    } 
-  } 
-  subj[ k ] = '\0';
-  return k;
+  MDOutput mout;
+  printf( "----\n" );
+  printf( "msg_in(%s)", this->sub );
+  if ( this->reply != NULL )
+    printf( " reply: %s\n", this->reply );
+  else
+    printf( "\n" );
+  this->msg->print( &mout );
+  printf( "----\n" );
 }
 
 int
@@ -781,19 +1275,21 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
           return ERR_RV_REF;
         switch ( nm.fnamelen ) {
           case 4:
-            if ( ::memcmp( nm.fname, "sub", 4 ) == 0 ) {
-              this->sublen = copy_subj_in( mref.fptr, this->sub, this->is_wild );
-              cnt |= 1;
+            if ( ::memcmp( nm.fname, SARG( "sub" ) ) == 0 ) {
+              if ( this->subject_to_string( mref.fptr, mref.fsize ) )
+                cnt |= 1;
+              else
+                return ERR_RV_SUB;
             }
             break;
           case 5:
-            if ( ::memcmp( nm.fname, "data", 5 ) == 0 ) {
+            if ( ::memcmp( nm.fname, SARG( "data" ) ) == 0 ) {
               this->data = mref;
               cnt |= 8;
             }
             break;
           case 6:
-            if ( ::memcmp( nm.fname, "mtype", 6 ) == 0 ) {
+            if ( ::memcmp( nm.fname, SARG( "mtype" ) ) == 0 ) {
               if ( mref.ftype == MD_STRING && mref.fsize == 2 ) {
                 this->mtype = mref.fptr[ 0 ];
                 if ( this->mtype >= 'C' && this->mtype <= 'L' ) {
@@ -806,7 +1302,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
             }
             break;
           case 7:
-            if ( ::memcmp( nm.fname, "return", 7 ) == 0 ) {
+            if ( ::memcmp( nm.fname, SARG( "return" ) ) == 0 ) {
               this->reply    = (char *) mref.fptr;
               this->replylen = mref.fsize;
               if ( this->replylen > 0 && this->reply[ this->replylen ] == '\0' )
@@ -823,6 +1319,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
       status = ERR_RV_MTYPE; /* no mtype */
   }
   if ( ( cnt & 1 ) == 0 ) {
+    this->sub      = this->sub_buf;
     this->sub[ 0 ] = '\0';
     this->sublen = 0; /* no subject */
   }
@@ -837,53 +1334,3 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
   return status;
 }
 
-#if 0
-static inline uint32_t
-copy_subj_out( const char *subj,  uint8_t *buf,  uint32_t &hash )
-{
-  uint32_t i = 2, j = 1, segs = 1;
-  for ( ; *subj != '\0'; subj++ ) {
-    if ( *subj == '.' || i - j == 0xff ) {
-      buf[ i++ ] = 0;
-      buf[ j ]   = (uint8_t) ( i - j );
-      j = i++;
-      if ( ++segs == 0xff )
-        break;
-    }
-    else {
-      buf[ i++ ] = *subj;
-    }
-    if ( i > 1029 )
-      break;
-  }
-  buf[ i++ ] = 0;
-  buf[ j ]   = (uint8_t) ( i - j );
-  buf[ 0 ]   = (uint8_t) segs;
-  hash       = kv_crc_c( buf, i, 0 );
-  return i;
-}
-
-static inline uint32_t
-copy_subj_in2( const uint8_t *buf,  char *subj )
-{
-  uint8_t segs = buf[ 0 ];
-  uint32_t i, j = 1, k = 0;
-
-  if ( segs > 0 ) {
-    for (;;) {
-      i  = j + 1;
-      j += buf[ j ];
-      if ( k + j - i >= CAPR_MAX_SUBJ_LEN - 2 )
-        break;
-      while ( i + 1 < j )
-        subj[ k++ ] = (char) buf[ i++ ];
-      if ( --segs > 0 )
-        subj[ k++ ] = '.';
-      else
-        break;
-    } 
-  } 
-  subj[ k ] = '\0';
-  return k;
-}
-#endif
