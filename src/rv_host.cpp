@@ -17,6 +17,7 @@
 #include <linux/ip.h>
 #include <linux/if.h>
 #include <raikv/util.h>
+#include <raikv/ev_publish.h>
 #include <sassrv/ev_rv.h>
 
 using namespace rai;
@@ -71,8 +72,8 @@ RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
   this->zero_stats( kv_current_realtime_ns() );
   this->mcast = mc;
   for ( int i = 0; i < 8; i += 2 ) {
-    this->session_ip[ i ] = hexchar2( q[ i/2 ] >> 4 );
-    this->session_ip[ i+1 ] = hexchar2( q[ i/2+1 ] & 0xf );
+    this->session_ip[ i ] = hexchar2( ( q[ i/2 ] >> 4 ) & 0xf );
+    this->session_ip[ i+1 ] = hexchar2( q[ i/2 ] & 0xf );
   }
   this->session_ip[ this->session_ip_len ] = '\0';
   ::memcpy( this->daemon_id, this->session_ip, this->session_ip_len );
@@ -96,6 +97,65 @@ RvHost::stop_network( void ) noexcept
           this->network ); */
   this->listener.stop_host();
   this->network_started = false;
+}
+
+void
+RvHost::send_start( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept
+{
+  uint8_t     buf[ 8 * 1024 ];
+  RvMsgWriter rvmsg( buf, sizeof( buf ) );
+  char        subj[ 64 ];
+  size_t      sublen, size;
+
+  if ( snd_host ) {
+    static const char start[] = "_RV.INFO.SYSTEM.HOST.START.";
+    sublen = this->pack_advisory( rvmsg, start, subj, ADV_HOST_START, svc );
+    size   = rvmsg.update_hdr();
+    EvPublish pub( subj, sublen, NULL, 0, buf, size, this->listener.fd,
+                   kv_crc_c( subj, sublen, 0 ), NULL, 0,
+                   (uint8_t) RVMSG_TYPE_ID, 'p' );
+    this->listener.poll.forward_msg( pub, NULL, 0, NULL );
+    rvmsg.reset();
+  }
+  if ( snd_sess ) {
+    static const char sess[] = "_RV.INFO.SYSTEM.SESSION.START.";
+    sublen = this->pack_advisory( rvmsg, sess, subj, ADV_SESSION, svc );
+    size = rvmsg.update_hdr();
+    EvPublish pub( subj, sublen, NULL, 0, buf, size, this->listener.fd,
+                   kv_crc_c( subj, sublen, 0 ), NULL, 0,
+                   (uint8_t) RVMSG_TYPE_ID, 'p' );
+    this->listener.poll.forward_msg( pub, NULL, 0, NULL );
+  }
+}
+
+void
+RvHost::send_stop( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept
+{
+  uint8_t     buf[ 1024 ];
+  char        subj[ 64 ];
+  size_t      sublen,
+              size;
+  RvMsgWriter rvmsg( buf, sizeof( buf ) );
+
+  if ( snd_sess ) {
+    static const char sess[] = "_RV.INFO.SYSTEM.SESSION.STOP.";
+    sublen = this->pack_advisory( rvmsg, sess, subj, ADV_SESSION, svc );
+    size   = rvmsg.update_hdr();
+    EvPublish pub( subj, sublen, NULL, 0, buf, size, this->listener.fd,
+                   kv_crc_c( subj, sublen, 0 ), NULL, 0,
+                   (uint8_t) RVMSG_TYPE_ID, 'p' );
+    this->listener.poll.forward_msg( pub, NULL, 0, NULL );
+    rvmsg.reset();
+  }
+  if ( snd_host ) {
+    static const char stop[] = "_RV.INFO.SYSTEM.HOST.STOP.";
+    sublen = this->pack_advisory( rvmsg, stop, subj, ADV_HOST_STOP, svc );
+    size   = rvmsg.update_hdr();
+    EvPublish pub( subj, sublen, NULL, 0, buf, size, this->listener.fd,
+                   kv_crc_c( subj, sublen, 0 ), NULL, 0,
+                   (uint8_t) RVMSG_TYPE_ID, 'p' );
+    this->listener.poll.forward_msg( pub, NULL, 0, NULL );
+  }
 }
 
 size_t

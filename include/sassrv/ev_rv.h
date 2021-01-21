@@ -287,6 +287,7 @@ struct EvRvService : public kv::EvConnection {
                vmaj,           /* vhat version of client is connected */
                vmin,
                vupd;
+  bool         host_started;
   uint64_t     timer_id;       /* timerid unique for this service */
 
   EvRvService( kv::EvPoll &p,  const uint8_t t,
@@ -303,6 +304,7 @@ struct EvRvService : public kv::EvConnection {
   void send_info( bool agree ) noexcept; /* info rec during connection start */
   int dispatch_msg( void *msg,  size_t msg_len ) noexcept; /* route msgs */
   int respond_info( void ) noexcept; /* parse and reply info msg ('I') */
+  void send_start( bool snd_host,  bool snd_sess ) noexcept;
   void add_sub( void ) noexcept;     /* add subscription ('L') */
   void rem_sub( void ) noexcept;     /* unsubscribe subject ('C') */
   void rem_all_sub( void ) noexcept; /* when client disconnects, this clears */
@@ -310,8 +312,10 @@ struct EvRvService : public kv::EvConnection {
   /* forward a message from network to client */
   bool fwd_msg( kv::EvPublish &pub,  const void *sid,  size_t sid_len ) noexcept;
   /* EvSocket */
+  virtual void read( void ) noexcept final;
   virtual void process( void ) noexcept final;
   virtual void process_close( void ) noexcept final;
+  virtual void process_shutdown( void ) noexcept final;
   virtual void release( void ) noexcept final;
   virtual bool timer_expire( uint64_t tid, uint64_t eid ) noexcept final;
   virtual bool hash_to_sub( uint32_t h, char *k, size_t &klen ) noexcept final;

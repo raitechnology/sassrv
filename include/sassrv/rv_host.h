@@ -90,9 +90,9 @@ struct RvHost {
                network[ MAX_NETWORK_LEN ], /* network string */
                service[ MAX_SERVICE_LEN ]; /* service string */
   uint16_t     host_len,          /* len of above */
-               daemon_len,
-               network_len,
-               service_len,
+               daemon_len,        /* len of this->daomon_id[] */
+               network_len,       /* len of this->network[] */
+               service_len,       /* len of this->service[] */
                service_port,      /* service in network order */
                ipport;            /* tcp listen port, network order */
   bool         network_started;   /* if start_network() called and succeeded */
@@ -120,6 +120,8 @@ struct RvHost {
   RvHostError start_network( const RvMcast &mc,  const char *net,
                              size_t net_len,  const char *svc,
                              size_t svc_len ) noexcept;
+  void send_start( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept;
+  void send_stop( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept;
   void stop_network( void ) noexcept;
   size_t pack_advisory( md::RvMsgWriter &msg,  const char *subj_prefix,
                         char *subj_buf,  int flags,

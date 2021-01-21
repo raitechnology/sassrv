@@ -131,6 +131,8 @@ EvRvListen::accept( void ) noexcept
   ver_rec[ 1 ] = get_u32<MD_BIG>( &ver_rec[ 1 ] ); /* flip */
   c->append( ver_rec, sizeof( ver_rec ) );
   c->idle_push( EV_WRITE_HI );
+  if ( this->host_status_timer != 0 )
+    c->host_started = true;
   /*this->poll.add_timer_seconds( c->fd, 5, c->timer_id, 0 );*/
   return true;
 }
@@ -149,7 +151,7 @@ void
 EvRvListen::host_status( void ) noexcept
 {
   static const char status[] = "_RV.INFO.SYSTEM.HOST.STATUS.";
-  uint8_t     buf[ 1024 ];
+  uint8_t     buf[ 8192 ];
   char        subj[ 64 ];
   size_t      sublen,
               size;
@@ -163,47 +165,49 @@ EvRvListen::host_status( void ) noexcept
   this->poll.forward_msg( pub, NULL, 0, NULL );
 }
 
+void
+EvRvService::read( void ) noexcept
+{
+  /* if host not started, wait for that event before reading pub/sub data */
+  if ( this->host_started || this->state <= DATA_RECV ) {
+    this->EvConnection::read();
+    return;
+  }
+  this->pop3( EV_READ, EV_READ_HI, EV_READ_LO );
+}
+
 int
 EvRvListen::start_host( void ) noexcept
 {
-  static const char start[] = "_RV.INFO.SYSTEM.HOST.START.";
-  uint8_t     buf[ 1024 ];
-  char        subj[ 64 ];
-  size_t      sublen,
-              size;
-  RvMsgWriter msg( buf, sizeof( buf ) );
   /* subscribe _INBOX.DAEMON.iphex */
   this->subscribe_daemon_inbox();
-  sublen = this->pack_advisory( msg, start, subj, ADV_HOST_START, NULL );
-  size   = msg.update_hdr();
-  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
-                 kv_crc_c( subj, sublen, 0 ), NULL, 0,
-                 (uint8_t) RVMSG_TYPE_ID, 'p' );
-  this->poll.forward_msg( pub, NULL, 0, NULL );
   /* start timer to send the status every 90 seconds */
   this->host_status_timer = ++this->host_network_start;
   this->poll.add_timer_seconds( this->fd, RV_STATUS_IVAL, 0,
                                 this->host_status_timer );
+  PeerMatchArgs ka;
+  PeerMatchIter iter( *this, ka );
+  ka.type     = "rv";
+  ka.type_len = 2;
+  bool do_h = true;
+  for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService *svc = (EvRvService *) p;
+    svc->host_started = true;
+    /* advise host + session start, then restart reading from clients */
+    this->send_start( do_h, svc->state == EvRvService::DATA_RECV_SESSION, svc );
+    do_h = false; /* only start host once */
+    svc->idle_push( EV_READ );
+  }
   return 0;
 }
 
 int
 EvRvListen::stop_host( void ) noexcept
 {
-  static const char stop[] = "_RV.INFO.SYSTEM.HOST.STOP.";
-  uint8_t     buf[ 1024 ];
-  char        subj[ 64 ];
-  size_t      sublen,
-              size;
-  RvMsgWriter msg( buf, sizeof( buf ) );
   /* unsubscribe _INBOX.DAEMON.iphex */
   this->unsubscribe_daemon_inbox();
-  sublen = this->pack_advisory( msg, stop, subj, ADV_HOST_STOP, NULL );
-  size   = msg.update_hdr();
-  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
-                 kv_crc_c( subj, sublen, 0 ), NULL, 0,
-                 (uint8_t) RVMSG_TYPE_ID, 'p' );
-  this->poll.forward_msg( pub, NULL, 0, NULL );
+  /* advise host stop */
+  this->send_stop( true, false, NULL );
   /* stop the timer, the timer_expire() function tests this */
   this->host_status_timer = 0;
   return 0;
@@ -400,7 +404,7 @@ EvRvListen::on_msg( EvPublish &pub ) noexcept
   if ( pub.reply_len == 0 || pub.msg_enc != (uint8_t) RVMSG_TYPE_ID )
     return true;
   MDMsgMem     mem;
-  MDOutput     mout;
+  /*MDOutput     mout;*/
   RvMsg       * m;
   MDFieldIter * it;
   MDReference   mref;
@@ -419,9 +423,10 @@ EvRvListen::on_msg( EvPublish &pub ) noexcept
           }
           else if ( match_string( SARG( "subscriptions" ), mref ) ) {
             if ( it->find( SARG( "session" ), mref ) == 0 ) {
-              if ( mref.ftype == MD_STRING )
+              if ( mref.ftype == MD_STRING ) {
                 this->send_subscriptions( (const char *) mref.fptr,
                                          mref.fsize, pub.reply, pub.reply_len );
+              }
             }
           }
         }
@@ -706,18 +711,9 @@ EvRvService::respond_info( void ) noexcept
       this->state = DATA_RECV; /* continue, need another info message */
     }
   }
-  if ( this->state == DATA_RECV_SESSION ) { /* start the session, only rv5 */
-    char   subj[ 64 ];
-    size_t sublen;
-    rvmsg.reset();
-    sublen = this->stat.pack_advisory( rvmsg, "_RV.INFO.SYSTEM.SESSION.START.",
-                                       subj, ADV_SESSION, this );
-    size = rvmsg.update_hdr();
-    EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
-                   kv_crc_c( subj, sublen, 0 ), NULL, 0,
-                   (uint8_t) RVMSG_TYPE_ID, 'p' );
-    this->poll.forward_msg( pub, NULL, 0, NULL );
-  }
+  /* if host started already, send session start if rv5 */
+  if ( this->host_started && this->state == DATA_RECV_SESSION )
+    this->stat.send_start( false, true, this );
   return 0;
 }
 
@@ -822,7 +818,8 @@ EvRvService::add_sub( void ) noexcept
     msg.append_string( SARG( "sub" ), sub, len + 1 );
     msg.append_uint( SARG( "refcnt" ), refcnt );
     size = msg.update_hdr();
-    EvPublish pub( listen, listenlen, NULL, 0, buf, size, this->fd,
+    EvPublish pub( listen, listenlen, this->msg_in.reply, this->msg_in.replylen,
+                   buf, size, this->fd,
                    kv_crc_c( listen, listenlen, 0 ), NULL, 0,
                    (uint8_t) RVMSG_TYPE_ID, 'p' );
     this->poll.forward_msg( pub, NULL, 0, NULL );
@@ -1033,8 +1030,8 @@ EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
   uint8_t buf[ 2 * 1024 ], * b = buf;
   size_t  buf_len = sizeof( buf );
 
-  if ( pub.subject_len > 2 * 1024 - 512 ) {
-    buf_len = pub.subject_len + 512;
+  if ( pub.subject_len + pub.reply_len > 2 * 1024 - 512 ) {
+    buf_len = pub.subject_len + pub.reply_len + 512;
     b = (uint8_t *) this->alloc_temp( buf_len );
     if ( b == NULL )
       return true;
@@ -1044,11 +1041,30 @@ EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
                submsg( NULL, 0 );
   size_t       off, msg_len;
   const void * msg;
+  int          status;
 
-  rvmsg.append_string( SARG( "mtype" ), SARG( "D" ) );
+  status = rvmsg.append_subject( SARG( "sub" ), pub.subject,
+                                 pub.subject_len );
   /* some subjects may not encode */
-  if ( rvmsg.append_subject( SARG( "sub" ), pub.subject,
-                             pub.subject_len ) == 0 ) {
+  if ( status == 0 ) {
+    const char * mtype = "D"; /* data */
+    if ( pub.subject_len > 16 && pub.subject[ 0 ] == '_' ) {
+      if ( ::memcmp( "_RV.INFO.SYSTEM.", pub.subject, 16 ) == 0 ) {
+        /* HOST.START, SESSION.START, LISTEN.START, UNREACHABLE.TRANSPORT */
+        if ( ::memcmp( "HOST.", &pub.subject[ 16 ], 5 ) == 0 ||
+             ::memcmp( "SESSION.", &pub.subject[ 16 ], 8 ) == 0 ||
+             ::memcmp( "LISTEN.", &pub.subject[ 16 ], 7 ) == 0 ||
+             ::memcmp( "UNREACHABLE.", &pub.subject[ 16 ], 12 ) == 0 )
+          mtype = "A"; /* advisory */
+      }
+    }
+    status = rvmsg.append_string( SARG( "mtype" ), mtype, 2 );
+  }
+  if ( status == 0 && pub.reply_len > 0 )
+    status = rvmsg.append_string( SARG( "return" ), (const char *) pub.reply,
+                                  pub.reply_len + 1 );
+    
+  if ( status == 0 ) {
     uint8_t msg_enc = pub.msg_enc;
     /* depending on message type, encode the hdr to send to the client */
     switch ( msg_enc ) {
@@ -1075,7 +1091,7 @@ EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
         ::memcpy( &buf[ rvmsg.off ], data_hdr, sizeof( data_hdr ) );
         rvmsg.off += sizeof( data_hdr );
         buf[ rvmsg.off++ ] = ( msg_enc == MD_STRING ) ? 8 : 7/*RV_OPAQUE*/;
-        if ( msg_len <= 120 )
+        if ( msg_len < 120 )
           buf[ rvmsg.off++ ] = (uint8_t) msg_len;
         else if ( msg_len + 2 < 30000 ) {
           buf[ rvmsg.off++ ] = 121;
@@ -1103,7 +1119,13 @@ EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
           goto do_tibmsg;
         /* FALLTHRU */
       default:
-        off     = 0;
+        if ( pub.msg_len == 0 ) {
+          off = rvmsg.off;
+          rvmsg.update_hdr();
+        }
+        else {
+          off = 0;
+        }
         msg     = NULL;
         msg_len = 0;
         break;
@@ -1116,6 +1138,10 @@ EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
       bool flow_good = ( this->pending() <= this->send_highwater );
       this->idle_push( flow_good ? EV_WRITE : EV_WRITE_HI );
       return flow_good;
+    }
+    else {
+      fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %lu\n",
+               msg_enc, (int) pub.subject_len, pub.subject, off );
     }
   }
   return true;
@@ -1142,21 +1168,16 @@ RvPatternMap::release( void ) noexcept
 }
 
 void
+EvRvService::process_shutdown( void ) noexcept
+{
+  this->EvConnection::process_shutdown();
+}
+
+void
 EvRvService::process_close( void ) noexcept
 {
-  if ( this->state == DATA_RECV_SESSION ) {
-    uint8_t       buf[ 8 * 1024 ];
-    RvMsgWriter   rvmsg( buf, sizeof( buf ) );
-    char          subj[ 64 ];
-    size_t        sublen, size;
-    sublen = this->stat.pack_advisory( rvmsg, "_RV.INFO.SYSTEM.SESSION.STOP.",
-                                       subj, ADV_SESSION, this );
-    size  = rvmsg.update_hdr();
-    EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
-                   kv_crc_c( subj, sublen, 0 ), NULL, 0,
-                   (uint8_t) RVMSG_TYPE_ID, 'p' );
-    this->poll.forward_msg( pub, NULL, 0, NULL );
-  }
+  if ( this->state == DATA_RECV_SESSION )
+    this->stat.send_stop( false, true, this );
   if ( --this->stat.active_clients == 0 )
     this->stat.stop_network();
 }
@@ -1305,7 +1326,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
             if ( ::memcmp( nm.fname, SARG( "return" ) ) == 0 ) {
               this->reply    = (char *) mref.fptr;
               this->replylen = mref.fsize;
-              if ( this->replylen > 0 && this->reply[ this->replylen ] == '\0' )
+              if ( this->replylen > 0 /*&& this->reply[ this->replylen - 1 ] == '\0'*/ )
                 this->replylen--;
               cnt |= 4;
             }
