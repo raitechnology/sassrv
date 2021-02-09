@@ -835,12 +835,14 @@ EvRvService::rem_sub( void ) noexcept
   uint32_t refcnt = 0xffffffffU;
 
   if ( ! this->msg_in.is_wild ) {
-    uint32_t h    = kv_crc_c( sub, len, 0 ),
-             rcnt = 0;
+    uint32_t h = kv_crc_c( sub, len, 0 ),
+             rcnt;
     if ( this->sub_tab.rem( h, sub, len, refcnt ) == RV_SUB_OK ) {
       if ( refcnt == 0 ) {
         if ( this->sub_tab.tab.find_by_hash( h ) == NULL )
           rcnt = this->poll.sub_route.del_sub_route( h, this->fd );
+        else
+          rcnt = this->poll.sub_route.get_sub_route_count( h );
         this->poll.notify_unsub( h, sub, len, this->fd, rcnt, 'V' );
       }
     }
@@ -1080,6 +1082,14 @@ EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
 
       case MD_OPAQUE:
       case MD_STRING:
+        if ( RvMsg::is_rvmsg( (void *) pub.msg, 0, pub.msg_len, 0 ) )
+          goto do_rvmsg;
+        if ( msg_enc == MD_STRING ) {
+          if ( TibMsg::is_tibmsg( (void *) pub.msg, 0, pub.msg_len, 0 ) ||
+             TibSassMsg::is_tibsassmsg( (void *) pub.msg, 0, pub.msg_len, 0 ) )
+            msg_enc = MD_OPAQUE;
+        }
+        /* FALLTHRU */
       case (uint8_t) RAIMSG_TYPE_ID:
       case (uint8_t) TIB_SASS_TYPE_ID:
       case (uint8_t) TIB_SASS_FORM_TYPE_ID:
