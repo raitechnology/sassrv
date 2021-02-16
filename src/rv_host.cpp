@@ -163,19 +163,18 @@ RvHost::pack_advisory( RvMsgWriter &msg,  const char *subj_prefix,
                        char *subj_buf,  int flags,
                        EvRvService *svc ) noexcept
 {
-  size_t len, sublen;
+  size_t sublen;
 
   ::strcpy( subj_buf, subj_prefix );
-  len = ::strlen( subj_buf );
-  ::memcpy( &subj_buf[ len ], this->session_ip, this->session_ip_len );
-  len += this->session_ip_len;
-  subj_buf[ len ] = '\0';
-  sublen = len + 16;
+  sublen = ::strlen( subj_buf );
+  ::memcpy( &subj_buf[ sublen ], this->session_ip, this->session_ip_len );
+  sublen += this->session_ip_len;
+  subj_buf[ sublen ] = '\0';
 
   msg.append_string( SARG( "ADV_CLASS" ), SARG( "INFO" ) );
   msg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
   /* skip prefix: _RV.INFO.SYSTEM. */
-  msg.append_string( SARG( "ADV_NAME" ), &subj_buf[ 16 ], len + 1 );
+  msg.append_string( SARG( "ADV_NAME" ), &subj_buf[ 16 ], sublen - 16 + 1 );
 
   if ( ( flags & ADV_HOSTADDR ) != 0 )
     msg.append_ipdata( SARG( "hostaddr" ), this->mcast.host_ip );

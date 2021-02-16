@@ -9,6 +9,7 @@ extern "C" {
 
 #include <raikv/ev_tcp.h>
 #include <raikv/route_ht.h>
+#include <raikv/dlinklist.h>
 #include <sassrv/rv_host.h>
 
 namespace rai {
@@ -150,24 +151,50 @@ struct RvSubMap {
     return pos.rt != NULL;
   }
 };
-/* an entry in the pattern subscribe table */
-struct RvPatternRoute {
-  uint32_t                  hash,       /* hash of the pattern prefix */
-                            msg_cnt;    /* count of msgs matched */
+/* match wild, list of these for each pattern prefix */
+struct RvWildMatch {
+  RvWildMatch             * next,
+                          * back;
   pcre2_real_code_8       * re;         /* pcre match the subject */
   pcre2_real_match_data_8 * md;
-  uint32_t                  refcnt;     /* how many times subscribed */
+  uint32_t                  msg_cnt,    /* count of msgs matched */
+                            refcnt;     /* how many times subscribed */
   uint16_t                  len;        /* length of the pattern subject */
   char                      value[ 2 ]; /* the pattern subject */
+
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  void operator delete( void *ptr ) { ::free( ptr ); }
+  RvWildMatch( uint16_t patlen,  const char *pat,  pcre2_real_code_8 *r,
+               pcre2_real_match_data_8 *m )
+    : next( 0 ), back( 0 ), re( r ), md( m ), msg_cnt( 0 ),
+      refcnt( 1 ), len( patlen ) {
+    ::memcpy( this->value, pat, patlen );
+    this->value[ patlen ] = '\0';
+  }
+  uint16_t segments( void ) const {
+    return count_segments( this->value, this->len );
+  }
+  static RvWildMatch *create( uint16_t patlen,  const char *pat,
+                           pcre2_real_code_8 *r, pcre2_real_match_data_8 *m ) {
+    size_t sz = sizeof( RvWildMatch ) + patlen - 2;
+    void * p  = ::malloc( sz );
+    if ( p == NULL ) return NULL;
+    return new ( p ) RvWildMatch( patlen, pat, r, m );
+  }
+};
+/* an entry in the pattern subscribe table */
+struct RvPatternRoute {
+  uint32_t                   hash,       /* hash of the pattern prefix */
+                             count;
+  kv::DLinkList<RvWildMatch> list;
+  uint16_t                   len;        /* length of the pattern subject */
+  char                       value[ 2 ]; /* the pattern subject */
 
   bool equals( const void *s,  uint16_t l ) const {
     return l == this->len && ::memcmp( s, this->value, l ) == 0;
   }
   void copy( const void *s,  uint16_t l ) {
     ::memcpy( this->value, s, l );
-  }
-  uint16_t segments( void ) const {
-    return count_segments( this->value, this->len );
   }
 };
 
@@ -179,32 +206,34 @@ struct RvPatternRoutePos {
 /* a pattern subscribe table */
 struct RvPatternMap {
   kv::RouteVec<RvPatternRoute> tab;
+  size_t sub_count;
 
+  RvPatternMap() : sub_count( 0 ) {}
   bool is_null( void ) const {
     return this->tab.vec_size == 0;
-  }
-  size_t sub_count( void ) const {
-    return this->tab.pop_count();
   }
   void release( void ) noexcept;
   /* put in new sub
    * tab[ sub ] => {cnt} */
   RvSubStatus put( uint32_t h,  const char *sub,  size_t len,
-                   RvPatternRoute *&rt,  uint32_t &cnt ) {
+                   RvPatternRoute *&rt ) {
     kv::RouteLoc loc;
     rt = this->tab.upsert( h, sub, len, loc );
     if ( rt == NULL )
       return RV_SUB_NOT_FOUND;
     if ( loc.is_new ) {
-      rt->msg_cnt = 0;
-      rt->re = NULL;
-      rt->md = NULL;
-      rt->refcnt = 1;
-      cnt = 1;
+      rt->count = 0;
+      rt->list.init();
       return RV_SUB_OK;
     }
-    cnt = ++rt->refcnt;
     return RV_SUB_EXISTS;
+  }
+  RvSubStatus find( uint32_t h,  const char *sub,  size_t len,
+                    RvPatternRoute *&rt ) {
+    rt = this->tab.find( h, sub, len );
+    if ( rt == NULL )
+      return RV_SUB_NOT_FOUND;
+    return RV_SUB_OK;
   }
   /* iterate first tab[ sub ] */
   bool first( RvPatternRoutePos &pos ) {
@@ -310,7 +339,7 @@ struct EvRvService : public kv::EvConnection {
   void rem_all_sub( void ) noexcept; /* when client disconnects, this clears */
   bool fwd_pub( void ) noexcept;     /* fwd a message from client to network */
   /* forward a message from network to client */
-  bool fwd_msg( kv::EvPublish &pub,  const void *sid,  size_t sid_len ) noexcept;
+  bool fwd_msg( kv::EvPublish &pub ) noexcept;
   /* EvSocket */
   virtual void read( void ) noexcept final;
   virtual void process( void ) noexcept final;
@@ -350,14 +379,19 @@ struct RvServiceLink {
     return true;
   }
   /* used to uniquely identify a list of patterns among a list of sessions */
-  bool check_pattern( const char *pat,  uint16_t len,  uint32_t hash ) {
+  bool check_pattern( const char *pat,  uint16_t len,  uint32_t hash,
+                      RvWildMatch *check ) {
     if ( is_restricted_subject( pat, len ) )
       return false;
-    this->set( hash );
     for ( RvServiceLink *link = this->back; link != NULL; link = link->back ) {
-      if ( link->test( hash ) != 0 )
-        if ( link->svc.pat_tab.tab.find( hash, pat, len ) != NULL )
-          return false;
+      RvPatternRoute * rt;
+      if ( (rt = link->svc.pat_tab.tab.find( hash, pat, len )) != NULL ) {
+        for ( RvWildMatch *m = rt->list.hd; m != NULL; m = m->next ) {
+          if ( m->len == check->len &&
+               ::memcmp( m->value, check->value, m->len ) == 0 )
+            return false;
+        }
+      }
     }
     return true;
   }

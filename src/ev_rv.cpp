@@ -162,7 +162,7 @@ EvRvListen::host_status( void ) noexcept
   EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
                  kv_crc_c( subj, sublen, 0 ), NULL, 0,
                  (uint8_t) RVMSG_TYPE_ID, 'p' );
-  this->poll.forward_msg( pub, NULL, 0, NULL );
+  this->poll.forward_msg( pub );
 }
 
 void
@@ -301,7 +301,7 @@ EvRvListen::send_sessions( const void *reply,  size_t reply_len ) noexcept
   EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
                  this->fd, kv_crc_c( reply, reply_len, 0 ), NULL, 0,
                  (uint8_t) RVMSG_TYPE_ID, 'p' );
-  this->poll.forward_msg( pub, NULL, 0, NULL );
+  this->poll.forward_msg( pub );
 }
 
 void
@@ -327,7 +327,7 @@ EvRvListen::send_subscriptions( const char *session,  size_t session_len,
       void * p;
       mem.alloc( sizeof( RvServiceLink ), &p );
       RvServiceLink *link = new ( p ) RvServiceLink( svc );
-      size_t n = svc->sub_tab.sub_count() + svc->pat_tab.sub_count();
+      size_t n = svc->sub_tab.sub_count() + svc->pat_tab.sub_count;
       if ( n > subcnt ) {
         list.push_hd( link );
         subcnt = n;
@@ -353,9 +353,11 @@ EvRvListen::send_subscriptions( const char *session,  size_t session_len,
       }
       if ( s.pat_tab.first( ppos ) ) {
         do {
-          if ( link->check_pattern( ppos.rt->value, ppos.rt->len,
-                                    ppos.rt->hash ) )
-            buflen += ppos.rt->len + 8 + ppos.rt->segments() * 2;
+          for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
+            if ( link->check_pattern( ppos.rt->value, ppos.rt->len,
+                                      ppos.rt->hash, m ) )
+              buflen += m->len + 8 + m->segments() * 2;
+          }
         } while ( s.pat_tab.next( ppos ) );
       }
     }
@@ -380,9 +382,11 @@ EvRvListen::send_subscriptions( const char *session,  size_t session_len,
       }
       if ( s.pat_tab.first( ppos ) ) {
         do {
-          if ( link->check_pattern( ppos.rt->value, ppos.rt->len,
-                                    ppos.rt->hash ) )
-            msg.append_subject( NULL, 0, ppos.rt->value, ppos.rt->len );
+          for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
+            if ( link->check_pattern( ppos.rt->value, ppos.rt->len,
+                                      ppos.rt->hash, m ) )
+              msg.append_subject( NULL, 0, m->value, m->len );
+          }
         } while ( s.pat_tab.next( ppos ) );
       }
     }
@@ -395,13 +399,13 @@ EvRvListen::send_subscriptions( const char *session,  size_t session_len,
   EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
                  this->fd, kv_crc_c( reply, reply_len, 0 ), NULL, 0,
                  (uint8_t) RVMSG_TYPE_ID, 'p' );
-  this->poll.forward_msg( pub, NULL, 0, NULL );
+  this->poll.forward_msg( pub );
 }
 
 bool
 EvRvListen::on_msg( EvPublish &pub ) noexcept
 {
-  if ( pub.reply_len == 0 || pub.msg_enc != (uint8_t) RVMSG_TYPE_ID )
+  if ( pub.reply_len == 0 /*|| pub.msg_enc != (uint8_t) RVMSG_TYPE_ID*/ )
     return true;
   MDMsgMem     mem;
   /*MDOutput     mout;*/
@@ -765,34 +769,54 @@ EvRvService::add_sub( void ) noexcept
     if ( cvt.convert_rv( sub, len ) == 0 ) {
       h = kv_crc_c( sub, cvt.prefixlen,
                     this->poll.sub_route.prefix_seed( cvt.prefixlen ) );
-      if ( this->pat_tab.put( h, sub, len, rt, refcnt ) == RV_SUB_OK ) {
-        size_t erroff;
-        int    error;
-        rt->re =
-          pcre2_compile( (uint8_t *) cvt.out, cvt.off, 0, &error, &erroff, 0 );
-        if ( rt->re == NULL ) {
-          fprintf( stderr, "re failed\n" );
-        }
-        else {
-          rt->md = pcre2_match_data_create_from_pattern( rt->re, NULL );
-          if ( rt->md == NULL ) {
-            pcre2_code_free( rt->re );
-            rt->re = NULL;
-            fprintf( stderr, "md failed\n" );
+      if ( this->pat_tab.put( h, sub, cvt.prefixlen, rt ) != RV_SUB_NOT_FOUND ){
+        RvWildMatch * m;
+        for ( m = rt->list.hd; m != NULL; m = m->next ) {
+          if ( m->len == len && ::memcmp( sub, m->value, len ) == 0 ) {
+            refcnt = ++m->refcnt;
+            break;
           }
         }
-        if ( rt->re == NULL )
-          this->pat_tab.tab.remove( h, sub, len );
-        else {
-          rcnt = this->poll.sub_route.add_pattern_route( h, this->fd,
-                                                         cvt.prefixlen );
-          this->poll.notify_psub( h, cvt.out, cvt.off, sub, cvt.prefixlen,
-                                  this->fd, rcnt, 'V' );
+        if ( m == NULL ) {
+          pcre2_real_code_8       * re = NULL;
+          pcre2_real_match_data_8 * md = NULL;
+          size_t erroff;
+          int    error;
+          refcnt = 1;
+          re = pcre2_compile( (uint8_t *) cvt.out, cvt.off, 0, &error,
+                              &erroff, 0 );
+          if ( re == NULL ) {
+            fprintf( stderr, "re failed\n" );
+          }
+          else {
+            md = pcre2_match_data_create_from_pattern( re, NULL );
+            if ( md == NULL )
+              fprintf( stderr, "md failed\n" );
+          }
+          if ( re != NULL && md != NULL &&
+               (m = RvWildMatch::create( len, sub, re, md )) != NULL ) {
+            rt->list.push_hd( m );
+            rcnt = this->poll.sub_route.add_pattern_route( h, this->fd,
+                                                           cvt.prefixlen );
+            this->poll.notify_psub( h, cvt.out, cvt.off, sub, cvt.prefixlen,
+                                    this->fd, rt->count + rcnt, 'V' );
+            rt->count++;
+            this->pat_tab.sub_count++;
+          }
+          else {
+            fprintf( stderr, "wildcard failed\n" );
+            if ( rt->count == 0 )
+              this->pat_tab.tab.remove( h, sub, len );
+            if ( md != NULL )
+              pcre2_match_data_free( md );
+            if ( re != NULL )
+              pcre2_code_free( re );
+          }
         }
       }
     }
   }
-
+  /* if first ref & no listen starts on restricted subjects _RV. _INBOX. */
   if ( refcnt != 0 && ! is_restricted_subject( sub, len ) ) {
     static const char start[] = "_RV.INFO.SYSTEM.LISTEN.START."; /* 16+13=29 */
     uint8_t * buf;
@@ -818,11 +842,12 @@ EvRvService::add_sub( void ) noexcept
     msg.append_string( SARG( "sub" ), sub, len + 1 );
     msg.append_uint( SARG( "refcnt" ), refcnt );
     size = msg.update_hdr();
+
     EvPublish pub( listen, listenlen, this->msg_in.reply, this->msg_in.replylen,
                    buf, size, this->fd,
                    kv_crc_c( listen, listenlen, 0 ), NULL, 0,
                    (uint8_t) RVMSG_TYPE_ID, 'p' );
-    this->poll.forward_msg( pub, NULL, 0, NULL );
+    this->poll.forward_msg( pub );
   }
 }
 /* when a 'C' message is received from the client, remove the subject and
@@ -856,26 +881,38 @@ EvRvService::rem_sub( void ) noexcept
     if ( cvt.convert_rv( sub, len ) == 0 ) {
       h = kv_crc_c( sub, cvt.prefixlen,
                     this->poll.sub_route.prefix_seed( cvt.prefixlen ) );
-      if ( (rt = this->pat_tab.tab.find( h, sub, len, loc )) != NULL ) {
-        refcnt = --rt->refcnt;
-        if ( refcnt == 0 ) {
-          if ( rt->md != NULL ) {
-            pcre2_match_data_free( rt->md );
-            rt->md = NULL;
+      if ( (rt = this->pat_tab.tab.find( h, sub, cvt.prefixlen,
+                                         loc )) != NULL ) {
+        for ( RvWildMatch *m = rt->list.hd; m != NULL; m = m->next ) {
+          if ( m->len == len && ::memcmp( m->value, sub, len ) == 0 ) {
+            refcnt = --m->refcnt;
+            if ( refcnt == 0 ) {
+              if ( m->md != NULL ) {
+                pcre2_match_data_free( m->md );
+                m->md = NULL;
+              }
+              if ( m->re != NULL ) {
+                pcre2_code_free( m->re );
+                m->re = NULL;
+              }
+              rt->list.pop( m );
+              rt->count -= 1;
+              rcnt = this->poll.sub_route.del_pattern_route( h, this->fd,
+                                                             cvt.prefixlen );
+              this->poll.notify_punsub( h, cvt.out, cvt.off, sub, cvt.prefixlen,
+                                        this->fd, rcnt + rt->count, 'V' );
+              delete m;
+              this->pat_tab.sub_count--;
+              if ( rt->count == 0 )
+                this->pat_tab.tab.remove( loc );
+            }
+            break;
           }
-          if ( rt->re != NULL ) {
-            pcre2_code_free( rt->re );
-            rt->re = NULL;
-          }
-          this->pat_tab.tab.remove( loc );
-          rcnt = this->poll.sub_route.del_pattern_route( h, this->fd,
-                                                         cvt.prefixlen );
-          this->poll.notify_punsub( h, cvt.out, cvt.off, sub, cvt.prefixlen,
-                                    this->fd, rcnt, 'V' );
         }
       }
     }
   }
+  /* if last ref & no listen stops on restricted subjects _RV. _INBOX. */
   if ( refcnt != 0xffffffffU && ! is_restricted_subject( sub, len ) ) {
     static const char stop[] = "_RV.INFO.SYSTEM.LISTEN.STOP."; /* 16+12=28 */
     uint8_t * buf;
@@ -905,7 +942,7 @@ EvRvService::rem_sub( void ) noexcept
     EvPublish pub( listen, listenlen, NULL, 0, buf, size, this->fd,
                    kv_crc_c( listen, listenlen, 0 ), NULL, 0,
                    (uint8_t) RVMSG_TYPE_ID, 'p' );
-    this->poll.forward_msg( pub, NULL, 0, NULL );
+    this->poll.forward_msg( pub );
   }
 }
 /* when client disconnects, unsubscribe everything */
@@ -924,14 +961,17 @@ EvRvService::rem_all_sub( void ) noexcept
     } while ( this->sub_tab.next( pos ) );
   }
   if ( this->pat_tab.first( ppos ) ) {
-    PatternCvt cvt;
     do {
-      if ( cvt.convert_rv( ppos.rt->value, ppos.rt->len ) == 0 ) {
-        rcnt = this->poll.sub_route.del_pattern_route( ppos.rt->hash,
-                                                  this->fd, cvt.prefixlen );
-        this->poll.notify_punsub( ppos.rt->hash, cvt.out, cvt.off,
-                                  ppos.rt->value, cvt.prefixlen,
-                                  this->fd, rcnt, 'V' );
+      rcnt = this->poll.sub_route.del_pattern_route( ppos.rt->hash, this->fd,
+                                                     ppos.rt->len );
+      rcnt += ppos.rt->count;
+      for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
+        PatternCvt cvt;
+        if ( cvt.convert_rv( m->value, m->len ) == 0 ) {
+          this->poll.notify_punsub( ppos.rt->hash, cvt.out, cvt.off,
+                                    m->value, cvt.prefixlen,
+                                    this->fd, --rcnt, 'V' );
+        }
       }
     } while ( this->pat_tab.next( ppos ) );
   }
@@ -971,7 +1011,7 @@ EvRvService::fwd_pub( void ) noexcept
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
                  this->fd, h, NULL, 0, ftype, 'p' );
-  return this->poll.forward_msg( pub, NULL, 0, NULL );
+  return this->poll.forward_msg( pub );
 }
 /* a message from the network, forward if matched by a subscription only once
  * as it may match multiple wild subscriptions as well as a normal sub
@@ -979,32 +1019,25 @@ EvRvService::fwd_pub( void ) noexcept
 bool
 EvRvService::on_msg( EvPublish &pub ) noexcept
 {
-  uint32_t pub_cnt = 0;
   for ( uint8_t cnt = 0; cnt < pub.prefix_cnt; cnt++ ) {
     RvSubStatus ret;
     if ( pub.subj_hash == pub.hash[ cnt ] ) {
       ret = this->sub_tab.updcnt( pub.subj_hash, pub.subject, pub.subject_len );
-      if ( ret == RV_SUB_OK ) {
-        if ( pub_cnt == 0 )
-          this->fwd_msg( pub, NULL, 0 );
-        pub_cnt++;
-      }
+      if ( ret == RV_SUB_OK )
+        return this->fwd_msg( pub );
     }
     else {
-      RvPatternRoute * rt = NULL;
-      RouteLoc         loc;
-      rt = this->pat_tab.tab.find_by_hash( pub.hash[ cnt ], loc );
-      for (;;) {
-        if ( rt == NULL )
-          break;
-        if ( pcre2_match( rt->re, (const uint8_t *) pub.subject,
-                          pub.subject_len, 0, 0, rt->md, 0 ) == 1 ) {
-          rt->msg_cnt++;
-          if ( pub_cnt == 0 )
-            this->fwd_msg( pub, NULL, 0 );
-          pub_cnt++;
+      RvPatternRoute * rt;
+      ret = this->pat_tab.find( pub.hash[ cnt ], pub.subject, pub.prefix[ cnt ],
+                                rt );
+      if ( ret == RV_SUB_OK ) {
+        for ( RvWildMatch *m = rt->list.hd; m != NULL; m = m->next ) {
+          if ( pcre2_match( m->re, (const uint8_t *) pub.subject,
+                            pub.subject_len, 0, 0, m->md, 0 ) == 1 ) {
+            m->msg_cnt++;
+            return this->fwd_msg( pub );
+          }
         }
-        rt = this->pat_tab.tab.find_next_by_hash( pub.hash[ cnt ], loc );
       }
     }
   }
@@ -1027,7 +1060,7 @@ EvRvService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
  * { mtype: 'D', sub: <subject>, data: <msg-data> }
  */
 bool
-EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
+EvRvService::fwd_msg( EvPublish &pub ) noexcept
 {
   uint8_t buf[ 2 * 1024 ], * b = buf;
   size_t  buf_len = sizeof( buf );
@@ -1062,10 +1095,11 @@ EvRvService::fwd_msg( EvPublish &pub,  const void *,  size_t ) noexcept
     }
     status = rvmsg.append_string( SARG( "mtype" ), mtype, 2 );
   }
-  if ( status == 0 && pub.reply_len > 0 )
+  if ( status == 0 && pub.reply_len > 0 ) {
     status = rvmsg.append_string( SARG( "return" ), (const char *) pub.reply,
                                   pub.reply_len + 1 );
-    
+    buf[ rvmsg.off - 1 ] = '\0';
+  }
   if ( status == 0 ) {
     uint8_t msg_enc = pub.msg_enc;
     /* depending on message type, encode the hdr to send to the client */
@@ -1164,17 +1198,23 @@ RvPatternMap::release( void ) noexcept
 
   if ( this->first( ppos ) ) {
     do {
-      if ( ppos.rt->md != NULL ) {
-        pcre2_match_data_free( ppos.rt->md );
-        ppos.rt->md = NULL;
-      }
-      if ( ppos.rt->re != NULL ) {
-        pcre2_code_free( ppos.rt->re );
-        ppos.rt->re = NULL;
+      RvWildMatch *next;
+      for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = next ) {
+        next = m->next;
+        if ( m->md != NULL ) {
+          pcre2_match_data_free( m->md );
+          m->md = NULL;
+        }
+        if ( m->re != NULL ) {
+          pcre2_code_free( m->re );
+          m->re = NULL;
+        }
+        delete m;
       }
     } while ( this->next( ppos ) );
   }
   this->tab.release();
+  this->sub_count = 0;
 }
 
 void
