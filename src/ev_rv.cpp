@@ -782,18 +782,26 @@ EvRvService::add_sub( void ) noexcept
           pcre2_real_match_data_8 * md = NULL;
           size_t erroff;
           int    error;
+          bool   pattern_success = false;
           refcnt = 1;
-          re = pcre2_compile( (uint8_t *) cvt.out, cvt.off, 0, &error,
-                              &erroff, 0 );
-          if ( re == NULL ) {
-            fprintf( stderr, "re failed\n" );
-          }
+          /* if prefix matches, no need for pcre2 */
+          if ( cvt.prefixlen + 1 == len && sub[ cvt.prefixlen ] == '>' )
+            pattern_success = true;
           else {
-            md = pcre2_match_data_create_from_pattern( re, NULL );
-            if ( md == NULL )
-              fprintf( stderr, "md failed\n" );
+            re = pcre2_compile( (uint8_t *) cvt.out, cvt.off, 0, &error,
+                                &erroff, 0 );
+            if ( re == NULL ) {
+              fprintf( stderr, "re failed\n" );
+            }
+            else {
+              md = pcre2_match_data_create_from_pattern( re, NULL );
+              if ( md == NULL )
+                fprintf( stderr, "md failed\n" );
+              else
+                pattern_success = true;
+            }
           }
-          if ( re != NULL && md != NULL &&
+          if ( pattern_success &&
                (m = RvWildMatch::create( len, sub, re, md )) != NULL ) {
             rt->list.push_hd( m );
             rcnt = this->poll.sub_route.add_pattern_route( h, this->fd,
@@ -1032,8 +1040,16 @@ EvRvService::on_msg( EvPublish &pub ) noexcept
                                 rt );
       if ( ret == RV_SUB_OK ) {
         for ( RvWildMatch *m = rt->list.hd; m != NULL; m = m->next ) {
-          if ( pcre2_match( m->re, (const uint8_t *) pub.subject,
-                            pub.subject_len, 0, 0, m->md, 0 ) == 1 ) {
+          bool matches = false;
+          if ( m->re == NULL ) {
+            /* > trails */
+            if ( ::memcmp( m->value, pub.subject, m->len - 1 ) == 0 )
+              matches = true;
+          }
+          else if ( pcre2_match( m->re, (const uint8_t *) pub.subject,
+                                 pub.subject_len, 0, 0, m->md, 0 ) == 1 )
+            matches = true;
+          if ( matches ) {
             m->msg_cnt++;
             return this->fwd_msg( pub );
           }
