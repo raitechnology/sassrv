@@ -73,7 +73,9 @@ using namespace md;
 /* string constant + strlen() + 1 */
 
 EvRvListen::EvRvListen( EvPoll &p ) noexcept
-  : EvTcpListen( p, "rv_listen", "rv_sock" ), RvHost( *this )
+  : EvTcpListen( p, "rv_listen", "rv_sock" ), RvHost( *this ),
+    host_status_timer( 0 ), host_reconnect_timer( 0 ), host_network_start( 0 ),
+    notify( 0 )
 {
   md_init_auto_unpack();
 }
@@ -141,11 +143,27 @@ bool
 EvRvListen::timer_expire( uint64_t, uint64_t eid ) noexcept
 {
   /* stop timer when host stops */
-  if ( eid != (uint64_t) this->host_status_timer )
+  if ( eid != (uint64_t) this->host_status_timer ) {
+    if ( eid == this->host_reconnect_timer )
+      this->notify->on_reconnect();
     return false;
+  }
   this->host_status(); /* still going */
   return true;
 }
+
+void
+EvRvListen::set_reconnect_timer( uint32_t secs,
+                                 EvRvReconnectNotify *notify ) noexcept
+{
+  if ( this->host_reconnect_timer != 0 ) {
+    this->notify = notify;
+    this->poll.add_timer_seconds( this->fd, secs, 0,
+                                  this->host_reconnect_timer );
+  }
+}
+
+void EvRvReconnectNotify::on_reconnect( void ) noexcept {}
 
 void
 EvRvListen::host_status( void ) noexcept
@@ -180,23 +198,28 @@ int
 EvRvListen::start_host( void ) noexcept
 {
   /* subscribe _INBOX.DAEMON.iphex */
-  this->subscribe_daemon_inbox();
-  /* start timer to send the status every 90 seconds */
-  this->host_status_timer = ++this->host_network_start;
-  this->poll.add_timer_seconds( this->fd, RV_STATUS_IVAL, 0,
-                                this->host_status_timer );
-  PeerMatchArgs ka;
-  PeerMatchIter iter( *this, ka );
-  ka.type     = "rv";
-  ka.type_len = 2;
-  bool do_h = true;
-  for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
-    EvRvService *svc = (EvRvService *) p;
-    svc->host_started = true;
-    /* advise host + session start, then restart reading from clients */
-    this->send_start( do_h, svc->state == EvRvService::DATA_RECV_SESSION, svc );
-    do_h = false; /* only start host once */
-    svc->idle_push( EV_READ );
+  if ( this->host_status_timer != 0 )
+    this->notify_subs();
+  else {
+    this->subscribe_daemon_inbox();
+    /* start timer to send the status every 90 seconds */
+    this->host_status_timer    = ++this->host_network_start;
+    this->host_reconnect_timer = this->host_network_start + 1;
+    this->poll.add_timer_seconds( this->fd, RV_STATUS_IVAL, 0,
+                                  this->host_status_timer );
+    PeerMatchArgs ka;
+    PeerMatchIter iter( *this, ka );
+    ka.type     = "rv";
+    ka.type_len = 2;
+    bool do_h = true;
+    for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
+      EvRvService *svc = (EvRvService *) p;
+      svc->host_started = true;
+      /* advise host + session start, then restart reading from clients */
+      this->send_start( do_h, svc->state == EvRvService::DATA_RECV_SESSION, svc );
+      do_h = false; /* only start host once */
+      svc->idle_push( EV_READ );
+    }
   }
   return 0;
 }
@@ -209,8 +232,51 @@ EvRvListen::stop_host( void ) noexcept
   /* advise host stop */
   this->send_stop( true, false, NULL );
   /* stop the timer, the timer_expire() function tests this */
-  this->host_status_timer = 0;
+  this->host_status_timer    = 0;
+  this->host_reconnect_timer = 0;
   return 0;
+}
+
+void
+EvRvListen::data_loss_error( uint64_t bytes_lost,  const char *err,
+                             size_t errlen ) noexcept
+{
+  static const char   subj[] = "_RV.ERROR.SYSTEM.DATALOSS.OUTBOUND.BCAST";
+  static const size_t sublen = sizeof( subj ) - 1;
+  uint8_t     buf[ 8192 ];
+  char        str[ 256 ];
+  size_t      size;
+  RvMsgWriter msg( buf, sizeof( buf ) );
+
+  msg.append_string( SARG( "ADV_CLASS" ), SARG( "ERROR" ) );
+  msg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
+  msg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.OUTBOUND.BCAST" ) );
+  if ( errlen > 0 ) {
+    if ( errlen > sizeof( str ) - 1 )
+      errlen = sizeof( str ) - 1;
+    ::memcpy( str, err, errlen );
+    str[ errlen ] = '\0';
+  }
+  else {
+    ::strcpy( str, "nats-server connection lost" );
+    errlen = ::strlen( str );
+  }
+  msg.append_string( SARG( "ADV_DESC" ), str, errlen + 1 );
+  msg.append_uint( SARG( "lost" ), bytes_lost );
+  msg.append_ipdata( SARG( "scid" ), this->ipport );
+  size = msg.update_hdr();
+  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
+                 kv_crc_c( subj, sublen, 0 ), NULL, 0,
+                 (uint8_t) RVMSG_TYPE_ID, 'p' );
+
+  PeerMatchArgs ka;
+  PeerMatchIter iter( *this, ka );
+  ka.type     = "rv";
+  ka.type_len = 2;
+  for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService *svc = (EvRvService *) p;
+    svc->fwd_msg( pub );
+  }
 }
 
 void
@@ -302,6 +368,12 @@ EvRvListen::send_sessions( const void *reply,  size_t reply_len ) noexcept
                  this->fd, kv_crc_c( reply, reply_len, 0 ), NULL, 0,
                  (uint8_t) RVMSG_TYPE_ID, 'p' );
   this->poll.forward_msg( pub );
+}
+
+void
+EvRvListen::notify_subs( void ) noexcept
+{
+  printf( "notify_subs\n" );
 }
 
 void
@@ -1108,6 +1180,8 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
              ::memcmp( "UNREACHABLE.", &pub.subject[ 16 ], 12 ) == 0 )
           mtype = "A"; /* advisory */
       }
+      else if ( ::memcmp( "_RV.ERROR.SYSTEM.", pub.subject, 17 ) == 0 )
+        mtype = "A"; /* advisory */
     }
     status = rvmsg.append_string( SARG( "mtype" ), mtype, 2 );
   }

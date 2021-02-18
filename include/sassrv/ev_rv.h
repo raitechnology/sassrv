@@ -15,14 +15,26 @@ extern "C" {
 namespace rai {
 namespace sassrv {
 
+struct EvRvReconnectNotify {
+  virtual void on_reconnect( void ) noexcept;
+};
+
 /* tcp listener for accepting EvRvService connections */
 struct EvRvListen : public kv::EvTcpListen, public RvHost {
   void * operator new( size_t, void *ptr ) { return ptr; }
+
+  uint32_t host_status_timer, /* timer for HOST.STATUS */
+           host_reconnect_timer, /* timer for reconnect */
+           host_network_start;/* incr when host starts */
+  EvRvReconnectNotify * notify;
+
   EvRvListen( kv::EvPoll &p ) noexcept;
   /* EvListen */
   virtual bool accept( void ) noexcept;
   int listen( const char *ip,  int port,  int opts );
   void host_status( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.STATUS */
+  void data_loss_error( uint64_t bytes_lost,  const char *err,
+                        size_t errlen ) noexcept;
   /* start / stop network */
   virtual int start_host( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.START */
   virtual int stop_host( void ) noexcept;  /* send _RV.INFO.SYSTEM.HOST.STOP */
@@ -32,9 +44,12 @@ struct EvRvListen : public kv::EvTcpListen, public RvHost {
   virtual void process_close( void ) noexcept final;
   virtual bool on_msg( kv::EvPublish &pub ) noexcept final;
 
+  void set_reconnect_timer( uint32_t secs,
+                            EvRvReconnectNotify *notify ) noexcept;
   void subscribe_daemon_inbox( void ) noexcept;
   void unsubscribe_daemon_inbox( void ) noexcept;
   void send_sessions( const void *reply,  size_t reply_len ) noexcept;
+  void notify_subs( void ) noexcept;
   void send_subscriptions( const char *session,  size_t session_len,
                            const void *reply,  size_t reply_len ) noexcept;
 };

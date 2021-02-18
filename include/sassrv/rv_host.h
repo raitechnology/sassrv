@@ -105,8 +105,6 @@ struct RvHost {
                host_status_count, /* count of host.stat msgs sent */
                start_stamp,       /* when service started */
                active_clients;    /* count of connections using this service */
-  uint32_t     host_status_timer, /* timer for HOST.STATUS */
-               host_network_start;/* incr when host starts */
   RvMcast      mcast;
 
   RvHost( EvRvListen &l ) : listener( l ) {

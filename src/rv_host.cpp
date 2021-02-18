@@ -171,10 +171,24 @@ RvHost::pack_advisory( RvMsgWriter &msg,  const char *subj_prefix,
   sublen += this->session_ip_len;
   subj_buf[ sublen ] = '\0';
 
-  msg.append_string( SARG( "ADV_CLASS" ), SARG( "INFO" ) );
+  /* _RV.<class>.SYSTEM */
+  const char * s = ::strchr( &subj_prefix[ 4 ], '.' );
+  size_t       class_len = (size_t) ( s - &subj_prefix[ 4 ] );
+  char         class_str[ 8 ]; /* INFO, ERROR */
+  if ( class_len < 8 ) {
+    ::memcpy( class_str, &subj_prefix[ 4 ], class_len );
+    class_str[ class_len ] = '\0';
+  }
+  else {
+    ::strcpy( class_str, "UNKN" );
+    class_len = 4;
+  }
+
+  msg.append_string( SARG( "ADV_CLASS" ), class_str, class_len + 1 );
   msg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
   /* skip prefix: _RV.INFO.SYSTEM. */
-  msg.append_string( SARG( "ADV_NAME" ), &subj_buf[ 16 ], sublen - 16 + 1 );
+  msg.append_string( SARG( "ADV_NAME" ), &subj_buf[ 12 + class_len ],
+                     sublen - ( 12 + class_len ) + 1 );
 
   if ( ( flags & ADV_HOSTADDR ) != 0 )
     msg.append_ipdata( SARG( "hostaddr" ), this->mcast.host_ip );
