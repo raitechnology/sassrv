@@ -242,7 +242,7 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(bind)/rv_server
+dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server
 	chrpath -d $(libd)/libsassrv.so
 	chrpath -d $(bind)/rv_server
 
