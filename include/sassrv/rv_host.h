@@ -56,8 +56,10 @@ struct RvMcast {
            recv_cnt;                  /* 2 */
   /* these are in network order */
   RvMcast() : host_ip( 0 ), netmask( 0 ), send_ip( 0 ), recv_cnt( 0 ) {}
-  RvMcast( const RvMcast &mc ) : host_ip( mc.host_ip ), netmask( mc.netmask ),
-    send_ip( mc.send_ip ), recv_cnt( mc.recv_cnt ) {
+  RvMcast( const RvMcast &mc ) { this->copy( mc ); }
+  void copy( const RvMcast &mc ) {
+    this->host_ip = mc.host_ip; this->netmask =  mc.netmask;
+    this->send_ip = mc.send_ip; this->recv_cnt = mc.recv_cnt;
     ::memcpy( this->recv_ip, mc.recv_ip, sizeof( this->recv_ip[ 0 ] ) *
               mc.recv_cnt );
   }

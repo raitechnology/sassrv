@@ -70,7 +70,7 @@ RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
 
   const uint8_t * q = (const uint8_t *) (const void *) &mc.host_ip;
   this->zero_stats( kv_current_realtime_ns() );
-  this->mcast = mc;
+  this->mcast.copy( mc );
   for ( int i = 0; i < 8; i += 2 ) {
     this->session_ip[ i ] = hexchar2( ( q[ i/2 ] >> 4 ) & 0xf );
     this->session_ip[ i+1 ] = hexchar2( q[ i/2 ] & 0xf );
