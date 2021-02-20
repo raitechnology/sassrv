@@ -49,7 +49,7 @@ struct EvRvListen : public kv::EvTcpListen, public RvHost {
   void subscribe_daemon_inbox( void ) noexcept;
   void unsubscribe_daemon_inbox( void ) noexcept;
   void send_sessions( const void *reply,  size_t reply_len ) noexcept;
-  void notify_subs( void ) noexcept;
+  void reassert_subs( void ) noexcept;
   void send_subscriptions( const char *session,  size_t session_len,
                            const void *reply,  size_t reply_len ) noexcept;
 };

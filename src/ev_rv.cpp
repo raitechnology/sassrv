@@ -74,8 +74,8 @@ using namespace md;
 
 EvRvListen::EvRvListen( EvPoll &p ) noexcept
   : EvTcpListen( p, "rv_listen", "rv_sock" ), RvHost( *this ),
-    host_status_timer( 0 ), host_reconnect_timer( 0 ), host_network_start( 0 ),
-    notify( 0 )
+    host_status_timer( 0 ), host_reconnect_timer( 0xffffffffU ),
+    host_network_start( 0 ), notify( 0 )
 {
   md_init_auto_unpack();
 }
@@ -156,11 +156,9 @@ void
 EvRvListen::set_reconnect_timer( uint32_t secs,
                                  EvRvReconnectNotify *notify ) noexcept
 {
-  if ( this->host_reconnect_timer != 0 ) {
-    this->notify = notify;
-    this->poll.add_timer_seconds( this->fd, secs, 0,
-                                  this->host_reconnect_timer );
-  }
+  this->notify = notify;
+  this->poll.add_timer_seconds( this->fd, secs, 0,
+                                --this->host_reconnect_timer );
 }
 
 void EvRvReconnectNotify::on_reconnect( void ) noexcept {}
@@ -199,18 +197,15 @@ EvRvListen::start_host( void ) noexcept
 {
   /* subscribe _INBOX.DAEMON.iphex */
   if ( this->host_status_timer != 0 )
-    this->notify_subs();
+    this->reassert_subs();
   else {
     this->subscribe_daemon_inbox();
     /* start timer to send the status every 90 seconds */
-    this->host_status_timer    = ++this->host_network_start;
-    this->host_reconnect_timer = this->host_network_start + 1;
+    this->host_status_timer = ++this->host_network_start;
     this->poll.add_timer_seconds( this->fd, RV_STATUS_IVAL, 0,
                                   this->host_status_timer );
-    PeerMatchArgs ka;
+    PeerMatchArgs ka( "rv", 2 );
     PeerMatchIter iter( *this, ka );
-    ka.type     = "rv";
-    ka.type_len = 2;
     bool do_h = true;
     for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
       EvRvService *svc = (EvRvService *) p;
@@ -232,8 +227,7 @@ EvRvListen::stop_host( void ) noexcept
   /* advise host stop */
   this->send_stop( true, false, NULL );
   /* stop the timer, the timer_expire() function tests this */
-  this->host_status_timer    = 0;
-  this->host_reconnect_timer = 0;
+  this->host_status_timer = 0;
   return 0;
 }
 
@@ -269,45 +263,47 @@ EvRvListen::data_loss_error( uint64_t bytes_lost,  const char *err,
                  kv_crc_c( subj, sublen, 0 ), NULL, 0,
                  (uint8_t) RVMSG_TYPE_ID, 'p' );
 
-  PeerMatchArgs ka;
+  PeerMatchArgs ka( "rv", 2 );
   PeerMatchIter iter( *this, ka );
-  ka.type     = "rv";
-  ka.type_len = 2;
   for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
     EvRvService *svc = (EvRvService *) p;
     svc->fwd_msg( pub );
   }
 }
 
+struct DaemonInbox {
+  static const size_t len = 22;
+  char     buf[ len + 1 ];
+  uint32_t h;
+
+  DaemonInbox( RvHost &host ) {
+    ::memcpy( this->buf, "_INBOX.", 7 );
+    ::memcpy( &this->buf[ 7 ], host.session_ip, 8 );
+    ::memcpy( &this->buf[ 15 ], ".DAEMON", 8 );
+    this->h = kv_crc_c( this->buf, this->len, 0 );
+  }
+};
+
 void
 EvRvListen::subscribe_daemon_inbox( void ) noexcept
 {
-  char daemon_inbox[ 24 ];
-  uint32_t h, rcnt;
-  ::memcpy( daemon_inbox, "_INBOX.", 7 );
-  ::memcpy( &daemon_inbox[ 7 ], this->session_ip, 8 );
-  ::memcpy( &daemon_inbox[ 15 ], ".DAEMON", 8 );
-  const size_t len = 22;
-  h = kv_crc_c( daemon_inbox, len, 0 );
-  if ( ! this->poll.sub_route.is_sub_member( h, this->fd ) ) {
-    rcnt = this->poll.sub_route.add_sub_route( h, this->fd );
-    this->poll.notify_sub( h, daemon_inbox, len, this->fd, rcnt, 'V', NULL, 0 );
+  DaemonInbox ibx( *this );
+  uint32_t rcnt;
+  if ( ! this->poll.sub_route.is_sub_member( ibx.h, this->fd ) ) {
+    rcnt = this->poll.sub_route.add_sub_route( ibx.h, this->fd );
+    this->poll.notify_sub( ibx.h, ibx.buf, ibx.len, this->fd, rcnt, 'V',
+                           NULL, 0 );
   }
 }
 
 void
 EvRvListen::unsubscribe_daemon_inbox( void ) noexcept
 {
-  char daemon_inbox[ 24 ];
-  uint32_t h, rcnt;
-  ::memcpy( daemon_inbox, "_INBOX.", 7 );
-  ::memcpy( &daemon_inbox[ 7 ], this->session_ip, 8 );
-  ::memcpy( &daemon_inbox[ 15 ], ".DAEMON", 8 );
-  const size_t len = 22;
-  h = kv_crc_c( daemon_inbox, len, 0 );
-  if ( this->poll.sub_route.is_sub_member( h, this->fd ) ) {
-    rcnt = this->poll.sub_route.del_sub_route( h, this->fd );
-    this->poll.notify_unsub( h, daemon_inbox, len, this->fd, rcnt, 'V' );
+  DaemonInbox ibx( *this );
+  uint32_t rcnt;
+  if ( this->poll.sub_route.is_sub_member( ibx.h, this->fd ) ) {
+    rcnt = this->poll.sub_route.del_sub_route( ibx.h, this->fd );
+    this->poll.notify_unsub( ibx.h, ibx.buf, ibx.len, this->fd, rcnt, 'V' );
   }
 }
 
@@ -333,7 +329,7 @@ match_string( const char *s,  size_t len,  const MDReference &mref )
 void
 EvRvListen::send_sessions( const void *reply,  size_t reply_len ) noexcept
 {
-  PeerMatchArgs ka;
+  PeerMatchArgs ka( "rv", 2 );
   PeerMatchIter iter( *this, ka );
   PeerData    * p;
   MDMsgMem      mem;
@@ -341,8 +337,6 @@ EvRvListen::send_sessions( const void *reply,  size_t reply_len ) noexcept
   uint8_t     * buf = NULL;
   bool          have_daemon;
 
-  ka.type     = "rv";
-  ka.type_len = 2;
   have_daemon = false; /* include daemon onlly once */
   for ( p = iter.first(); p != NULL; p = iter.next() ) {
     EvRvService * svc = (EvRvService *) p;
@@ -371,29 +365,25 @@ EvRvListen::send_sessions( const void *reply,  size_t reply_len ) noexcept
 }
 
 void
-EvRvListen::notify_subs( void ) noexcept
-{
-  printf( "notify_subs\n" );
-}
-
-void
 EvRvListen::send_subscriptions( const char *session,  size_t session_len,
                                 const void *reply,  size_t reply_len ) noexcept
 {
   DLinkList<RvServiceLink> list;
-  PeerMatchArgs     ka;
+  PeerMatchArgs     ka( "rv", 2 );
   PeerMatchIter     iter( *this, ka );
   RvSubRoutePos     pos;
   RvPatternRoutePos ppos;
   MDMsgMem          mem;
+  RvServiceLink   * link;
   uint8_t         * buf = NULL;
   size_t            buflen,
-                    subcnt;
-  ka.type     = "rv";
-  ka.type_len = 2;
+                    subcnt,
+                    linkcnt;
   subcnt      = 0;
+  linkcnt     = 0;
   for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
     EvRvService *svc = (EvRvService *) p;
+    /* sessions may be the same when link uses the DAEMON session */
     if ( (size_t) svc->session_len + 1 == session_len &&
          ::memcmp( session, svc->session, svc->session_len ) == 0 ) {
       void * p;
@@ -407,26 +397,33 @@ EvRvListen::send_subscriptions( const char *session,  size_t session_len,
       else {
         list.push_tl( link );
       }
+      linkcnt++;
+      /* if not a DAEMON session, it is unique */
       if ( svc->state != EvRvService::DATA_RECV_DAEMON )
         break;
     }
   }
-  if ( list.hd != NULL ) {
-    /* hdr + "user" : "name", "end" : 1 */
-    buflen = 8 + list.hd->svc.userid_len + 12 + 12;
-    for ( RvServiceLink *link = list.hd; link != NULL; link = link->next ) {
+  /* calculate the max length of the message */
+  /* hdr + "user" : "name", "end" : 1 */
+  buflen = 8 + 8 + 12 + 12;
+  if ( linkcnt > 0 ) { /* if sessions exist, only unique subjects */
+    link = list.hd;
+    buflen += link->svc.userid_len;
+    for ( ; link != NULL; link = link->next ) {
       EvRvService & s = link->svc;
       ::memset( link->bits, 0, sizeof( link->bits ) );
       if ( s.sub_tab.first( pos ) ) {
         do {
-          if ( link->check_subject( pos.rt->value, pos.rt->len, pos.rt->hash ) )
+          if ( linkcnt == 1 ||
+               link->check_subject( pos.rt->value, pos.rt->len, pos.rt->hash ) )
             buflen += pos.rt->len + 8 + pos.rt->segments() * 2;
         } while ( s.sub_tab.next( pos ) );
       }
       if ( s.pat_tab.first( ppos ) ) {
         do {
           for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
-            if ( link->check_pattern( ppos.rt->value, ppos.rt->len,
+            if ( linkcnt == 1 ||
+                 link->check_pattern( ppos.rt->value, ppos.rt->len,
                                       ppos.rt->hash, m ) )
               buflen += m->len + 8 + m->segments() * 2;
           }
@@ -434,28 +431,29 @@ EvRvListen::send_subscriptions( const char *session,  size_t session_len,
       }
     }
   }
-  else {
-    buflen = 8 + 8 + 12 + 12;
-  }
+  /* create the message with unique subjects */
   mem.alloc( buflen, &buf );
   RvMsgWriter msg( buf, buflen );
 
-  if ( list.hd != NULL ) {
-    msg.append_string( SARG( "user" ), list.hd->svc.userid,
-                                       list.hd->svc.userid_len + 1 );
-    for ( RvServiceLink *link = list.hd; link != NULL; link = link->next ) {
+  if ( linkcnt > 0 ) {
+    link = list.hd;
+    msg.append_string( SARG( "user" ), link->svc.userid,
+                                       link->svc.userid_len + 1 );
+    for ( ; link != NULL; link = link->next ) {
       EvRvService & s = link->svc;
       ::memset( link->bits, 0, sizeof( link->bits ) );
       if ( s.sub_tab.first( pos ) ) {
         do {
-          if ( link->check_subject( pos.rt->value, pos.rt->len, pos.rt->hash ) )
+          if ( linkcnt == 1 ||
+               link->check_subject( pos.rt->value, pos.rt->len, pos.rt->hash ) )
             msg.append_subject( NULL, 0, pos.rt->value, pos.rt->len );
         } while ( s.sub_tab.next( pos ) );
       }
       if ( s.pat_tab.first( ppos ) ) {
         do {
           for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
-            if ( link->check_pattern( ppos.rt->value, ppos.rt->len,
+            if ( linkcnt == 1 ||
+                 link->check_pattern( ppos.rt->value, ppos.rt->len,
                                       ppos.rt->hash, m ) )
               msg.append_subject( NULL, 0, m->value, m->len );
           }
@@ -472,6 +470,33 @@ EvRvListen::send_subscriptions( const char *session,  size_t session_len,
                  this->fd, kv_crc_c( reply, reply_len, 0 ), NULL, 0,
                  (uint8_t) RVMSG_TYPE_ID, 'p' );
   this->poll.forward_msg( pub );
+}
+
+void
+EvRvListen::reassert_subs( void ) noexcept
+{
+  PeerMatchArgs      ka( "rv", 2 );
+  PeerMatchIter      iter( *this, ka );
+  RvSubRoutePos      pos;
+  RvPatternRoutePos  ppos;
+  RouteVec<RouteSub> sub_db, pat_db;
+  DaemonInbox        ibx( *this );
+
+  sub_db.insert( ibx.h, ibx.buf, ibx.len );
+  for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService &s = *(EvRvService *) p;
+    if ( s.sub_tab.first( pos ) ) {
+      do {
+        sub_db.insert_unique( pos.rt->hash, pos.rt->value, pos.rt->len );
+      } while ( s.sub_tab.next( pos ) );
+    }
+    if ( s.pat_tab.first( ppos ) ) {
+      do {
+        pat_db.insert_unique( ppos.rt->hash, ppos.rt->value, ppos.rt->len );
+      } while ( s.pat_tab.next( ppos ) );
+    }
+  }
+  this->poll.notify_reassert( this->fd, sub_db, pat_db );
 }
 
 bool
