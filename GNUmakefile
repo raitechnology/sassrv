@@ -51,11 +51,8 @@ CFLAGS := $(default_cflags)
 #CFLAGS ?= $(RPM_OPT_FLAGS)
 cflags := $(gcc_wflags) $(CFLAGS) $(arch_cflags)
 
-# submodule dir
-sd          ?= .
-
 # where to find the raids/xyz.h files
-INCLUDES    ?= -Iinclude -I$(sd)/raikv/include -I$(sd)/raimd/include
+INCLUDES    ?= -Iinclude -Iraikv/include -Iraimd/include
 includes    := $(INCLUDES)
 DEFINES     ?=
 defines     := $(DEFINES)
@@ -65,9 +62,10 @@ math_lib    := -lm
 thread_lib  := -pthread -lrt
 
 # test submodules exist (they don't exist for dist_rpm, dist_dpkg targets)
-have_md_submodule    := $(shell if [ -f $(sd)/raimd/GNUmakefile ]; then echo yes; else echo no; fi )
-have_dec_submodule   := $(shell if [ -f $(sd)/raimd/libdecnumber/GNUmakefile ]; then echo yes; else echo no; fi )
-have_kv_submodule    := $(shell if [ -f $(sd)/raikv/GNUmakefile ]; then echo yes; else echo no; fi )
+have_md_submodule    := $(shell if [ -f raimd/GNUmakefile ]; then echo yes; else echo no; fi )
+have_dec_submodule   := $(shell if [ -f raimd/libdecnumber/GNUmakefile ]; then echo yes; else echo no; fi )
+have_kv_submodule    := $(shell if [ -f raikv/GNUmakefile ]; then echo yes; else echo no; fi )
+have_hdr_submodule   := $(shell if [ -f ./HdrHistogram_c/GNUmakefile ]; then echo yes; else echo no; fi )
 
 lnk_lib     :=
 dlnk_lib    :=
@@ -76,42 +74,52 @@ dlnk_dep    :=
 
 # if building submodules, reference them rather than the libs installed
 ifeq (yes,$(have_kv_submodule))
-kv_lib      := $(sd)/raikv/$(libd)/libraikv.a
-kv_dll      := $(sd)/raikv/$(libd)/libraikv.so
+kv_lib      := raikv/$(libd)/libraikv.a
+kv_dll      := raikv/$(libd)/libraikv.so
 lnk_lib     += $(kv_lib)
 lnk_dep     += $(kv_lib)
-dlnk_lib    += -L$(sd)/raikv/$(libd) -lraikv
+dlnk_lib    += -Lraikv/$(libd) -lraikv
 dlnk_dep    += $(kv_dll)
-rpath1       = ,-rpath,$(pwd)/$(sd)/raikv/$(libd)
+rpath1       = ,-rpath,$(pwd)/raikv/$(libd)
 else
 lnk_lib     += -lraikv
 dlnk_lib    += -lraikv
 endif
 
 ifeq (yes,$(have_md_submodule))
-md_lib      := $(sd)/raimd/$(libd)/libraimd.a
-md_dll      := $(sd)/raimd/$(libd)/libraimd.so
+md_lib      := raimd/$(libd)/libraimd.a
+md_dll      := raimd/$(libd)/libraimd.so
 lnk_lib     += $(md_lib)
 lnk_dep     += $(md_lib)
-dlnk_lib    += -L$(sd)/raimd/$(libd) -lraimd
+dlnk_lib    += -Lraimd/$(libd) -lraimd
 dlnk_dep    += $(md_dll)
-rpath3       = ,-rpath,$(pwd)/$(sd)/raimd/$(libd)
+rpath3       = ,-rpath,$(pwd)/raimd/$(libd)
 else
 lnk_lib     += -lraimd
 dlnk_lib    += -lraimd
 endif
 
 ifeq (yes,$(have_dec_submodule))
-dec_lib     := $(sd)/raimd/libdecnumber/$(libd)/libdecnumber.a
-dec_dll     := $(sd)/raimd/libdecnumber/$(libd)/libdecnumber.so
+dec_lib     := raimd/libdecnumber/$(libd)/libdecnumber.a
+dec_dll     := raimd/libdecnumber/$(libd)/libdecnumber.so
 lnk_lib     += $(dec_lib)
 lnk_dep     += $(dec_lib)
-dlnk_lib    += -L$(sd)/raimd/libdecnumber/$(libd) -ldecnumber
+dlnk_lib    += -Lraimd/libdecnumber/$(libd) -ldecnumber
 dlnk_dep    += $(dec_dll)
-rpath5       = ,-rpath,$(pwd)/$(sd)/raimd/libdecnumber/$(libd)
+rpath5       = ,-rpath,$(pwd)/raimd/libdecnumber/$(libd)
 else
 lnk_lib     += -ldecnumber
 dlnk_lib    += -ldecnumber
+endif
+
+ifeq (yes,$(have_hdr_submodule))
+hdr_lib     := HdrHistogram_c/$(libd)/libhdrhist.a
+hdr_dll     := HdrHistogram_c/$(libd)/libhdrhist.so
+rpath2       = ,-rpath,$(pwd)/HdrHistogram_c/$(libd)
+hdr_includes = -IHdrHistogram_c/src
+else
+hdr_lib     := -lhdrhist
+hdr_includes = -I/usr/include/hdrhist
 endif
 
 sassrv_lib := $(libd)/libsassrv.a
@@ -151,8 +159,13 @@ clean_md:
 	$(MAKE) -C raimd clean
 clean_subs += clean_md
 endif
-ifneq (.,$(sd))
-clean_subs :=
+ifeq (yes,$(have_hdr_submodule))
+$(hdr_lib) $(hdr_dll):
+	$(MAKE) -C HdrHistogram_c
+.PHONY: clean_hdr
+clean_hdr:
+	$(MAKE) -C HdrHistogram_c clean
+clean_subs += clean_hdr
 endif
 
 # copr/fedora build (with version env vars)
@@ -170,7 +183,7 @@ all_dlls    :=
 all_depends :=
 gen_files   :=
 
-libsassrv_files := ev_rv rv_host
+libsassrv_files := ev_rv rv_host ev_rv_client
 libsassrv_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libsassrv_files)))
 libsassrv_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libsassrv_files)))
 libsassrv_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(libsassrv_files))) \
@@ -197,6 +210,20 @@ $(bind)/rv_server: $(rv_server_objs) $(rv_server_libs) $(lnk_dep)
 
 all_exes    += $(bind)/rv_server
 all_depends += $(rv_server_deps)
+
+ping_rv_includes := $(hdr_includes)
+ping_rv_defines  := -Wno-unused-function
+
+ping_rv_files := ping_rv
+ping_rv_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(ping_rv_files)))
+ping_rv_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(ping_rv_files)))
+ping_rv_libs  := $(sassrv_lib)
+ping_rv_lnk   := $(sassrv_lib) $(lnk_lib) $(hdr_lib) -lpcre2-8
+
+$(bind)/ping_rv: $(ping_rv_objs) $(ping_rv_libs) $(lnk_dep)
+
+all_exes    += $(bind)/ping_rv
+all_depends += $(ping_rv_deps)
 
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 

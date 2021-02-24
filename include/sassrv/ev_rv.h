@@ -319,7 +319,7 @@ struct EvRvService : public kv::EvConnection {
   RvSubMap     sub_tab;        /* subscriptions open by connection */
   RvPatternMap pat_tab;        /* pattern subscriptions open by connection */
   RvHost     & stat;           /* the session stats */
-  RvState      state;          /* one of the above states */
+  RvState      svc_state;      /* one of the above states */
   char         session[ 64 ],  /* session id of this connection */
                control[ 64 ],  /* the inbox name */
                userid[ 64 ],   /* the userid */
@@ -337,7 +337,7 @@ struct EvRvService : public kv::EvConnection {
   EvRvService( kv::EvPoll &p,  const uint8_t t,
                RvHost &st ) : kv::EvConnection( p, t ), stat( st ) {}
   void initialize_state( uint64_t id ) {
-    this->state    = VERS_RECV;
+    this->svc_state = VERS_RECV;
     this->timer_id = id;
     this->msg_in.init();
     ::memset( this->session, 0, (char *) (void *) &this->timer_id - 

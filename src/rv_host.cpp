@@ -41,6 +41,33 @@ RvHost::time_to_str( uint64_t ns,  char *str ) noexcept
   return k;
 }
 
+const char *
+rai::sassrv::get_rv_host_error( int status ) noexcept
+{
+  switch ( status ) {
+    case HOST_OK:
+      return "host ok";
+    case ERR_GETHOSTNAME_FAILED:
+      return "gethostname failed";
+    case ERR_NO_INTERFACE_FOUND:
+      return "the hostname addr does not match interface";
+    case ERR_HOSTNAME_NOT_FOUND:
+      return "the hostname does not resolve";
+    case ERR_SAME_SVC_TWO_NETS:
+      return "the same service used with two different networks";
+    case ERR_NETWORK_NOT_FOUND:
+      return "network is not found";
+    case ERR_BAD_SERVICE_NUM:
+      return "the service number invalid";
+    case ERR_BAD_PARAMETERS:
+      return "the length of network overflows MAX_NETWORK";
+    case ERR_START_HOST_FAILED:
+      return "host start failed";
+    default:
+      return "host error";
+  }
+}
+
 RvHostError
 RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
                        const char *svc,  size_t svc_len ) noexcept

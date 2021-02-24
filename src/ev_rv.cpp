@@ -185,7 +185,7 @@ void
 EvRvService::read( void ) noexcept
 {
   /* if host not started, wait for that event before reading pub/sub data */
-  if ( this->host_started || this->state <= DATA_RECV ) {
+  if ( this->host_started || this->svc_state <= DATA_RECV ) {
     this->EvConnection::read();
     return;
   }
@@ -211,7 +211,8 @@ EvRvListen::start_host( void ) noexcept
       EvRvService *svc = (EvRvService *) p;
       svc->host_started = true;
       /* advise host + session start, then restart reading from clients */
-      this->send_start( do_h, svc->state == EvRvService::DATA_RECV_SESSION, svc );
+      this->send_start( do_h, svc->svc_state == EvRvService::DATA_RECV_SESSION,
+                        svc );
       do_h = false; /* only start host once */
       svc->idle_push( EV_READ );
     }
@@ -340,10 +341,10 @@ EvRvListen::send_sessions( const void *reply,  size_t reply_len ) noexcept
   have_daemon = false; /* include daemon onlly once */
   for ( p = iter.first(); p != NULL; p = iter.next() ) {
     EvRvService * svc = (EvRvService *) p;
-    if ( svc->state == EvRvService::DATA_RECV_DAEMON && have_daemon )
+    if ( svc->svc_state == EvRvService::DATA_RECV_DAEMON && have_daemon )
       continue;
     buflen += svc->session_len + 8; /* field + type + session str */
-    if ( svc->state == EvRvService::DATA_RECV_DAEMON )
+    if ( svc->svc_state == EvRvService::DATA_RECV_DAEMON )
       have_daemon = true;
   }
   mem.alloc( buflen, &buf );
@@ -351,10 +352,10 @@ EvRvListen::send_sessions( const void *reply,  size_t reply_len ) noexcept
   have_daemon = false;
   for ( p = iter.first(); p != NULL; p = iter.next() ) {
     EvRvService * svc = (EvRvService *) p;
-    if ( svc->state == EvRvService::DATA_RECV_DAEMON && have_daemon )
+    if ( svc->svc_state == EvRvService::DATA_RECV_DAEMON && have_daemon )
       continue;
     msg.append_string( NULL, 0, svc->session, svc->session_len + 1 );
-    if ( svc->state == EvRvService::DATA_RECV_DAEMON )
+    if ( svc->svc_state == EvRvService::DATA_RECV_DAEMON )
       have_daemon = true;
   }
   buflen = msg.update_hdr();
@@ -399,7 +400,7 @@ EvRvListen::send_subscriptions( const char *session,  size_t session_len,
       }
       linkcnt++;
       /* if not a DAEMON session, it is unique */
-      if ( svc->state != EvRvService::DATA_RECV_DAEMON )
+      if ( svc->svc_state != EvRvService::DATA_RECV_DAEMON )
         break;
     }
   }
@@ -561,7 +562,7 @@ EvRvService::process( void ) noexcept
   int32_t status = 0;
 
   /* state trasition from VERS_RECV -> INFO_RECV -> DATA_RECV */
-  if ( this->state >= DATA_RECV ) { /* main state */
+  if ( this->svc_state >= DATA_RECV ) { /* main state */
   data_recv_loop:;
     do {
       buflen = this->len - this->off;
@@ -581,19 +582,19 @@ EvRvService::process( void ) noexcept
       buflen = this->len - this->off;
       if ( buflen < 8 )
         goto break_loop;
-      if ( this->state == VERS_RECV ) {
+      if ( this->svc_state == VERS_RECV ) {
         if ( buflen < 3 * 4 )
           goto break_loop;
         this->off += 3 * 4;
         this->send_info( false );
-        this->state = INFO_RECV;
+        this->svc_state = INFO_RECV;
       }
       else { /* INFO_RECV */
         if ( buflen < 16 * 4 )
           goto break_loop;
         this->off += 16 * 4;
         this->send_info( true );
-        this->state = DATA_RECV;
+        this->svc_state = DATA_RECV;
         goto data_recv_loop;
       }
     }
@@ -803,17 +804,17 @@ EvRvService::respond_info( void ) noexcept
         ::memcpy( this->session, this->stat.daemon_id,
                   this->stat.daemon_len + 1 );
         this->session_len = this->stat.daemon_len;
-        this->state = DATA_RECV_DAEMON;   /* use the iphex.DAEMON.session */
+        this->svc_state = DATA_RECV_DAEMON;   /* use the iphex.DAEMON.session */
       }
       else
-        this->state = DATA_RECV_SESSION; /* use the session as specified */
+        this->svc_state = DATA_RECV_SESSION; /* use the session as specified */
     }
     else {
-      this->state = DATA_RECV; /* continue, need another info message */
+      this->svc_state = DATA_RECV; /* continue, need another info message */
     }
   }
   /* if host started already, send session start if rv5 */
-  if ( this->host_started && this->state == DATA_RECV_SESSION )
+  if ( this->host_started && this->svc_state == DATA_RECV_SESSION )
     this->stat.send_start( false, true, this );
   return 0;
 }
@@ -1213,7 +1214,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
   if ( status == 0 && pub.reply_len > 0 ) {
     status = rvmsg.append_string( SARG( "return" ), (const char *) pub.reply,
                                   pub.reply_len + 1 );
-    buf[ rvmsg.off - 1 ] = '\0';
+    b[ rvmsg.off - 1 ] = '\0';
   }
   if ( status == 0 ) {
     uint8_t msg_enc = pub.msg_enc;
@@ -1341,7 +1342,7 @@ EvRvService::process_shutdown( void ) noexcept
 void
 EvRvService::process_close( void ) noexcept
 {
-  if ( this->state == DATA_RECV_SESSION )
+  if ( this->svc_state == DATA_RECV_SESSION )
     this->stat.send_stop( false, true, this );
   if ( --this->stat.active_clients == 0 )
     this->stat.stop_network();
@@ -1478,9 +1479,10 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
             if ( ::memcmp( nm.fname, SARG( "mtype" ) ) == 0 ) {
               if ( mref.ftype == MD_STRING && mref.fsize == 2 ) {
                 this->mtype = mref.fptr[ 0 ];
-                if ( this->mtype >= 'C' && this->mtype <= 'L' ) {
+                if ( this->mtype >= 'C' && this->mtype <= 'R' ) {
                   static const uint32_t valid =
-                    1 /* C */ | 2 /* D */ | 64 /* I */ | 512 /* L */;
+                      1 /* C */ | 2 /* D */ | 64 /* I */ | 512 /* L */
+                    | 32768 /* R */;
                   if ( ( ( 1 << ( this->mtype - 'C' ) ) & valid ) != 0 )
                     cnt |= 2;
                 }

@@ -4,3 +4,7 @@
 [submodule "raimd"]
 	path = raimd
 	url = https://github.com/raitechnology/raimd
+[submodule "HdrHistogram_c"]
+	path = HdrHistogram_c
+	url = https://github.com/raitechnology/HdrHistogram_c
+	branch = rai

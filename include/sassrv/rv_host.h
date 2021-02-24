@@ -45,6 +45,8 @@ enum RvHostError {
   ERR_START_HOST_FAILED  = 20 /* EvRvListener::host_start() failed */
 };
 
+const char * get_rv_host_error( int status ) noexcept;
+
 /* eth0    ; 228.8.8.8,226.6.6.6 ; 224.4.4.4 */
 /* host_ip   recv_ip[ 2 ],         send_ip  (all in network order) */
 struct RvMcast {

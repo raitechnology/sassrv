@@ -16,10 +16,12 @@ BuildRequires:  raikv
 BuildRequires:  raimd
 BuildRequires:  libdecnumber
 BuildRequires:  pcre2-devel
+BuildRequires:  hdrhist
 Requires:       raikv
 Requires:       raimd
 Requires:       libdecnumber
 Requires:       pcre2
+Requires:       hdrhist
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
