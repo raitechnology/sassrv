@@ -7,12 +7,12 @@ rpmdir := $(shell pwd)
 major_num   := 1
 minor_num   := 2
 patch_num   := 0
-build_num   := 14
+build_num   := 15
 version     := $(major_num).$(minor_num).$(patch_num)
 ver_build   := $(version)-$(build_num)
 name_ver    := $(name)-$(ver_build)
 rpm_src_dir := rpmbuild/SOURCES/$(name)-$(version)
-srctree     := src include GNUmakefile .copr deb rpm
+srctree     := src test include GNUmakefile .copr deb rpm
 
 .PHONY: srpm
 srpm: $(outdir)/$(name)-$(version)-$(release).src.rpm
