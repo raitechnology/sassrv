@@ -15,18 +15,12 @@ extern "C" {
 namespace rai {
 namespace sassrv {
 
-struct EvRvReconnectNotify {
-  virtual void on_reconnect( void ) noexcept;
-};
-
 /* tcp listener for accepting EvRvService connections */
 struct EvRvListen : public kv::EvTcpListen, public RvHost {
   void * operator new( size_t, void *ptr ) { return ptr; }
 
   uint32_t host_status_timer, /* timer for HOST.STATUS */
-           host_reconnect_timer, /* timer for reconnect */
            host_network_start;/* incr when host starts */
-  EvRvReconnectNotify * notify;
 
   EvRvListen( kv::EvPoll &p ) noexcept;
   /* EvListen */
@@ -44,8 +38,6 @@ struct EvRvListen : public kv::EvTcpListen, public RvHost {
   virtual void process_close( void ) noexcept final;
   virtual bool on_msg( kv::EvPublish &pub ) noexcept final;
 
-  void set_reconnect_timer( uint32_t secs,
-                            EvRvReconnectNotify *notify ) noexcept;
   void subscribe_daemon_inbox( void ) noexcept;
   void unsubscribe_daemon_inbox( void ) noexcept;
   void send_sessions( const void *reply,  size_t reply_len ) noexcept;

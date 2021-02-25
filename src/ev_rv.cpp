@@ -74,8 +74,7 @@ using namespace md;
 
 EvRvListen::EvRvListen( EvPoll &p ) noexcept
   : EvTcpListen( p, "rv_listen", "rv_sock" ), RvHost( *this ),
-    host_status_timer( 0 ), host_reconnect_timer( 0xffffffffU ),
-    host_network_start( 0 ), notify( 0 )
+    host_status_timer( 0 ), host_network_start( 0 )
 {
   md_init_auto_unpack();
 }
@@ -143,25 +142,11 @@ bool
 EvRvListen::timer_expire( uint64_t, uint64_t eid ) noexcept
 {
   /* stop timer when host stops */
-  if ( eid != (uint64_t) this->host_status_timer ) {
-    if ( eid == this->host_reconnect_timer )
-      this->notify->on_reconnect();
+  if ( eid != (uint64_t) this->host_status_timer )
     return false;
-  }
   this->host_status(); /* still going */
   return true;
 }
-
-void
-EvRvListen::set_reconnect_timer( uint32_t secs,
-                                 EvRvReconnectNotify *notify ) noexcept
-{
-  this->notify = notify;
-  this->poll.add_timer_seconds( this->fd, secs, 0,
-                                --this->host_reconnect_timer );
-}
-
-void EvRvReconnectNotify::on_reconnect( void ) noexcept {}
 
 void
 EvRvListen::host_status( void ) noexcept
@@ -195,10 +180,11 @@ EvRvService::read( void ) noexcept
 int
 EvRvListen::start_host( void ) noexcept
 {
-  /* subscribe _INBOX.DAEMON.iphex */
-  if ( this->host_status_timer != 0 )
+  if ( this->host_status_timer != 0 ) /* host already started */
+    /* reassert all subs open */
     this->reassert_subs();
   else {
+    /* subscribe _INBOX.DAEMON.iphex */
     this->subscribe_daemon_inbox();
     /* start timer to send the status every 90 seconds */
     this->host_status_timer = ++this->host_network_start;
@@ -1479,12 +1465,18 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
             if ( ::memcmp( nm.fname, SARG( "mtype" ) ) == 0 ) {
               if ( mref.ftype == MD_STRING && mref.fsize == 2 ) {
                 this->mtype = mref.fptr[ 0 ];
-                if ( this->mtype >= 'C' && this->mtype <= 'R' ) {
+                if ( this->mtype >= 'A' && this->mtype <= 'R' ) {
+                  #define B( c ) ( 1U << ( c - 'A' ) )
                   static const uint32_t valid =
-                      1 /* C */ | 2 /* D */ | 64 /* I */ | 512 /* L */
-                    | 32768 /* R */;
-                  if ( ( ( 1 << ( this->mtype - 'C' ) ) & valid ) != 0 )
+                        B( 'A' ) /* advisorty */
+                      | B( 'C' ) /* cancel */
+                      | B( 'D' ) /* data */
+                      | B( 'I' ) /* initialize */
+                      | B( 'L' ) /* listen */
+                      | B( 'R' );/* response */
+                  if ( ( B( this->mtype ) & valid ) != 0 )
                     cnt |= 2;
+                  #undef B
                 }
               }
             }
