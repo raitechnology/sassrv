@@ -17,12 +17,12 @@ using namespace sassrv;
 using namespace kv;
 using namespace md;
 
-static const size_t PING_MSG_SIZE = 32;
+static const size_t PING_MSG_SIZE = 32; /* 8 * 4 */
 struct PingMsg {
+  char     ping_hdr[ 8 ];
   uint64_t ping_src,
            time_sent,
            seqno_sent;
-  char     pad[ PING_MSG_SIZE - sizeof( uint64_t ) * 3 ];
 };
 
 static const char *
@@ -67,11 +67,12 @@ struct Endpoint : public EvSocket {
     this->rep    = r;
     this->replen = ::strlen( r );
     this->rep_h  = kv_crc_c( r, this->replen, 0 );
-
+    return 0;
+  }
+  void start_sub( void ) {
     uint32_t rcnt = this->poll.sub_route.add_sub_route( this->rep_h, this->fd );
     this->poll.notify_sub( this->rep_h, this->rep, this->replen, this->fd,
                            rcnt, 'V', NULL, 0 );
-    return 0;
   }
   virtual bool on_msg( EvPublish &pub ) noexcept {
     if ( pub.msg_len == sizeof( PingMsg ) ) {
@@ -88,11 +89,11 @@ struct Endpoint : public EvSocket {
   virtual void release( void ) noexcept {}
 
   bool recv_ping( uint64_t &src, uint64_t &stamp, uint64_t &num ) {
-    if ( this->last_msg.ping_src != 0 ) {
+    if ( this->last_msg.ping_hdr[ 0 ] == 'P' ) {
       src   = this->last_msg.ping_src;
       stamp = this->last_msg.time_sent;
       num   = this->last_msg.seqno_sent;
-      this->last_msg.ping_src = 0;
+      this->last_msg.ping_hdr[ 0 ] = 0;
       return true;
     }
     return false;
@@ -100,6 +101,7 @@ struct Endpoint : public EvSocket {
 
   bool send_ping( uint64_t src,  uint64_t stamp,  uint64_t num ) {
     PingMsg  m;
+    ::memcpy( m.ping_hdr, "PING1234", 8 );
     m.ping_src   = src;
     m.time_sent  = stamp;
     m.seqno_sent = num;
@@ -110,10 +112,69 @@ struct Endpoint : public EvSocket {
   }
 };
 
-struct MyRvClient : public EvRvClient, public Endpoint {
+struct MyRvClient : public EvRvClient, public Endpoint,
+                    public EvConnectionNotify, public EvTimerCallback {
+  EvRvClientParameters & parameters;
+
   uint64_t timeout_usecs;
-  MyRvClient( EvPoll &p ) : EvRvClient( p ), Endpoint( p ),
-                            timeout_usecs( 0 ) {}
+  double   reconnect_time;
+  uint16_t reconnect_timeout_secs;
+  bool     is_reconnecting,
+           is_shutdown;
+
+  MyRvClient( EvPoll &p,  EvRvClientParameters &parm )
+    : EvRvClient( p ), Endpoint( p ), parameters( parm ),
+      timeout_usecs( 0 ), reconnect_time( 0 ), reconnect_timeout_secs( 1 ),
+      is_reconnecting( false ), is_shutdown( false ) {}
+
+  bool do_connect( void ) {
+    if ( ! this->EvRvClient::connect( this->parameters, this ) ) {
+      fprintf( stderr, "create socket failed\n" );
+      this->setup_reconnect();
+      return false;
+    }
+    return true;
+  }
+  /* notifcation of ready, after authentication, etc */
+  virtual void on_connect( EvConnection &conn ) noexcept {
+    printf( "connected %s\n", conn.peer_address );
+    this->start_sub();
+  }
+  /* notification of connection close or loss */
+  virtual void on_shutdown( EvConnection &conn,  const char *,
+                            size_t ) noexcept {
+    printf( "disconnected %s\n", conn.peer_address );
+    this->setup_reconnect();
+  }
+  void setup_reconnect( void ) {
+    if ( ! this->is_reconnecting && ! this->is_shutdown ) {
+      this->is_reconnecting = true;
+      double now = current_monotonic_time_s();
+      if ( this->reconnect_time != 0 && this->reconnect_time +
+             (double) this->reconnect_timeout_secs * 2 > now ) {
+          this->reconnect_timeout_secs *= 2;
+          if ( this->reconnect_timeout_secs > 16 )
+            this->reconnect_timeout_secs = 16;
+      }
+      else {
+        this->reconnect_timeout_secs = 1;
+      }
+      this->reconnect_time = now;
+      printf( "reconnect in %u seconds\n", this->reconnect_timeout_secs );
+      this->Endpoint::poll.add_timer_seconds( *this,
+                                           this->reconnect_timeout_secs, 0, 0 );
+    }
+  }
+  virtual bool timer_cb( uint64_t, uint64_t ) noexcept {
+    if ( this->is_reconnecting ) {
+      this->is_reconnecting = false;
+      if ( ! this->is_shutdown ) {
+        if ( ! this->do_connect() )
+          this->setup_reconnect();
+      }
+    }
+    return false;
+  }
 };
 
 int
@@ -125,7 +186,7 @@ main( int argc, char **argv )
              * sv = get_arg( argc, argv, 1, "-s", "7500" ),
              * ct = get_arg( argc, argv, 1, "-c", 0 ),
              * re = get_arg( argc, argv, 0, "-r", 0 ),
-             * bu = get_arg( argc, argv, 0, "-b", 0 ),
+             /** bu = get_arg( argc, argv, 0, "-b", 0 ),*/
              * he = get_arg( argc, argv, 0, "-h", 0 );
   uint64_t count = 0, warm = 0;
   
@@ -153,11 +214,6 @@ main( int argc, char **argv )
 
   EvPoll poll;
   poll.init( 5, false );
-  MyRvClient conn( poll );
-  if ( ! conn.connect( "127.0.0.1", atoi( de ), ne, sv, NULL ) ) {
-    fprintf( stderr, "create RV socket to %s failed\n", de );
-    return 1;
-  }
 
   struct hdr_histogram * histogram = NULL;
   uint64_t ping_ival = 1000000000,
@@ -171,23 +227,14 @@ main( int argc, char **argv )
   bool     reflect  = ( re != NULL );
   const char * sub = ( reflect ? "_TIC.TEST" : "TEST" );
   const char * rep = ( reflect ? "TEST" : "_TIC.TEST" );
+  EvRvClientParameters parm( "127.0.0.1", ne, sv, atoi( de ) );
 
-  sighndl.install();
-  while ( ! poll.quit ) {
-    idle = poll.dispatch();
-    poll.wait( idle == EvPoll::DISPATCH_IDLE ? 100 : 0 );
-    if ( conn.rv_state == EvRvClient::DATA_RECV )
-      break;
-    if ( conn.rv_state == EvRvClient::ERR_CLOSE ) {
-      fprintf( stderr, "connect failed\n" );
-      return 1;
-    }
-    if ( sighndl.signaled )
-      return 1;
-  }
+  MyRvClient conn( poll, parm );
   conn.init_endpoint( sub, rep );
-  if ( bu != NULL )
-    conn.EvRvClient::push( EV_BUSY_POLL );
+  conn.do_connect();
+  sighndl.install();
+  /*if ( bu != NULL )
+    conn.EvRvClient::push( EV_BUSY_POLL );*/
   if ( ! reflect )
     hdr_init( 1, 1000000, 3, &histogram );
   for (;;) {
@@ -213,6 +260,7 @@ main( int argc, char **argv )
              warm  = 0;
           }
           else {
+            conn.is_shutdown = true;
             poll.quit++;
           }
         }
@@ -239,8 +287,10 @@ main( int argc, char **argv )
           conn.timeout_usecs = delta / 1000;
       }
     }
-    if ( sighndl.signaled )
+    if ( sighndl.signaled ) {
+      conn.is_shutdown = true;
       poll.quit++;
+    }
   }
   /*conn.close();*/
   if ( ! reflect )

@@ -6,8 +6,16 @@
 namespace rai {
 namespace sassrv {
 
-struct EvRvClientNotify {
-  virtual void on_connect( void ) noexcept;
+struct EvRvClientParameters {
+  const char * daemon,
+             * network,
+             * service;
+  int          port,
+               opts;
+  EvRvClientParameters( const char *d = NULL,  const char *n = NULL,
+                        const char *s = "7500",  int p = 7500,
+                        int o = kv::DEFAULT_TCP_CONNECT_OPTS )
+    : daemon( d ), network( n ), service( s ), port( p ), opts( o ) {}
 };
 
 struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
@@ -40,14 +48,12 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
   uint32_t     ipaddr;
   const char * network,
              * service;
-  EvRvClientNotify * notify;
 
   EvRvClient( kv::EvPoll &p ) noexcept;
 
   /* connect to a NATS server */
-  bool connect( const char *host,  int port,
-                const char *network,  const char *service,
-                EvRvClientNotify *n = NULL ) noexcept;
+  bool connect( EvRvClientParameters &p,
+                kv::EvConnectionNotify *n = NULL ) noexcept;
   bool is_connected( void ) const {
     return this->EvSocket::fd != -1;
   }

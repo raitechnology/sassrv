@@ -58,18 +58,16 @@ EvRvClient::EvRvClient( EvPoll &p ) noexcept
 
 
 bool
-EvRvClient::connect( const char *host,  int port,
-                     const char *network,  const char *service,
-                     EvRvClientNotify *n ) noexcept
+EvRvClient::connect( EvRvClientParameters &p,
+                     EvConnectionNotify *n ) noexcept
 {
   if ( this->fd != -1 )
     return false;
   this->initialize_state();
-  if ( EvTcpConnection::connect( *this, host, port,
-                                 DEFAULT_TCP_CONNECT_OPTS ) != 0 )
+  if ( EvTcpConnection::connect( *this, p.daemon, p.port, p.opts ) != 0 )
     return false;
-  this->network = network;
-  this->service = service;
+  this->network = p.network;
+  this->service = p.service;
   this->notify  = n;
   return true;
 }
@@ -319,7 +317,7 @@ EvRvClient::recv_conn( void ) noexcept
     this->poll.sub_route.add_pattern_route( h, this->fd, 0 );
   }
   if ( this->notify != NULL )
-    this->notify->on_connect();
+    this->notify->on_connect( *this );
   return 0;
 }
 
@@ -388,9 +386,9 @@ EvRvClient::fwd_pub( void ) noexcept
     }
   }
   else if ( ftype == MD_OPAQUE ) {
-    MDMsg * m = MDMsg::unpack( msg, 0, msg_len, 0, NULL, &this->msg_in.mem );
-    if ( m != NULL )
-      ftype = (uint8_t) m->get_type_id();
+    uint32_t ft = MDMsg::is_msg_type( msg, 0, msg_len, 0 );
+    if ( ft != 0 )
+      ftype = (uint8_t) ft;
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
                  this->fd, h, NULL, 0, ftype, 'p' );
@@ -523,6 +521,15 @@ EvRvClient::on_msg( EvPublish &pub ) noexcept
 void
 EvRvClient::release( void ) noexcept
 {
+  if ( this->fwd_all_msgs ) {
+    uint32_t h = this->poll.sub_route.prefix_seed( 0 );
+    this->poll.sub_route.del_pattern_route( h, this->fd, 0 );
+  }
+  if ( this->fwd_all_subs )
+    this->poll.remove_route_notify( *this );
+  if ( this->notify != NULL )
+    this->notify->on_shutdown( *this, NULL, 0 );
+  this->EvConnection::release_buffers();
 }
 /* a new subscription */
 void

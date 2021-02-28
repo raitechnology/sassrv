@@ -1097,9 +1097,9 @@ EvRvService::fwd_pub( void ) noexcept
     }
   }
   else if ( ftype == MD_OPAQUE ) {
-    MDMsg * m = MDMsg::unpack( msg, 0, msg_len, 0, NULL, &this->msg_in.mem );
-    if ( m != NULL )
-      ftype = (uint8_t) m->get_type_id();
+    uint32_t ft = MDMsg::is_msg_type( msg, 0, msg_len, 0 );
+    if ( ft != 0 )
+      ftype = (uint8_t) ft;
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
                  this->fd, h, NULL, 0, ftype, 'p' );
