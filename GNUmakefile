@@ -189,7 +189,7 @@ libsassrv_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libsassrv_files)
 libsassrv_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(libsassrv_files))) \
                   $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(libsassrv_files)))
 libsassrv_dlnk  := $(dlnk_lib)
-libsassrv_spec  := $(version)-$(build_num)
+libsassrv_spec  := $(version)-$(build_num)_$(git_hash)
 libsassrv_ver   := $(major_num).$(minor_num)
 
 $(libd)/libsassrv.a: $(libsassrv_objs)
