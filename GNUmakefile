@@ -211,20 +211,6 @@ $(bind)/rv_server: $(rv_server_objs) $(rv_server_libs) $(lnk_dep)
 all_exes    += $(bind)/rv_server
 all_depends += $(rv_server_deps)
 
-ping_rv_includes := $(hdr_includes)
-ping_rv_defines  := -Wno-unused-function
-
-ping_rv_files := ping_rv
-ping_rv_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(ping_rv_files)))
-ping_rv_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(ping_rv_files)))
-ping_rv_libs  := $(sassrv_lib)
-ping_rv_lnk   := $(sassrv_lib) $(lnk_lib) $(hdr_lib) -lpcre2-8
-
-$(bind)/ping_rv: $(ping_rv_objs) $(ping_rv_libs) $(lnk_dep)
-
-all_exes    += $(bind)/ping_rv
-all_depends += $(ping_rv_deps)
-
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
 # the default targets
@@ -269,10 +255,9 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server $(bind)/ping_rv
+dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server
 	chrpath -d $(libd)/libsassrv.so
 	chrpath -d $(bind)/rv_server
-	chrpath -d $(bind)/ping_rv
 
 .PHONY: dist_rpm
 dist_rpm: srpm
