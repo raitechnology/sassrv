@@ -141,7 +141,7 @@ RvHost::send_start( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept
     EvPublish pub( subj, sublen, NULL, 0, buf, size, this->listener.fd,
                    kv_crc_c( subj, sublen, 0 ), NULL, 0,
                    (uint8_t) RVMSG_TYPE_ID, 'p' );
-    this->listener.poll.forward_msg( pub, NULL, 0, NULL );
+    this->listener.sub_route.forward_msg( pub, NULL, 0, NULL );
     rvmsg.reset();
   }
   if ( snd_sess ) {
@@ -151,7 +151,7 @@ RvHost::send_start( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept
     EvPublish pub( subj, sublen, NULL, 0, buf, size, this->listener.fd,
                    kv_crc_c( subj, sublen, 0 ), NULL, 0,
                    (uint8_t) RVMSG_TYPE_ID, 'p' );
-    this->listener.poll.forward_msg( pub, NULL, 0, NULL );
+    this->listener.sub_route.forward_msg( pub, NULL, 0, NULL );
   }
 }
 
@@ -171,7 +171,7 @@ RvHost::send_stop( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept
     EvPublish pub( subj, sublen, NULL, 0, buf, size, this->listener.fd,
                    kv_crc_c( subj, sublen, 0 ), NULL, 0,
                    (uint8_t) RVMSG_TYPE_ID, 'p' );
-    this->listener.poll.forward_msg( pub, NULL, 0, NULL );
+    this->listener.sub_route.forward_msg( pub, NULL, 0, NULL );
     rvmsg.reset();
   }
   if ( snd_host ) {
@@ -181,7 +181,7 @@ RvHost::send_stop( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept
     EvPublish pub( subj, sublen, NULL, 0, buf, size, this->listener.fd,
                    kv_crc_c( subj, sublen, 0 ), NULL, 0,
                    (uint8_t) RVMSG_TYPE_ID, 'p' );
-    this->listener.poll.forward_msg( pub, NULL, 0, NULL );
+    this->listener.sub_route.forward_msg( pub, NULL, 0, NULL );
   }
 }
 

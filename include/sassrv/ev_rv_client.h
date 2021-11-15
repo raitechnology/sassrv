@@ -28,6 +28,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
     CONN_RECV, /* recv connected or refused */
     DATA_RECV  /* normal protocol processing when state == DATA_RECV */
   };
+  kv::RoutePublish & sub_route;
   RvMsgIn      msg_in;         /* current message recvd */
   RvState      rv_state;       /* one of the above states */
   char         session[ 64 ],  /* session id of this connection */

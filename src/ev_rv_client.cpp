@@ -40,8 +40,8 @@ getenv_bool( const char *var )
 }
 
 EvRvClient::EvRvClient( EvPoll &p ) noexcept
-  : EvConnection( p, p.register_type( "rvclient" ) ), rv_state( VERS_RECV ),
-    fwd_all_msgs( 1 ), fwd_all_subs( 1 )
+  : EvConnection( p, p.register_type( "rvclient" ) ), sub_route( p.sub_route ),
+    rv_state( VERS_RECV ), fwd_all_msgs( 1 ), fwd_all_subs( 1 )
 {
   if ( ! rv_client_init ) {
     rv_client_init = 1;
@@ -310,11 +310,11 @@ EvRvClient::recv_conn( void ) noexcept
 
   /* if all subs are forwarded to RV */
   if ( this->fwd_all_subs )
-    this->poll.add_route_notify( *this );
+    this->sub_route.add_route_notify( *this );
   /* if all msgs are forwarded to RV */
   if ( this->fwd_all_msgs ) {
-    uint32_t h = this->poll.sub_route.prefix_seed( 0 );
-    this->poll.sub_route.add_pattern_route( h, this->fd, 0 );
+    uint32_t h = this->sub_route.prefix_seed( 0 );
+    this->sub_route.add_pattern_route( h, this->fd, 0 );
   }
   if ( this->notify != NULL )
     this->notify->on_connect( *this );
@@ -392,7 +392,7 @@ EvRvClient::fwd_pub( void ) noexcept
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
                  this->fd, h, NULL, 0, ftype, 'p' );
-  return this->poll.forward_msg( pub );
+  return this->sub_route.forward_msg( pub );
 }
 /* a message from the network, forward if matched by a subscription only once
  * as it may match multiple wild subscriptions as well as a normal sub
@@ -522,11 +522,11 @@ void
 EvRvClient::release( void ) noexcept
 {
   if ( this->fwd_all_msgs ) {
-    uint32_t h = this->poll.sub_route.prefix_seed( 0 );
-    this->poll.sub_route.del_pattern_route( h, this->fd, 0 );
+    uint32_t h = this->sub_route.prefix_seed( 0 );
+    this->sub_route.del_pattern_route( h, this->fd, 0 );
   }
   if ( this->fwd_all_subs )
-    this->poll.remove_route_notify( *this );
+    this->sub_route.remove_route_notify( *this );
   if ( this->notify != NULL )
     this->notify->on_shutdown( *this, NULL, 0 );
   this->EvConnection::release_buffers();

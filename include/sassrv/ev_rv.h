@@ -19,6 +19,7 @@ namespace sassrv {
 struct EvRvListen : public kv::EvTcpListen, public RvHost {
   void * operator new( size_t, void *ptr ) { return ptr; }
 
+  kv::RoutePublish & sub_route;
   uint32_t host_status_timer, /* timer for HOST.STATUS */
            host_network_start;/* incr when host starts */
 
@@ -76,12 +77,6 @@ struct RvSubRoute {
   uint32_t refcnt;     /* count of subscribes to subject */
   uint16_t len;        /* length of subject */
   char     value[ 2 ]; /* the subject string */
-  bool equals( const void *s,  uint16_t l ) const {
-    return l == this->len && ::memcmp( s, this->value, l ) == 0;
-  }
-  void copy( const void *s,  uint16_t l ) {
-    ::memcpy( this->value, s, l );
-  }
   uint16_t segments( void ) const {
     return count_segments( this->value, this->len );
   }
@@ -196,13 +191,6 @@ struct RvPatternRoute {
   kv::DLinkList<RvWildMatch> list;
   uint16_t                   len;        /* length of the pattern subject */
   char                       value[ 2 ]; /* the pattern subject */
-
-  bool equals( const void *s,  uint16_t l ) const {
-    return l == this->len && ::memcmp( s, this->value, l ) == 0;
-  }
-  void copy( const void *s,  uint16_t l ) {
-    ::memcpy( this->value, s, l );
-  }
 };
 
 struct RvPatternRoutePos {
@@ -307,6 +295,7 @@ struct EvRvService : public kv::EvConnection {
     DATA_RECV_DAEMON, /* rv7+ uses a DAEMON session for the service */
     DATA_RECV_SESSION /* each session is distinct, based on the connection */
   };
+  kv::RoutePublish & sub_route;
   RvMsgIn      msg_in;         /* current message recvd */
   RvSubMap     sub_tab;        /* subscriptions open by connection */
   RvPatternMap pat_tab;        /* pattern subscriptions open by connection */
@@ -326,8 +315,8 @@ struct EvRvService : public kv::EvConnection {
   bool         host_started;
   uint64_t     timer_id;       /* timerid unique for this service */
 
-  EvRvService( kv::EvPoll &p,  const uint8_t t,
-               RvHost &st ) : kv::EvConnection( p, t ), stat( st ) {}
+  EvRvService( kv::EvPoll &p,  const uint8_t t,  RvHost &st )
+    : kv::EvConnection( p, t ), sub_route( p.sub_route ), stat( st ) {}
   void initialize_state( uint64_t id ) {
     this->svc_state = VERS_RECV;
     this->timer_id = id;
