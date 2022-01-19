@@ -74,14 +74,21 @@ using namespace md;
 
 EvRvListen::EvRvListen( EvPoll &p ) noexcept
   : EvTcpListen( p, "rv_listen", "rv_sock" ), RvHost( *this ),
-    sub_route( p.sub_route ),
-    host_status_timer( 0 ), host_network_start( 0 )
+    sub_route( p.sub_route ), host_status_timer( 0 ), host_delay_timer( 0 ),
+    host_network_start( 0 )
+{
+  md_init_auto_unpack();
+}
+
+EvRvListen::EvRvListen( EvPoll &p,  RoutePublish &sr ) noexcept
+  : EvTcpListen( p, "rv_listen", "rv_sock" ), RvHost( *this ),
+    sub_route( sr ), host_status_timer( 0 ), host_network_start( 0 )
 {
   md_init_auto_unpack();
 }
 
 int
-EvRvListen::listen( const char *ip,  int port,  int opts )
+EvRvListen::listen( const char *ip,  int port,  int opts ) noexcept
 {
   int status;
   status = this->kv::EvTcpListen::listen( ip, port, opts, "rv_listen" );
@@ -143,8 +150,11 @@ bool
 EvRvListen::timer_expire( uint64_t, uint64_t eid ) noexcept
 {
   /* stop timer when host stops */
-  if ( eid != (uint64_t) this->host_status_timer )
+  if ( eid != (uint64_t) this->host_status_timer ) {
+    if ( eid == (uint64_t) this->host_delay_timer )
+      this->start_host2( 0 );
     return false;
+  }
   this->host_status(); /* still going */
   return true;
 }
@@ -161,9 +171,8 @@ EvRvListen::host_status( void ) noexcept
 
   sublen = this->pack_advisory( msg, status, subj, ADV_HOST_STATUS, NULL );
   size   = msg.update_hdr();
-  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
-                 kv_crc_c( subj, sublen, 0 ), NULL, 0,
-                 (uint8_t) RVMSG_TYPE_ID, 'p' );
+  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, this->fd,
+                 kv_crc_c( subj, sublen, 0 ), RVMSG_TYPE_ID, 'p' );
   this->sub_route.forward_msg( pub );
 }
 
@@ -179,43 +188,58 @@ EvRvService::read( void ) noexcept
 }
 
 int
+EvRvListen::start_host2( uint32_t delay_secs ) noexcept
+{
+  if ( delay_secs != 0 ) {
+    this->host_delay_timer = ++this->host_network_start;
+    this->poll.timer.add_timer_seconds( this->fd, delay_secs, 0,
+                                        this->host_delay_timer );
+    return 0;
+  }
+  /* subscribe _INBOX.DAEMON.iphex */
+  this->subscribe_daemon_inbox();
+  /* start timer to send the status every 90 seconds */
+  this->host_status_timer = ++this->host_network_start;
+  this->poll.timer.add_timer_seconds( this->fd, RV_STATUS_IVAL, 0,
+                                      this->host_status_timer );
+  PeerMatchArgs ka( "rv", 2 );
+  PeerMatchIter iter( *this, ka );
+  bool do_h = true;
+  for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService *svc = (EvRvService *) p;
+    svc->host_started = true;
+    /* advise host + session start, then restart reading from clients */
+    this->send_start( do_h, svc->svc_state == EvRvService::DATA_RECV_SESSION,
+                      svc );
+    do_h = false; /* only start host once */
+    svc->idle_push( EV_READ );
+  }
+  return 0;
+}
+
+int
 EvRvListen::start_host( void ) noexcept
 {
   if ( this->host_status_timer != 0 ) /* host already started */
     /* reassert all subs open */
     this->reassert_subs();
-  else {
-    /* subscribe _INBOX.DAEMON.iphex */
-    this->subscribe_daemon_inbox();
-    /* start timer to send the status every 90 seconds */
-    this->host_status_timer = ++this->host_network_start;
-    this->poll.timer.add_timer_seconds( this->fd, RV_STATUS_IVAL, 0,
-                                        this->host_status_timer );
-    PeerMatchArgs ka( "rv", 2 );
-    PeerMatchIter iter( *this, ka );
-    bool do_h = true;
-    for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
-      EvRvService *svc = (EvRvService *) p;
-      svc->host_started = true;
-      /* advise host + session start, then restart reading from clients */
-      this->send_start( do_h, svc->svc_state == EvRvService::DATA_RECV_SESSION,
-                        svc );
-      do_h = false; /* only start host once */
-      svc->idle_push( EV_READ );
-    }
-  }
+  else
+    this->start_host2( 0 );
   return 0;
 }
 
 int
 EvRvListen::stop_host( void ) noexcept
 {
-  /* unsubscribe _INBOX.DAEMON.iphex */
-  this->unsubscribe_daemon_inbox();
-  /* advise host stop */
-  this->send_stop( true, false, NULL );
-  /* stop the timer, the timer_expire() function tests this */
-  this->host_status_timer = 0;
+  if ( this->host_status_timer != 0 ) {
+    /* stop the timer, the timer_expire() function tests this */
+    this->host_status_timer = 0;
+    this->host_delay_timer  = 0;
+    /* unsubscribe _INBOX.DAEMON.iphex */
+    this->unsubscribe_daemon_inbox();
+    /* advise host stop */
+    this->send_stop( true, false, NULL );
+  }
   return 0;
 }
 
@@ -247,9 +271,8 @@ EvRvListen::data_loss_error( uint64_t bytes_lost,  const char *err,
   msg.append_uint( SARG( "lost" ), bytes_lost );
   msg.append_ipdata( SARG( "scid" ), this->ipport );
   size = msg.update_hdr();
-  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->fd,
-                 kv_crc_c( subj, sublen, 0 ), NULL, 0,
-                 (uint8_t) RVMSG_TYPE_ID, 'p' );
+  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, this->fd,
+                 kv_crc_c( subj, sublen, 0 ), RVMSG_TYPE_ID, 'p' );
 
   PeerMatchArgs ka( "rv", 2 );
   PeerMatchIter iter( *this, ka );
@@ -276,23 +299,34 @@ void
 EvRvListen::subscribe_daemon_inbox( void ) noexcept
 {
   DaemonInbox ibx( *this );
-  uint32_t rcnt;
-  if ( ! this->sub_route.is_sub_member( ibx.h, this->fd ) ) {
-    rcnt = this->sub_route.add_sub_route( ibx.h, this->fd );
-    this->sub_route.notify_sub( ibx.h, ibx.buf, ibx.len, this->fd, rcnt, 'V',
-                                NULL, 0 );
-  }
+  NotifySub nsub( ibx.buf, ibx.len, ibx.h, this->fd, false, 'V' );
+  this->sub_route.add_sub( nsub );
 }
 
 void
 EvRvListen::unsubscribe_daemon_inbox( void ) noexcept
 {
   DaemonInbox ibx( *this );
-  uint32_t rcnt;
-  if ( this->sub_route.is_sub_member( ibx.h, this->fd ) ) {
-    rcnt = this->sub_route.del_sub_route( ibx.h, this->fd );
-    this->sub_route.notify_unsub( ibx.h, ibx.buf, ibx.len, this->fd, rcnt, 'V');
+  NotifySub nsub( ibx.buf, ibx.len, ibx.h, this->fd, false, 'V' );
+  this->sub_route.del_sub( nsub );
+}
+
+uint8_t
+EvRvListen::is_subscribed( const NotifySub &sub ) noexcept
+{
+  uint8_t v = 0;
+  DaemonInbox ibx( *this );
+  if ( sub.subj_hash == ibx.h ) {
+    if ( sub.subject_len == ibx.len &&
+         ::memcmp( sub.subject, ibx.buf, ibx.len ) == 0 )
+      v = EV_SUBSCRIBED;
+    else
+      v = EV_NOT_SUBSCRIBED | EV_COLLISION;
   }
+  else {
+    v = EV_NOT_SUBSCRIBED;
+  }
+  return v;
 }
 
 void
@@ -347,8 +381,8 @@ EvRvListen::send_sessions( const void *reply,  size_t reply_len ) noexcept
   }
   buflen = msg.update_hdr();
   EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
-                 this->fd, kv_crc_c( reply, reply_len, 0 ), NULL, 0,
-                 (uint8_t) RVMSG_TYPE_ID, 'p' );
+                 this->sub_route, this->fd, kv_crc_c( reply, reply_len, 0 ),
+                 RVMSG_TYPE_ID, 'p' );
   this->sub_route.forward_msg( pub );
 }
 
@@ -455,8 +489,8 @@ EvRvListen::send_subscriptions( const char *session,  size_t session_len,
   msg.append_int<int32_t>( SARG( "end" ), 1 );
   buflen = msg.update_hdr();
   EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
-                 this->fd, kv_crc_c( reply, reply_len, 0 ), NULL, 0,
-                 (uint8_t) RVMSG_TYPE_ID, 'p' );
+                 this->sub_route, this->fd, kv_crc_c( reply, reply_len, 0 ),
+                 RVMSG_TYPE_ID, 'p' );
   this->sub_route.forward_msg( pub );
 }
 
@@ -828,33 +862,80 @@ EvRvService::timer_expire( uint64_t tid,  uint64_t ) noexcept
 #endif
   return true;
 }
+
+uint8_t
+EvRvService::is_subscribed( const NotifySub &sub ) noexcept
+{
+  uint8_t v    = 0;
+  bool    coll = false;
+  if ( this->sub_tab.find( sub.subj_hash, sub.subject, sub.subject_len,
+                           coll ) == RV_SUB_OK )
+    v |= EV_SUBSCRIBED;
+  else
+    v |= EV_NOT_SUBSCRIBED;
+  if ( coll )
+    v |= EV_COLLISION;
+  return v;
+}
+
+uint8_t
+EvRvService::is_psubscribed( const NotifyPattern &pat ) noexcept
+{
+  uint8_t v    = 0;
+  bool    coll = false;
+  const PatternCvt & cvt = pat.cvt;
+  RvPatternRoute   * rt;
+  if ( this->pat_tab.find( pat.prefix_hash, pat.pattern, cvt.prefixlen,
+                           rt, coll ) == RV_SUB_OK ) {
+    RvWildMatch *m;
+    for ( m = rt->list.hd; m != NULL; m = m->next ) {
+      if ( m->len == pat.pattern_len &&
+           ::memcmp( pat.pattern, m->value, m->len ) == 0 ) {
+        v |= EV_SUBSCRIBED;
+        break;
+      }
+    }
+    if ( m == NULL )
+      v |= EV_NOT_SUBSCRIBED | EV_COLLISION;
+    else if ( rt->count > 1 )
+      v |= EV_COLLISION;
+  }
+  else {
+    v |= EV_NOT_SUBSCRIBED;
+  }
+  if ( coll )
+    v |= EV_COLLISION;
+  return v;
+}
+
 /* when a 'L' message is received from the client, remember the subject and
  * notify with by publishing a LISTEN.START */
 void
 EvRvService::add_sub( void ) noexcept
 {
-  const char   * sub = this->msg_in.sub;
-  const uint32_t len = this->msg_in.sublen;
-  uint32_t refcnt = 0;
+  const char   * sub    = this->msg_in.sub;
+  const uint32_t len    = this->msg_in.sublen;
+  uint32_t       refcnt = 0,
+                 h;
+  bool           coll   = false;
 
   if ( ! this->msg_in.is_wild ) {
-    uint32_t h = kv_crc_c( sub, len, 0 ),
-             rcnt;
-    if ( this->sub_tab.put( h, sub, len, refcnt ) == RV_SUB_OK ) {
-      rcnt = this->sub_route.add_sub_route( h, this->fd );
-      this->sub_route.notify_sub( h, sub, len, this->fd, rcnt, 'V',
-                                  this->msg_in.reply, this->msg_in.replylen );
+    h = kv_crc_c( sub, len, 0 );
+    if ( this->sub_tab.put( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
+      NotifySub nsub( sub, len, this->msg_in.reply, this->msg_in.replylen,
+                      h, this->fd, coll, 'V' );
+      this->sub_route.add_sub( nsub );
     }
   }
   else {
     RvPatternRoute * rt;
     PatternCvt cvt;
-    uint32_t   h, rcnt;
 
     if ( cvt.convert_rv( sub, len ) == 0 ) {
       h = kv_crc_c( sub, cvt.prefixlen,
                     this->sub_route.prefix_seed( cvt.prefixlen ) );
-      if ( this->pat_tab.put( h, sub, cvt.prefixlen, rt ) != RV_SUB_NOT_FOUND ){
+      if ( this->pat_tab.put( h, sub, cvt.prefixlen, rt,
+                              coll ) != RV_SUB_NOT_FOUND ){
         RvWildMatch * m;
         for ( m = rt->list.hd; m != NULL; m = m->next ) {
           if ( m->len == len && ::memcmp( sub, m->value, len ) == 0 ) {
@@ -889,12 +970,13 @@ EvRvService::add_sub( void ) noexcept
           if ( pattern_success &&
                (m = RvWildMatch::create( len, sub, re, md )) != NULL ) {
             rt->list.push_hd( m );
-            rcnt = this->sub_route.add_pattern_route( h, this->fd,
-                                                      cvt.prefixlen );
-            this->sub_route.notify_psub( h, cvt.out, cvt.off, sub, cvt.prefixlen,
-                                         this->fd, rt->count + rcnt, 'V' );
-            rt->count++;
+            if ( rt->count++ > 0 )
+              coll = true;
             this->pat_tab.sub_count++;
+            NotifyPattern npat( cvt, sub, len,
+                                this->msg_in.reply, this->msg_in.replylen,
+                                h, this->fd, coll, 'V' );
+            this->sub_route.add_pat( npat );
           }
           else {
             fprintf( stderr, "wildcard failed\n" );
@@ -937,9 +1019,8 @@ EvRvService::add_sub( void ) noexcept
     size = msg.update_hdr();
 
     EvPublish pub( listen, listenlen, this->msg_in.reply, this->msg_in.replylen,
-                   buf, size, this->fd,
-                   kv_crc_c( listen, listenlen, 0 ), NULL, 0,
-                   (uint8_t) RVMSG_TYPE_ID, 'p' );
+                   buf, size, this->sub_route, this->fd,
+                   kv_crc_c( listen, listenlen, 0 ), RVMSG_TYPE_ID, 'p' );
     this->sub_route.forward_msg( pub );
   }
 }
@@ -948,20 +1029,17 @@ EvRvService::add_sub( void ) noexcept
 void
 EvRvService::rem_sub( void ) noexcept
 {
-  const char   * sub = this->msg_in.sub;
-  const uint32_t len = this->msg_in.sublen;
-  uint32_t refcnt = 0xffffffffU;
+  const char   * sub    = this->msg_in.sub;
+  const uint32_t len    = this->msg_in.sublen;
+  uint32_t       refcnt = 0xffffffffU;
+  bool           coll   = false;
 
   if ( ! this->msg_in.is_wild ) {
-    uint32_t h = kv_crc_c( sub, len, 0 ),
-             rcnt;
-    if ( this->sub_tab.rem( h, sub, len, refcnt ) == RV_SUB_OK ) {
+    uint32_t h = kv_crc_c( sub, len, 0 );
+    if ( this->sub_tab.rem( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
       if ( refcnt == 0 ) {
-        if ( this->sub_tab.tab.find_by_hash( h ) == NULL )
-          rcnt = this->sub_route.del_sub_route( h, this->fd );
-        else
-          rcnt = this->sub_route.get_sub_route_count( h );
-        this->sub_route.notify_unsub( h, sub, len, this->fd, rcnt, 'V' );
+        NotifySub nsub( sub, len, h, this->fd, coll, 'V' );
+        this->sub_route.del_sub( nsub );
       }
     }
   }
@@ -969,13 +1047,13 @@ EvRvService::rem_sub( void ) noexcept
     PatternCvt       cvt;
     RouteLoc         loc;
     RvPatternRoute * rt;
-    uint32_t         h, rcnt;
+    uint32_t         h;
 
     if ( cvt.convert_rv( sub, len ) == 0 ) {
       h = kv_crc_c( sub, cvt.prefixlen,
                     this->sub_route.prefix_seed( cvt.prefixlen ) );
-      if ( (rt = this->pat_tab.tab.find( h, sub, cvt.prefixlen,
-                                         loc )) != NULL ) {
+      if ( this->pat_tab.find( h, sub, cvt.prefixlen, loc, rt,
+                               coll ) == RV_SUB_OK ) {
         for ( RvWildMatch *m = rt->list.hd; m != NULL; m = m->next ) {
           if ( m->len == len && ::memcmp( m->value, sub, len ) == 0 ) {
             refcnt = --m->refcnt;
@@ -989,16 +1067,15 @@ EvRvService::rem_sub( void ) noexcept
                 m->re = NULL;
               }
               rt->list.pop( m );
-              rt->count -= 1;
-              rcnt = this->sub_route.del_pattern_route( h, this->fd,
-                                                             cvt.prefixlen );
-              this->sub_route.notify_punsub( h, cvt.out, cvt.off, sub,
-                                             cvt.prefixlen, this->fd,
-                                             rcnt + rt->count, 'V' );
+              if ( --rt->count > 0 )
+                coll = true;
               delete m;
               this->pat_tab.sub_count--;
               if ( rt->count == 0 )
                 this->pat_tab.tab.remove( loc );
+
+              NotifyPattern npat( cvt, sub, len, h, this->fd, coll, 'V' );
+              this->sub_route.del_pat( npat );
             }
             break;
           }
@@ -1006,7 +1083,7 @@ EvRvService::rem_sub( void ) noexcept
       }
     }
   }
-  /* if last ref & no listen stops on restricted subjects _RV. _INBOX. */
+  /* if found ref, no listen stops on restricted subjects _RV. _INBOX. */
   if ( refcnt != 0xffffffffU && ! is_restricted_subject( sub, len ) ) {
     static const char stop[] = "_RV.INFO.SYSTEM.LISTEN.STOP."; /* 16+12=28 */
     uint8_t * buf;
@@ -1033,9 +1110,9 @@ EvRvService::rem_sub( void ) noexcept
     msg.append_uint( SARG( "refcnt" ), refcnt );
     size = msg.update_hdr();
 
-    EvPublish pub( listen, listenlen, NULL, 0, buf, size, this->fd,
-                   kv_crc_c( listen, listenlen, 0 ), NULL, 0,
-                   (uint8_t) RVMSG_TYPE_ID, 'p' );
+    EvPublish pub( listen, listenlen, NULL, 0, buf, size,
+                   this->sub_route, this->fd, kv_crc_c( listen, listenlen, 0 ),
+                   RVMSG_TYPE_ID, 'p' );
     this->sub_route.forward_msg( pub );
   }
 }
@@ -1045,26 +1122,24 @@ EvRvService::rem_all_sub( void ) noexcept
 {
   RvSubRoutePos     pos;
   RvPatternRoutePos ppos;
-  uint32_t          rcnt;
 
   if ( this->sub_tab.first( pos ) ) {
     do {
-      rcnt = this->sub_route.del_sub_route( pos.rt->hash, this->fd );
-      this->sub_route.notify_unsub( pos.rt->hash, pos.rt->value, pos.rt->len,
-                                    this->fd, rcnt, 'V' );
+      bool coll = this->sub_tab.rem_collision( pos.rt );
+      NotifySub nsub( pos.rt->value, pos.rt->len, pos.rt->hash,
+                      this->fd, coll, 'V' );
+      this->sub_route.del_sub( nsub );
     } while ( this->sub_tab.next( pos ) );
   }
   if ( this->pat_tab.first( ppos ) ) {
     do {
-      rcnt = this->sub_route.del_pattern_route( ppos.rt->hash, this->fd,
-                                                     ppos.rt->len );
-      rcnt += ppos.rt->count;
       for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
         PatternCvt cvt;
         if ( cvt.convert_rv( m->value, m->len ) == 0 ) {
-          this->sub_route.notify_punsub( ppos.rt->hash, cvt.out, cvt.off,
-                                         m->value, cvt.prefixlen,
-                                         this->fd, --rcnt, 'V' );
+          bool coll = this->pat_tab.rem_collision( ppos.rt, m );
+          NotifyPattern npat( cvt, m->value, m->len, ppos.rt->hash,
+                              this->fd, coll, 'V' );
+          this->sub_route.del_pat( npat );
         }
       }
     } while ( this->pat_tab.next( ppos ) );
@@ -1085,15 +1160,15 @@ EvRvService::fwd_pub( void ) noexcept
   uint32_t h       = kv_crc_c( sub, sublen, 0 );
   void   * msg     = this->msg_in.data.fptr;
   uint32_t msg_len = this->msg_in.data.fsize;
-  uint8_t  ftype   = this->msg_in.data.ftype;
+  uint32_t ftype   = this->msg_in.data.ftype;
 
 /*  printf( "fwd %.*s\n", (int) sublen, sub );*/
-  if ( ftype == MD_MESSAGE || ftype == (uint8_t) RVMSG_TYPE_ID ) {
-    ftype = (uint8_t) RVMSG_TYPE_ID;
+  if ( ftype == MD_MESSAGE || ftype == RVMSG_TYPE_ID ) {
+    ftype = RVMSG_TYPE_ID;
     MDMsg * m = RvMsg::opaque_extract( (uint8_t *) msg, 8, msg_len, NULL,
                                        &this->msg_in.mem );
     if ( m != NULL ) {
-      ftype   = (uint8_t) m->get_type_id();
+      ftype   = m->get_type_id();
       msg     = &((uint8_t *) m->msg_buf)[ m->msg_off ];
       msg_len = m->msg_end - m->msg_off;
     }
@@ -1101,10 +1176,10 @@ EvRvService::fwd_pub( void ) noexcept
   else if ( ftype == MD_OPAQUE ) {
     uint32_t ft = MDMsg::is_msg_type( msg, 0, msg_len, 0 );
     if ( ft != 0 )
-      ftype = (uint8_t) ft;
+      ftype = ft;
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
-                 this->fd, h, NULL, 0, ftype, 'p' );
+                 this->sub_route, this->fd, h, ftype, 'p' );
   return this->sub_route.forward_msg( pub );
 }
 /* a message from the network, forward if matched by a subscription only once
@@ -1198,10 +1273,10 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
     b[ rvmsg.off - 1 ] = '\0';
   }
   if ( status == 0 ) {
-    uint8_t msg_enc = pub.msg_enc;
+    uint32_t msg_enc = pub.msg_enc;
     /* depending on message type, encode the hdr to send to the client */
     switch ( msg_enc ) {
-      case (uint8_t) RVMSG_TYPE_ID:
+      case RVMSG_TYPE_ID:
       do_rvmsg:;
         rvmsg.append_msg( SARG( "data" ), submsg );
         off         = rvmsg.off + submsg.off;
@@ -1221,9 +1296,9 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
             msg_enc = MD_OPAQUE;
         }
         /* FALLTHRU */
-      case (uint8_t) RAIMSG_TYPE_ID:
-      case (uint8_t) TIB_SASS_TYPE_ID:
-      case (uint8_t) TIB_SASS_FORM_TYPE_ID:
+      case RAIMSG_TYPE_ID:
+      case TIB_SASS_TYPE_ID:
+      case TIB_SASS_FORM_TYPE_ID:
       do_tibmsg:;
         msg     = pub.msg;
         msg_len = pub.msg_len;

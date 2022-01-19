@@ -89,24 +89,14 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
     /* a new subscription */
   void do_sub( const char *sub,  size_t sublen,
                const char *rep,  size_t replen ) noexcept;
-  virtual void on_sub( uint32_t h,  const char *sub,  size_t sublen,
-                       uint32_t src_fd,  uint32_t rcnt,  char src_type,
-                       const char *rep,  size_t rlen ) noexcept;
+  virtual void on_sub( kv::NotifySub &sub ) noexcept;
   /* an unsubscribed sub */
-  virtual void on_unsub( uint32_t h,  const char *sub,  size_t sublen,
-                         uint32_t src_fd,  uint32_t rcnt,
-                         char src_type ) noexcept;
+  virtual void on_unsub( kv::NotifySub &sub ) noexcept;
   /* a new pattern subscription */
   void do_psub( const char *prefix,  uint8_t prefix_len ) noexcept;
-  virtual void on_psub( uint32_t h,  const char *pattern,  size_t patlen,
-                        const char *prefix,  uint8_t prefix_len,
-                        uint32_t src_fd,  uint32_t rcnt,
-                        char src_type ) noexcept;
+  virtual void on_psub( kv::NotifyPattern &pat ) noexcept;
   /* an unsubscribed pattern sub */
-  virtual void on_punsub( uint32_t h,  const char *pattern,  size_t patlen,
-                          const char *prefix,  uint8_t prefix_len,
-                          uint32_t src_fd,  uint32_t rcnt,
-                          char src_type ) noexcept;
+  virtual void on_punsub( kv::NotifyPattern &pat ) noexcept;
   /* reassert subs after reconnect */
   virtual void on_reassert( uint32_t fd,  kv::RouteVec<kv::RouteSub> &sub_db,
                             kv::RouteVec<kv::RouteSub> &pat_db ) noexcept;

@@ -21,16 +21,19 @@ struct EvRvListen : public kv::EvTcpListen, public RvHost {
 
   kv::RoutePublish & sub_route;
   uint32_t host_status_timer, /* timer for HOST.STATUS */
+           host_delay_timer,
            host_network_start;/* incr when host starts */
 
+  EvRvListen( kv::EvPoll &p,  kv::RoutePublish &sr ) noexcept;
   EvRvListen( kv::EvPoll &p ) noexcept;
   /* EvListen */
   virtual bool accept( void ) noexcept;
-  int listen( const char *ip,  int port,  int opts );
+  virtual int listen( const char *ip,  int port,  int opts ) noexcept;
   void host_status( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.STATUS */
   void data_loss_error( uint64_t bytes_lost,  const char *err,
                         size_t errlen ) noexcept;
   /* start / stop network */
+  int start_host2( uint32_t delay_secs ) noexcept;
   virtual int start_host( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.START */
   virtual int stop_host( void ) noexcept;  /* send _RV.INFO.SYSTEM.HOST.STOP */
   /* EvSocket */
@@ -38,6 +41,7 @@ struct EvRvListen : public kv::EvTcpListen, public RvHost {
   virtual void process( void ) noexcept final;
   virtual void process_close( void ) noexcept final;
   virtual bool on_msg( kv::EvPublish &pub ) noexcept final;
+  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept final;
 
   void subscribe_daemon_inbox( void ) noexcept;
   void unsubscribe_daemon_inbox( void ) noexcept;
@@ -73,8 +77,8 @@ is_restricted_subject( const char *sub,  size_t sublen )
 /* an entry of the subscription table */
 struct RvSubRoute {
   uint32_t hash;       /* hash of subject */
-  uint32_t msg_cnt;    /* number of messages matched */
-  uint32_t refcnt;     /* count of subscribes to subject */
+  uint32_t msg_cnt,    /* number of messages matched */
+           refcnt;     /* count of subscribes to subject */
   uint16_t len;        /* length of subject */
   char     value[ 2 ]; /* the subject string */
   uint16_t segments( void ) const {
@@ -108,11 +112,14 @@ struct RvSubMap {
   }
   /* put in new sub
    * tab[ sub ] => {cnt} */
-  RvSubStatus put( uint32_t h,  const char *sub,  size_t len,  uint32_t &cnt ) {
+  RvSubStatus put( uint32_t h,  const char *sub,  size_t len,  uint32_t &cnt,
+                   bool &collision ) {
     kv::RouteLoc loc;
-    RvSubRoute * rt = this->tab.upsert( h, sub, len, loc );
+    uint32_t     hcnt;
+    RvSubRoute * rt = this->tab.upsert2( h, sub, len, loc, hcnt );
     if ( rt == NULL )
       return RV_SUB_NOT_FOUND;
+    collision = ( hcnt > 0 );
     if ( loc.is_new ) {
       rt->msg_cnt = 0;
       rt->refcnt = 1;
@@ -131,12 +138,27 @@ struct RvSubMap {
     rt->msg_cnt++;
     return RV_SUB_OK;
   }
-  /* remove tab[ sub ] */
-  RvSubStatus rem( uint32_t h,  const char *sub,  size_t len,  uint32_t &cnt ) {
+  RvSubStatus find( uint32_t h,  const char *sub,  size_t len,
+                    bool &collision ) {
     kv::RouteLoc loc;
-    RvSubRoute * rt = this->tab.find( h, sub, len, loc );
+    uint32_t     hcnt;
+    RvSubRoute * rt = this->tab.find2( h, sub, len, loc, hcnt );
+    if ( rt == NULL ) {
+      collision = ( hcnt > 0 );
+      return RV_SUB_NOT_FOUND;
+    }
+    collision = ( hcnt > 1 );
+    return RV_SUB_OK;
+  }
+  /* remove tab[ sub ] */
+  RvSubStatus rem( uint32_t h,  const char *sub,  size_t len,  uint32_t &cnt,
+                   bool &collision ) {
+    kv::RouteLoc loc;
+    uint32_t     hcnt;
+    RvSubRoute * rt = this->tab.find2( h, sub, len, loc, hcnt );
     if ( rt == NULL )
       return RV_SUB_NOT_FOUND;
+    collision = ( hcnt > 1 );
     cnt = --rt->refcnt;
     if ( rt->refcnt == 0 )
       this->tab.remove( loc );
@@ -151,6 +173,18 @@ struct RvSubMap {
   bool next( RvSubRoutePos &pos ) {
     pos.rt = this->tab.next( pos.v, pos.off );
     return pos.rt != NULL;
+  }
+  bool rem_collision( RvSubRoute *rt ) {
+    kv::RouteLoc loc;
+    RvSubRoute * rt2;
+    rt->refcnt = ~(uint32_t) 0;
+    if ( (rt2 = this->tab.find_by_hash( rt->hash, loc )) != NULL ) {
+      do {
+        if ( rt2->refcnt != ~(uint32_t) 0 )
+          return true;
+      } while ( (rt2 = this->tab.find_next_by_hash( rt->hash, loc )) != NULL );
+    }
+    return false;
   }
 };
 /* match wild, list of these for each pattern prefix */
@@ -211,11 +245,13 @@ struct RvPatternMap {
   /* put in new sub
    * tab[ sub ] => {cnt} */
   RvSubStatus put( uint32_t h,  const char *sub,  size_t len,
-                   RvPatternRoute *&rt ) {
+                   RvPatternRoute *&rt,  bool &collision ) {
     kv::RouteLoc loc;
-    rt = this->tab.upsert( h, sub, len, loc );
+    uint32_t     hcnt;
+    rt = this->tab.upsert2( h, sub, len, loc, hcnt );
     if ( rt == NULL )
       return RV_SUB_NOT_FOUND;
+    collision = ( hcnt > 0 );
     if ( loc.is_new ) {
       rt->count = 0;
       rt->list.init();
@@ -223,11 +259,28 @@ struct RvPatternMap {
     }
     return RV_SUB_EXISTS;
   }
+
   RvSubStatus find( uint32_t h,  const char *sub,  size_t len,
                     RvPatternRoute *&rt ) {
     rt = this->tab.find( h, sub, len );
     if ( rt == NULL )
       return RV_SUB_NOT_FOUND;
+    return RV_SUB_OK;
+  }
+  RvSubStatus find( uint32_t h,  const char *sub,  size_t len,
+                    RvPatternRoute *&rt,  bool &collision ) {
+    kv::RouteLoc loc;
+    return this->find( h, sub, len, loc, rt, collision );
+  }
+  RvSubStatus find( uint32_t h,  const char *sub,  size_t len,
+                    kv::RouteLoc &loc, RvPatternRoute *&rt,  bool &collision ) {
+    uint32_t hcnt;
+    rt = this->tab.find2( h, sub, len, loc, hcnt );
+    if ( rt == NULL ) {
+      collision = ( hcnt > 0 );
+      return RV_SUB_NOT_FOUND;
+    }
+    collision = ( hcnt > 1 );
     return RV_SUB_OK;
   }
   /* iterate first tab[ sub ] */
@@ -239,6 +292,21 @@ struct RvPatternMap {
   bool next( RvPatternRoutePos &pos ) {
     pos.rt = this->tab.next( pos.v, pos.off );
     return pos.rt != NULL;
+  }
+  bool rem_collision( RvPatternRoute *rt,  RvWildMatch *m ) {
+    kv::RouteLoc     loc;
+    RvPatternRoute * rt2;
+    RvWildMatch    * m2;
+    m->refcnt = ~(uint32_t) 0;
+    if ( (rt2 = this->tab.find_by_hash( rt->hash, loc )) != NULL ) {
+      do {
+        for ( m2 = rt2->list.tl; m2 != NULL; m2 = m2->back ) {
+          if ( m2->refcnt != ~(uint32_t) 0 )
+            return true;
+        }
+      } while ( (rt2 = this->tab.find_next_by_hash( rt->hash, loc )) != NULL );
+    }
+    return false;
   }
 };
 
@@ -316,7 +384,7 @@ struct EvRvService : public kv::EvConnection {
   uint64_t     timer_id;       /* timerid unique for this service */
 
   EvRvService( kv::EvPoll &p,  const uint8_t t,  RvHost &st )
-    : kv::EvConnection( p, t ), sub_route( p.sub_route ), stat( st ) {}
+    : kv::EvConnection( p, t ), sub_route( st.listener.sub_route ), stat( st ){}
   void initialize_state( uint64_t id ) {
     this->svc_state = VERS_RECV;
     this->timer_id = id;
@@ -345,6 +413,8 @@ struct EvRvService : public kv::EvConnection {
   virtual bool timer_expire( uint64_t tid, uint64_t eid ) noexcept final;
   virtual bool hash_to_sub( uint32_t h, char *k, size_t &klen ) noexcept final;
   virtual bool on_msg( kv::EvPublish &pub ) noexcept final;
+  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept final;
+  virtual uint8_t is_psubscribed( const kv::NotifyPattern &pat ) noexcept final;
 };
 
 /* temporary list of sessions for subscription listing */

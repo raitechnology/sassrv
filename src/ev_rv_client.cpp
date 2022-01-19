@@ -18,6 +18,7 @@
 #include <linux/if.h>
 #include <raikv/util.h>
 #include <raikv/ev_publish.h>
+#include <raikv/pattern_cvt.h>
 #include <sassrv/ev_rv_client.h>
 #include <raimd/tib_msg.h>
 #include <raimd/tib_sass_msg.h>
@@ -40,7 +41,8 @@ getenv_bool( const char *var )
 }
 
 EvRvClient::EvRvClient( EvPoll &p ) noexcept
-  : EvConnection( p, p.register_type( "rvclient" ) ), sub_route( p.sub_route ),
+  : EvConnection( p, p.register_type( "rvclient" ) ),
+    RouteNotify( p.sub_route ), sub_route( p.sub_route ),
     rv_state( VERS_RECV ), fwd_all_msgs( 1 ), fwd_all_subs( 1 )
 {
   if ( ! rv_client_init ) {
@@ -371,16 +373,16 @@ EvRvClient::fwd_pub( void ) noexcept
            replen  = this->msg_in.replylen;
   uint32_t h       = kv_crc_c( sub, sublen, 0 );
   void   * msg     = this->msg_in.data.fptr;
-  uint32_t msg_len = this->msg_in.data.fsize;
-  uint8_t  ftype   = this->msg_in.data.ftype;
+  uint32_t msg_len = this->msg_in.data.fsize,
+           ftype   = this->msg_in.data.ftype;
 
 /*  printf( "fwd %.*s\n", (int) sublen, sub );*/
-  if ( ftype == MD_MESSAGE || ftype == (uint8_t) RVMSG_TYPE_ID ) {
-    ftype = (uint8_t) RVMSG_TYPE_ID;
+  if ( ftype == MD_MESSAGE ) {
+    ftype = RVMSG_TYPE_ID;
     MDMsg * m = RvMsg::opaque_extract( (uint8_t *) msg, 8, msg_len, NULL,
                                        &this->msg_in.mem );
     if ( m != NULL ) {
-      ftype   = (uint8_t) m->get_type_id();
+      ftype   = m->get_type_id();
       msg     = &((uint8_t *) m->msg_buf)[ m->msg_off ];
       msg_len = m->msg_end - m->msg_off;
     }
@@ -388,10 +390,10 @@ EvRvClient::fwd_pub( void ) noexcept
   else if ( ftype == MD_OPAQUE ) {
     uint32_t ft = MDMsg::is_msg_type( msg, 0, msg_len, 0 );
     if ( ft != 0 )
-      ftype = (uint8_t) ft;
+      ftype = ft;
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
-                 this->fd, h, NULL, 0, ftype, 'p' );
+                 this->sub_route, this->fd, h, ftype, 'p' );
   return this->sub_route.forward_msg( pub );
 }
 /* a message from the network, forward if matched by a subscription only once
@@ -560,34 +562,31 @@ EvRvClient::do_sub( const char *sub,  size_t sublen,
 }
 
 void
-EvRvClient::on_sub( uint32_t /*h*/,  const char *sub,  size_t sublen,
-                    uint32_t /*src_fd*/,  uint32_t /*rcnt*/,  char /*st*/,
-                    const char *rep,  size_t rlen ) noexcept
+EvRvClient::on_sub( NotifySub &sub ) noexcept
 {
-  this->do_sub( sub, sublen, rep, rlen );
+  this->do_sub( sub.subject, sub.subject_len,
+                sub.reply, sub.reply_len );
   this->idle_push( EV_WRITE );
 }
 /* an unsubscribed sub */
 void
-EvRvClient::on_unsub( uint32_t /*h*/,  const char *sub,  size_t sublen,
-                      uint32_t /*src_fd*/,  uint32_t rcnt,
-                      char /*src_type*/ ) noexcept
+EvRvClient::on_unsub( NotifySub &sub ) noexcept
 {
   uint8_t buf[ 2 * 1024 ], * b = buf;
   size_t  buflen = sizeof( buf );
 
-  if ( rcnt != 0 ) /* if no routes left */
+  if ( sub.sub_count != 0 ) /* if no routes left */
     return;
   
-  if ( buflen < sublen * 2 + 32 ) {
-    b = (uint8_t *) this->alloc_temp( sublen * 2 + 32 );
-    buflen = sublen * 2 + 32;
+  if ( buflen < (size_t) sub.subject_len * 2 + 32 ) {
+    b = (uint8_t *) this->alloc_temp( sub.subject_len * 2 + 32 );
+    buflen = (size_t) sub.subject_len * 2 + 32;
     if ( b == NULL )
       return;
   }
   RvMsgWriter msg( b, buflen );
   msg.append_string( SARG( "mtype" ), SARG( "C" ) );
-  msg.append_subject( SARG( "sub" ), sub, sublen );
+  msg.append_subject( SARG( "sub" ), sub.subject, sub.subject_len );
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )
     this->trace_msg( '>', buf, size );
@@ -617,27 +616,23 @@ EvRvClient::do_psub( const char *prefix,  uint8_t prefix_len ) noexcept
 }
 
 void
-EvRvClient::on_psub( uint32_t/*h*/,  const char * /*pat*/,  size_t /*patlen*/,
-                     const char *prefix,  uint8_t prefix_len,
-                     uint32_t /*src_fd*/,  uint32_t /*rcnt*/,
-                     char /*src_type*/ ) noexcept
+EvRvClient::on_psub( NotifyPattern &pat ) noexcept
 {
-  this->do_psub( prefix, prefix_len );
+  this->do_psub( pat.pattern, pat.cvt.prefixlen );
   this->idle_push( EV_WRITE );
 }
 /* an unsubscribed pattern sub */
 void
-EvRvClient::on_punsub( uint32_t/*h*/,  const char * /*pat*/,  size_t /*patlen*/,
-                       const char *prefix,  uint8_t prefix_len,
-                       uint32_t /*src_fd*/,  uint32_t rcnt,
-                       char /*src_type*/ ) noexcept
+EvRvClient::on_punsub( NotifyPattern &pat ) noexcept
 {
+  const size_t prefix_len = pat.cvt.prefixlen;
+  const char * prefix     = pat.pattern;
   bool fwd = false;
-  if ( rcnt == 0 ) {
+  if ( pat.sub_count == 0 ) {
     if ( prefix_len > 0 && prefix[ prefix_len - 1 ] == '.' )
       fwd = true;
   }
-  else if ( rcnt == 1 ) {
+  else if ( pat.sub_count == 1 ) {
     if ( prefix_len == 0 ) /* EvRvClient is subscribed to > */
       fwd = true;
   }
