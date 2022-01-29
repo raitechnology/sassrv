@@ -20,17 +20,17 @@ struct Args : public MainLoopVars { /* argv[] parsed args */
 struct MyListener : public EvRvListen {
   MyListener( kv::EvPoll &p ) : EvRvListen( p ) {}
 
-  virtual int start_host( void ) noexcept final {
+  virtual int start_host( RvHost &h ) noexcept final {
     printf( "start_network:        service %.*s, \"%.*s\"\n",
-            (int) this->service_len, this->service, (int) this->network_len,
-            this->network );
-    return this->EvRvListen::start_host();
+            (int) h.service_len, h.service, (int) h.network_len,
+            h.network );
+    return this->EvRvListen::start_host( h );
   }
-  virtual int stop_host( void ) noexcept final {
+  virtual int stop_host( RvHost &h ) noexcept final {
     printf( "stop_network:         service %.*s, \"%.*s\"\n",
-            (int) this->service_len, this->service, (int) this->network_len,
-            this->network );
-    return this->EvRvListen::stop_host();
+            (int) h.service_len, h.service, (int) h.network_len,
+            h.network );
+    return this->EvRvListen::stop_host( h );
   }
 };
 

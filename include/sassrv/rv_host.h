@@ -6,6 +6,10 @@
 namespace rai {
 namespace sassrv {
 
+struct RvHost;
+struct EvRvService;
+struct EvRvListen;
+
 /* advisory fields that go into host status publishes */
 enum RvAdv {
   ADV_HOSTADDR = 0x1,     ADV_BS       = 0x1000,
@@ -31,6 +35,16 @@ enum RvAdv {
                     ADV_NETWORK,
   ADV_HOST_STOP   = ADV_HOSTADDR | ADV_TIME,
   ADV_SESSION     = ADV_HOSTADDR | ADV_ID | ADV_USERID
+};
+
+struct RvFwdAdv {
+  uint8_t         buf[ 8 * 1024 ];
+  md::RvMsgWriter rvmsg;
+  char            subj[ 64 ];
+  size_t          sublen, size;
+
+  RvFwdAdv( RvHost &h,  EvRvService *svc,  const char *prefix,
+            int flags ) noexcept;
 };
 
 enum RvHostError {
@@ -81,13 +95,14 @@ struct RvMcast {
   void print( void ) noexcept;
 };
 
-struct EvRvService;
-struct EvRvListen;
 /* host stats for the service */
-struct RvHost {
+struct RvDaemonRpc;
+struct RvHost : public kv::EvTimerCallback {
   static const size_t MAX_NETWORK_LEN = 1680,
                       MAX_SERVICE_LEN = 32;
-  EvRvListen & listener;
+  EvRvListen       & listener;
+  kv::RoutePublish & sub_route;
+
   char         host[ 256 ],       /* gethostname */
                session_ip[ 16 ],  /* ip address string 0A040416 */
                daemon_id[ 64 ],   /* hexip.DAEMON.gob */
@@ -97,23 +112,28 @@ struct RvHost {
                daemon_len,        /* len of this->daomon_id[] */
                network_len,       /* len of this->network[] */
                service_len,       /* len of this->service[] */
-               service_port,      /* service in network order */
-               ipport;            /* tcp listen port, network order */
-  bool         network_started;   /* if start_network() called and succeeded */
+               service_port;      /* service in network order */
+  bool         network_started,   /* if start_network() called and succeeded */
+               daemon_subscribed,
+               start_in_process;
   static const size_t session_ip_len = 8;
-  uint64_t     ms, bs,            /* msgs sent, bytes sent */
+  uint64_t     timer_id,
+               ms, bs,            /* msgs sent, bytes sent */
                mr, br,            /* msgs recv, bytes recv */
                ps, pr,            /* pkts sent, pkts recv */
                rx, pm,            /* retrans, pkts missed */
                idl, odl,          /* inbound dataloss, outbound dataloss */
                host_status_count, /* count of host.stat msgs sent */
                start_stamp,       /* when service started */
-               active_clients;    /* count of connections using this service */
+               active_clients,    /* count of connections using this service */
+               host_status_timer,
+               host_delay_timer;
+  RvDaemonRpc* rpc;
   RvMcast      mcast;
 
-  RvHost( EvRvListen &l ) : listener( l ) {
-    ::memset( this->host, 0, (char *) (void *) &this->mcast - this->host );
-  }
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  RvHost( EvRvListen &l,  kv::RoutePublish &sr ) noexcept;
+
   void zero_stats( uint64_t now ) {
     ::memset( &this->ms, 0, (char *) (void *) &this->start_stamp -
                             (char *) (void *) &this->ms );
@@ -122,13 +142,67 @@ struct RvHost {
   RvHostError start_network( const RvMcast &mc,  const char *net,
                              size_t net_len,  const char *svc,
                              size_t svc_len ) noexcept;
-  void send_start( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept;
-  void send_stop( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept;
+  void send_host_start( EvRvService *svc ) noexcept;
+  void send_session_start( EvRvService *svc ) noexcept;
+  void send_host_stop( EvRvService *svc ) noexcept;
+  void send_session_stop( EvRvService *svc ) noexcept;
   void stop_network( void ) noexcept;
   size_t pack_advisory( md::RvMsgWriter &msg,  const char *subj_prefix,
                         char *subj_buf,  int flags,
                         EvRvService *svc ) noexcept;
   static size_t time_to_str( uint64_t ns,  char *str ) noexcept;
+
+  void send_host_status( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.STATUS */
+  void data_loss_error( uint64_t bytes_lost,  const char *err,
+                        size_t errlen ) noexcept;
+  /* start / stop network */
+  int start_host2( uint32_t delay_secs ) noexcept;
+  int start_host( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.START */
+  int stop_host( void ) noexcept;  /* send _RV.INFO.SYSTEM.HOST.STOP */
+  virtual bool timer_cb( uint64_t tid, uint64_t eid ) noexcept final;
+  void reassert_subs( void ) noexcept;
+};
+
+struct DaemonInbox {
+  static const size_t len = 22;
+  char     buf[ len + 1 ];
+  uint32_t h;
+
+  bool equals( const DaemonInbox &ibx ) const {
+    return ibx.h == this->h && ::memcmp( ibx.buf, this->buf, len ) == 0;
+  }
+
+  DaemonInbox( RvHost &host ) {
+    ::memcpy( this->buf, "_INBOX.", 7 );
+    ::memcpy( &this->buf[ 7 ], host.session_ip, 8 );
+    ::memcpy( &this->buf[ 15 ], ".DAEMON", 8 );
+    this->h = kv_crc_c( this->buf, this->len, 0 );
+  }
+};
+
+struct RvDaemonRpc : public kv::EvSocket {
+  EvRvListen & listener;
+  kv::RoutePublish & sub_route;
+  DaemonInbox ibx;
+  uint32_t host_refs;
+
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  RvDaemonRpc( RvHost &h ) noexcept;
+
+  int init_rpc( void ) noexcept;
+  virtual void process( void ) noexcept final;
+  virtual void write( void ) noexcept final;
+  virtual void read( void ) noexcept final;
+  virtual void release( void ) noexcept final;
+  virtual void process_close( void ) noexcept final;
+  virtual bool on_msg( kv::EvPublish &pub ) noexcept final;
+  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept final;
+
+  void subscribe_daemon_inbox( void ) noexcept;
+  void unsubscribe_daemon_inbox( void ) noexcept;
+  void send_sessions( const void *reply,  size_t reply_len ) noexcept;
+  void send_subscriptions( const char *session,  size_t session_len,
+                           const void *reply,  size_t reply_len ) noexcept;
 };
 
 /* useful when literal field names with strlen arg:  SARG( "network" ) */

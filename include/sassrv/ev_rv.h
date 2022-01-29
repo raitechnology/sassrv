@@ -10,45 +10,38 @@ extern "C" {
 #include <raikv/ev_tcp.h>
 #include <raikv/route_ht.h>
 #include <raikv/dlinklist.h>
+#include <raikv/array_space.h>
 #include <sassrv/rv_host.h>
 
 namespace rai {
 namespace sassrv {
 
+typedef kv::ArrayCount<RvHost *, 4> RvHostTab;
+typedef kv::ArrayCount<RvDaemonRpc *, 4> RvDaemonTab;
+
 /* tcp listener for accepting EvRvService connections */
-struct EvRvListen : public kv::EvTcpListen, public RvHost {
+struct EvRvListen : public kv::EvTcpListen/*, public RvHost*/ {
   void * operator new( size_t, void *ptr ) { return ptr; }
 
   kv::RoutePublish & sub_route;
-  uint32_t host_status_timer, /* timer for HOST.STATUS */
-           host_delay_timer,
-           host_network_start;/* incr when host starts */
+  RvHostTab   host_tab;
+  RvDaemonTab daemon_tab;
+  RvHost    * dummy_host;
+  uint32_t    host_timer_id; /* timer for HOST.STATUS */
+  uint16_t    ipport;
 
   EvRvListen( kv::EvPoll &p,  kv::RoutePublish &sr ) noexcept;
   EvRvListen( kv::EvPoll &p ) noexcept;
   /* EvListen */
   virtual bool accept( void ) noexcept;
   virtual int listen( const char *ip,  int port,  int opts ) noexcept;
-  void host_status( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.STATUS */
-  void data_loss_error( uint64_t bytes_lost,  const char *err,
-                        size_t errlen ) noexcept;
-  /* start / stop network */
-  int start_host2( uint32_t delay_secs ) noexcept;
-  virtual int start_host( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.START */
-  virtual int stop_host( void ) noexcept;  /* send _RV.INFO.SYSTEM.HOST.STOP */
-  /* EvSocket */
-  virtual bool timer_expire( uint64_t tid, uint64_t eid ) noexcept final;
-  virtual void process( void ) noexcept final;
-  virtual void process_close( void ) noexcept final;
-  virtual bool on_msg( kv::EvPublish &pub ) noexcept final;
-  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept final;
 
-  void subscribe_daemon_inbox( void ) noexcept;
-  void unsubscribe_daemon_inbox( void ) noexcept;
-  void send_sessions( const void *reply,  size_t reply_len ) noexcept;
-  void reassert_subs( void ) noexcept;
-  void send_subscriptions( const char *session,  size_t session_len,
-                           const void *reply,  size_t reply_len ) noexcept;
+  RvHostError start_network( RvHost *&h, const RvMcast &mc,  const char *net,
+                             size_t net_len,  const char *svc,
+                             size_t svc_len ) noexcept;
+  virtual int start_host( RvHost &h ) noexcept; /* send _RV.INFO.SYSTEM.HOST.START */
+  virtual int stop_host( RvHost &h ) noexcept;  /* send _RV.INFO.SYSTEM.HOST.STOP */
+  int start_host2( RvHost &h,  uint32_t delay_secs ) noexcept;
 };
 
 /* count the number of segments in a subject:  4 = A.B.C.D */
@@ -63,6 +56,14 @@ count_segments( const char *value,  uint16_t len )
   }
   return n;
 }
+/* the inbox subjects are not forwarded to '>' (only to *.hex or _INBOX.>) */
+static inline bool
+is_inbox_subject( const char *sub,  size_t sublen )
+{
+  if ( sublen > 6 && ::memcmp( sub, "_INBOX.", 6 ) == 0 )
+    return true;
+  return false;
+}
 /* these subjects do not have LISTEN.START notication and they do not show in
  * subscription queries to _INBOX.DAEMON.iphex */
 static inline bool
@@ -70,9 +71,7 @@ is_restricted_subject( const char *sub,  size_t sublen )
 {
   if ( sublen > 3 && ::memcmp( sub, "_RV.", 3 ) == 0 )
     return true;
-  if ( sublen > 6 && ::memcmp( sub, "_INBOX.", 6 ) == 0 )
-    return true;
-  return false;
+  return is_inbox_subject( sub, sublen );
 }
 /* an entry of the subscription table */
 struct RvSubRoute {
@@ -351,29 +350,33 @@ struct RvMsgIn {
   }
   bool subject_to_string( const uint8_t *buf,  size_t buflen ) noexcept;
   int unpack( void *msgbuf,  size_t msglen ) noexcept;
-  void print( void ) noexcept;
+  void print( int status,  void *m,  size_t len ) noexcept;
 };
 
 struct EvRvService : public kv::EvConnection {
   void * operator new( size_t, void *ptr ) { return ptr; }
   enum RvState {
-    VERS_RECV,        /* handshake version */
-    INFO_RECV,        /* handshake info */
-    DATA_RECV,        /* normal protocol processing when state >= DATA_RECV */
-    DATA_RECV_DAEMON, /* rv7+ uses a DAEMON session for the service */
-    DATA_RECV_SESSION /* each session is distinct, based on the connection */
+    VERS_RECV          = 0, /* handshake version */
+    INFO_RECV          = 1, /* handshake info */
+    DATA_RECV          = 2, /* normal processing when state >= DATA_RECV */
+    IS_RV_DAEMON       = 4, /* rv7+ uses a DAEMON session for the service */
+    IS_RV_SESSION      = 8, /* each session is distinct, based on the conn */
+    SENT_HOST_START    = 16, /* sent a host start message */
+    SENT_SESSION_START = 32, /* sent a session start message */
+    SENT_SESSION_STOP  = 64  /* sent a session stop message */
   };
   kv::RoutePublish & sub_route;
   RvMsgIn      msg_in;         /* current message recvd */
   RvSubMap     sub_tab;        /* subscriptions open by connection */
   RvPatternMap pat_tab;        /* pattern subscriptions open by connection */
-  RvHost     & stat;           /* the session stats */
-  RvState      svc_state;      /* one of the above states */
+  EvRvListen & listener;
+  RvHost     * host;           /* the session stats */
   char         session[ 64 ],  /* session id of this connection */
                control[ 64 ],  /* the inbox name */
                userid[ 64 ],   /* the userid */
                gob[ 16 ];      /* deamon generated session id */
-  uint16_t     session_len,    /* lengths for the above */
+  uint16_t     svc_state,      /* the rv states */
+               session_len,    /* lengths for the above */
                control_len,
                userid_len,
                gob_len,
@@ -383,8 +386,9 @@ struct EvRvService : public kv::EvConnection {
   bool         host_started;
   uint64_t     timer_id;       /* timerid unique for this service */
 
-  EvRvService( kv::EvPoll &p,  const uint8_t t,  RvHost &st )
-    : kv::EvConnection( p, t ), sub_route( st.listener.sub_route ), stat( st ){}
+  EvRvService( kv::EvPoll &p,  const uint8_t t,  EvRvListen &l )
+    : kv::EvConnection( p, t ), sub_route( l.sub_route ),
+      listener( l ), host( 0 ) {}
   void initialize_state( uint64_t id ) {
     this->svc_state = VERS_RECV;
     this->timer_id = id;
@@ -397,13 +401,15 @@ struct EvRvService : public kv::EvConnection {
   void send_info( bool agree ) noexcept; /* info rec during connection start */
   int dispatch_msg( void *msg,  size_t msg_len ) noexcept; /* route msgs */
   int respond_info( void ) noexcept; /* parse and reply info msg ('I') */
-  void send_start( bool snd_host,  bool snd_sess ) noexcept;
+  void send_start( void ) noexcept;
+  void send_stop( void ) noexcept;
   void add_sub( void ) noexcept;     /* add subscription ('L') */
   void rem_sub( void ) noexcept;     /* unsubscribe subject ('C') */
   void rem_all_sub( void ) noexcept; /* when client disconnects, this clears */
   bool fwd_pub( void ) noexcept;     /* fwd a message from client to network */
   /* forward a message from network to client */
   bool fwd_msg( kv::EvPublish &pub ) noexcept;
+  static void print( void *m,  size_t len ) noexcept;
   /* EvSocket */
   virtual void read( void ) noexcept final;
   virtual void process( void ) noexcept final;
@@ -463,6 +469,10 @@ struct RvServiceLink {
   }
 };
 
+#define is_rv_debug kv_unlikely( rv_debug != 0 )
+extern uint32_t rv_debug;
+
 }
 }
+
 #endif

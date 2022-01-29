@@ -25,6 +25,171 @@ using namespace sassrv;
 using namespace kv;
 using namespace md;
 
+RvHost::RvHost( EvRvListen &l,  RoutePublish &sr ) noexcept
+      : listener( l ), sub_route( sr )
+{
+  ::memset( this->host, 0, (char *) (void *) &this->mcast - this->host );
+}
+#if 0
+int
+RvHost::init_host( void ) noexcept
+{
+  int pfd = this->poll.get_null_fd();
+  this->PeerData::init_peer( pfd, NULL, "rv_host" );
+  return this->poll.add_sock( this );
+}
+#endif
+bool
+RvHost::timer_cb( uint64_t,  uint64_t eid ) noexcept
+{
+  /* stop timer when host stops */
+  if ( eid != (uint64_t) this->host_status_timer ) {
+    if ( eid == (uint64_t) this->host_delay_timer )
+      this->start_host2( 0 );
+    return false;
+  }
+  this->send_host_status(); /* still going */
+  return true;
+}
+
+int
+RvHost::start_host2( uint32_t delay_secs ) noexcept
+{
+  if ( delay_secs != 0 ) {
+    this->host_delay_timer = ++this->listener.host_timer_id;
+    this->listener.poll.timer.add_timer_seconds( *this, delay_secs, 0,
+                                                 this->host_delay_timer );
+    return 0;
+  }
+  if ( this->host_status_timer == 0 ) {
+    /* subscribe _INBOX.DAEMON.iphex */
+    if ( ! this->daemon_subscribed ) {
+      this->rpc->subscribe_daemon_inbox();
+      this->daemon_subscribed = true;
+    }
+    /* start timer to send the status every 90 seconds */
+    this->host_status_timer = ++this->listener.host_timer_id;
+    this->listener.poll.timer.add_timer_seconds( *this, RV_STATUS_IVAL, 0,
+                                                 this->host_status_timer );
+  }
+  PeerMatchArgs ka( "rv", 2 );
+  PeerMatchIter iter( this->listener, ka );
+  for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService *svc = (EvRvService *) p;
+    if ( svc->host == this ) {
+      if ( ! svc->host_started ) {
+        svc->host_started = true;
+        this->active_clients++;
+      }
+      if ( svc->svc_state >= EvRvService::DATA_RECV )
+        svc->send_start();
+      svc->idle_push( EV_READ );
+    }
+  }
+  this->network_started  = true;
+  this->start_in_process = false;
+  return 0;
+}
+
+int
+RvHost::start_host( void ) noexcept
+{
+  if ( this->host_status_timer != 0 ) /* host already started */
+    /* reassert all subs open */
+    this->reassert_subs();
+  else
+    this->start_host2( 0 );
+  return 0;
+}
+
+int
+RvHost::stop_host( void ) noexcept
+{
+  if ( this->host_status_timer != 0 ) {
+    /* stop the timer, the timer_expire() function tests this */
+    this->host_status_timer = 0;
+    this->host_delay_timer  = 0;
+    /* unsubscribe _INBOX.DAEMON.iphex */
+    /*this->unsubscribe_daemon_inbox();*/
+    if ( this->daemon_subscribed ) {
+      this->rpc->unsubscribe_daemon_inbox();
+      this->daemon_subscribed = false;
+    }
+    this->send_host_stop( NULL );
+  }
+  return 0;
+}
+
+void
+RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
+                         size_t errlen ) noexcept
+{
+  static const char   subj[] = "_RV.ERROR.SYSTEM.DATALOSS.OUTBOUND.BCAST";
+  static const size_t sublen = sizeof( subj ) - 1;
+  uint8_t     buf[ 8192 ];
+  char        str[ 256 ];
+  size_t      size;
+  RvMsgWriter msg( buf, sizeof( buf ) );
+
+  msg.append_string( SARG( "ADV_CLASS" ), SARG( "ERROR" ) );
+  msg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
+  msg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.OUTBOUND.BCAST" ) );
+  if ( errlen > 0 ) {
+    if ( errlen > sizeof( str ) - 1 )
+      errlen = sizeof( str ) - 1;
+    ::memcpy( str, err, errlen );
+    str[ errlen ] = '\0';
+  }
+  else {
+    ::strcpy( str, "nats-server connection lost" );
+    errlen = ::strlen( str );
+  }
+  msg.append_string( SARG( "ADV_DESC" ), str, errlen + 1 );
+  msg.append_uint( SARG( "lost" ), bytes_lost );
+  msg.append_ipdata( SARG( "scid" ), this->listener.ipport );
+  size = msg.update_hdr();
+  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route,
+                 this->listener.fd,
+                 kv_crc_c( subj, sublen, 0 ), RVMSG_TYPE_ID, 'p' );
+
+  PeerMatchArgs ka( "rv", 2 );
+  PeerMatchIter iter( this->listener, ka );
+  for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService *svc = (EvRvService *) p;
+    if ( svc->host == this )
+      svc->fwd_msg( pub );
+  }
+}
+
+void
+RvHost::reassert_subs( void ) noexcept
+{
+  PeerMatchArgs      ka( "rv", 2 );
+  PeerMatchIter      iter( this->listener, ka );
+  RvSubRoutePos      pos;
+  RvPatternRoutePos  ppos;
+  RouteVec<RouteSub> sub_db, pat_db;
+  DaemonInbox        ibx( *this );
+
+  sub_db.insert( ibx.h, ibx.buf, ibx.len );
+  for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService &s = *(EvRvService *) p;
+    if ( s.host == this ) {
+      if ( s.sub_tab.first( pos ) ) {
+        do {
+          sub_db.upsert( pos.rt->hash, pos.rt->value, pos.rt->len );
+        } while ( s.sub_tab.next( pos ) );
+      }
+      if ( s.pat_tab.first( ppos ) ) {
+        do {
+          pat_db.upsert( ppos.rt->hash, ppos.rt->value, ppos.rt->len );
+        } while ( s.pat_tab.next( ppos ) );
+      }
+    }
+  }
+  this->sub_route.notify_reassert( this->listener.fd, sub_db, pat_db );
+}
+
 size_t
 RvHost::time_to_str( uint64_t ns,  char *str ) noexcept
 {
@@ -108,9 +273,12 @@ RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
   this->daemon_len = this->session_ip_len + 8;
   this->daemon_len += time_to_str( this->start_stamp,
                                    &this->daemon_id[ this->daemon_len ] );
-  if ( this->listener.start_host() != 0 )
+  this->rpc = NULL;
+#if 0
+  if ( this->start_host() != 0 )
     return ERR_START_HOST_FAILED;
   this->network_started = true;
+#endif
 /*  printf( "start network: %.*s, \"%.*s\"\n",
           (int) svc_len, svc, (int) net_len, net );*/
   return HOST_OK;
@@ -122,67 +290,63 @@ RvHost::stop_network( void ) noexcept
 /*  printf( "stop network:  %.*s, \"%.*s\"\n",
           (int) this->service_len, this->service, (int) this->network_len,
           this->network ); */
-  this->listener.stop_host();
-  this->network_started = false;
-}
-
-void
-RvHost::send_start( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept
-{
-  uint8_t     buf[ 8 * 1024 ];
-  RvMsgWriter rvmsg( buf, sizeof( buf ) );
-  char        subj[ 64 ];
-  size_t      sublen, size;
-
-  if ( snd_host ) {
-    static const char start[] = "_RV.INFO.SYSTEM.HOST.START.";
-    sublen = this->pack_advisory( rvmsg, start, subj, ADV_HOST_START, svc );
-    size   = rvmsg.update_hdr();
-    EvPublish pub( subj, sublen, NULL, 0, buf, size,
-                   this->listener.sub_route, this->listener.fd,
-                   kv_crc_c( subj, sublen, 0 ), RVMSG_TYPE_ID, 'p' );
-    this->listener.sub_route.forward_msg( pub, NULL, 0, NULL );
-    rvmsg.reset();
-  }
-  if ( snd_sess ) {
-    static const char sess[] = "_RV.INFO.SYSTEM.SESSION.START.";
-    sublen = this->pack_advisory( rvmsg, sess, subj, ADV_SESSION, svc );
-    size = rvmsg.update_hdr();
-    EvPublish pub( subj, sublen, NULL, 0, buf, size,
-                   this->listener.sub_route, this->listener.fd,
-                   kv_crc_c( subj, sublen, 0 ), RVMSG_TYPE_ID, 'p' );
-    this->listener.sub_route.forward_msg( pub, NULL, 0, NULL );
+  if ( this->network_started ) {
+    this->listener.stop_host( *this );
+    this->network_started  = false;
+    this->start_in_process = false;
   }
 }
 
-void
-RvHost::send_stop( bool snd_host,  bool snd_sess,  EvRvService *svc ) noexcept
+RvFwdAdv::RvFwdAdv( RvHost &h,  EvRvService *svc,  const char *prefix,
+                    int flags ) noexcept
+        : rvmsg( this->buf, sizeof( this->buf ) )
 {
-  uint8_t     buf[ 1024 ];
-  char        subj[ 64 ];
-  size_t      sublen,
-              size;
-  RvMsgWriter rvmsg( buf, sizeof( buf ) );
+  this->sublen = h.pack_advisory( this->rvmsg, prefix, this->subj, flags, svc );
+  this->size   = this->rvmsg.update_hdr();
+  EvPublish pub( this->subj, this->sublen, NULL, 0, this->buf, this->size,
+                 h.sub_route, h.listener.fd,
+                 kv_crc_c( this->subj, this->sublen, 0 ), RVMSG_TYPE_ID, 'p' );
+  if ( is_rv_debug )
+    EvRvService::print( this->buf, this->size );
+  h.sub_route.forward_msg( pub, NULL, 0, NULL );
+}
 
-  if ( snd_sess ) {
-    static const char sess[] = "_RV.INFO.SYSTEM.SESSION.STOP.";
-    sublen = this->pack_advisory( rvmsg, sess, subj, ADV_SESSION, svc );
-    size   = rvmsg.update_hdr();
-    EvPublish pub( subj, sublen, NULL, 0, buf, size,
-                   this->listener.sub_route, this->listener.fd,
-                   kv_crc_c( subj, sublen, 0 ), RVMSG_TYPE_ID, 'p' );
-    this->listener.sub_route.forward_msg( pub, NULL, 0, NULL );
-    rvmsg.reset();
-  }
-  if ( snd_host ) {
-    static const char stop[] = "_RV.INFO.SYSTEM.HOST.STOP.";
-    sublen = this->pack_advisory( rvmsg, stop, subj, ADV_HOST_STOP, svc );
-    size   = rvmsg.update_hdr();
-    EvPublish pub( subj, sublen, NULL, 0, buf, size,
-                   this->listener.sub_route, this->listener.fd,
-                   kv_crc_c( subj, sublen, 0 ), RVMSG_TYPE_ID, 'p' );
-    this->listener.sub_route.forward_msg( pub, NULL, 0, NULL );
-  }
+void
+RvHost::send_host_status( void ) noexcept
+{
+  static const char status[] = "_RV.INFO.SYSTEM.HOST.STATUS.";
+  RvFwdAdv fwd( *this, NULL, status, ADV_HOST_STATUS );
+}
+
+void
+RvHost::send_host_start( EvRvService *svc ) noexcept
+{
+  static const char start[] = "_RV.INFO.SYSTEM.HOST.START.";
+  RvFwdAdv fwd( *this, svc, start, ADV_HOST_START );
+  svc->svc_state |= EvRvService::SENT_HOST_START;
+}
+
+void
+RvHost::send_session_start( EvRvService *svc ) noexcept
+{
+  static const char sess[] = "_RV.INFO.SYSTEM.SESSION.START.";
+  RvFwdAdv fwd( *this, svc, sess, ADV_SESSION );
+  svc->svc_state |= EvRvService::SENT_SESSION_START;
+}
+
+void
+RvHost::send_host_stop( EvRvService *svc ) noexcept
+{
+  static const char stop[] = "_RV.INFO.SYSTEM.HOST.STOP.";
+  RvFwdAdv fwd( *this, svc, stop, ADV_HOST_STOP );
+}
+
+void
+RvHost::send_session_stop( EvRvService *svc ) noexcept
+{
+  static const char sess[] = "_RV.INFO.SYSTEM.SESSION.STOP.";
+  RvFwdAdv fwd( *this, svc, sess, ADV_SESSION );
+  svc->svc_state |= EvRvService::SENT_SESSION_STOP;
 }
 
 size_t
@@ -268,7 +432,7 @@ RvHost::pack_advisory( RvMsgWriter &msg,  const char *subj_prefix,
   if ( ( flags & ADV_ODL ) != 0 )
     msg.append_uint( SARG( "odl" ), (uint64_t) this->odl );
   if ( ( flags & ADV_IPPORT ) != 0 )
-    msg.append_ipdata( SARG( "ipport" ), this->ipport );
+    msg.append_ipdata( SARG( "ipport" ), this->listener.ipport );
   if ( ( flags & ADV_SERVICE ) != 0 )
     msg.append_string( SARG( "service" ), this->service, this->service_len + 1);
   if ( ( flags & ADV_NETWORK ) != 0 )
@@ -476,4 +640,261 @@ RvMcast::print( void ) noexcept
     printf( "\n" );
   }
 }
+
+RvDaemonRpc::RvDaemonRpc( RvHost &h ) noexcept
+      : EvSocket( h.listener.poll,
+                  h.listener.poll.register_type( "rv_daemon_rpc" ) ),
+        listener( h.listener ), sub_route( h.sub_route ),
+        ibx( h ), host_refs( 0 )
+{
+  this->sock_opts = OPT_NO_POLL;
+}
+
+int
+RvDaemonRpc::init_rpc( void ) noexcept
+{
+  int pfd = this->poll.get_null_fd();
+  this->PeerData::init_peer( pfd, NULL, "rv_daemon_rpc" );
+  return this->poll.add_sock( this );
+}
+
+void
+RvDaemonRpc::subscribe_daemon_inbox( void ) noexcept
+{
+  if ( ! this->in_list( IN_ACTIVE_LIST ) )
+    this->init_rpc();
+  if ( this->host_refs++ == 0 ) {
+    NotifySub nsub( this->ibx.buf, this->ibx.len, this->ibx.h,
+                    this->fd, false, 'V' );
+    this->sub_route.add_sub( nsub );
+  }
+}
+
+void
+RvDaemonRpc::unsubscribe_daemon_inbox( void ) noexcept
+{
+  if ( --this->host_refs == 0 ) {
+    NotifySub nsub( this->ibx.buf, this->ibx.len, this->ibx.h,
+                    this->fd, false, 'V' );
+    this->sub_route.del_sub( nsub );
+  }
+}
+
+uint8_t
+RvDaemonRpc::is_subscribed( const NotifySub &sub ) noexcept
+{
+  uint8_t v = 0;
+  if ( this->host_refs > 0 && sub.subj_hash == this->ibx.h ) {
+    if ( sub.subject_len == this->ibx.len &&
+         ::memcmp( sub.subject, this->ibx.buf, this->ibx.len ) == 0 )
+      v = EV_SUBSCRIBED;
+    else
+      v = EV_NOT_SUBSCRIBED | EV_COLLISION;
+  }
+  else {
+    v = EV_NOT_SUBSCRIBED;
+  }
+  return v;
+}
+
+void
+RvDaemonRpc::process_close( void ) noexcept
+{
+}
+
+static bool
+match_string( const char *s,  size_t len,  const MDReference &mref )
+{
+  return len == mref.fsize && mref.ftype == MD_STRING &&
+         ::memcmp( s, mref.fptr, len ) == 0;
+}
+
+void
+RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
+{
+  PeerMatchArgs ka( "rv", 2 );
+  PeerMatchIter iter( *this, ka );
+  PeerData    * p;
+  MDMsgMem      mem;
+  size_t        buflen = 8; /* header of rvmsg */
+  uint8_t     * buf = NULL;
+  bool          have_daemon;
+
+  have_daemon = false; /* include daemon onlly once */
+  for ( p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService * svc = (EvRvService *) p;
+    if ( ( svc->svc_state & EvRvService::IS_RV_DAEMON ) != 0 && have_daemon )
+      continue;
+    buflen += svc->session_len + 8; /* field + type + session str */
+    if ( ( svc->svc_state & EvRvService::IS_RV_DAEMON ) != 0 )
+      have_daemon = true;
+  }
+  mem.alloc( buflen, &buf );
+  RvMsgWriter msg( buf, buflen );
+  have_daemon = false;
+  for ( p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService * svc = (EvRvService *) p;
+    if ( ( svc->svc_state & EvRvService::IS_RV_DAEMON ) != 0 && have_daemon )
+      continue;
+    msg.append_string( NULL, 0, svc->session, svc->session_len + 1 );
+    if ( ( svc->svc_state & EvRvService::IS_RV_DAEMON ) != 0 )
+      have_daemon = true;
+  }
+  buflen = msg.update_hdr();
+  EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
+                 this->sub_route, this->fd, kv_crc_c( reply, reply_len, 0 ),
+                 RVMSG_TYPE_ID, 'p' );
+  this->sub_route.forward_msg( pub );
+}
+
+void
+RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
+                                 const void *reply,  size_t reply_len ) noexcept
+{
+  DLinkList<RvServiceLink> list;
+  PeerMatchArgs     ka( "rv", 2 );
+  PeerMatchIter     iter( *this, ka );
+  RvSubRoutePos     pos;
+  RvPatternRoutePos ppos;
+  MDMsgMem          mem;
+  RvServiceLink   * link;
+  uint8_t         * buf = NULL;
+  size_t            buflen,
+                    subcnt,
+                    linkcnt;
+  subcnt  = 0;
+  linkcnt = 0;
+  for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
+    EvRvService *svc = (EvRvService *) p;
+    /* sessions may be the same when link uses the DAEMON session */
+    if ( (size_t) svc->session_len + 1 == session_len &&
+         ::memcmp( session, svc->session, svc->session_len ) == 0 ) {
+      void * p;
+      mem.alloc( sizeof( RvServiceLink ), &p );
+      RvServiceLink *link = new ( p ) RvServiceLink( svc );
+      size_t n = svc->sub_tab.sub_count() + svc->pat_tab.sub_count;
+      if ( n > subcnt ) {
+        list.push_hd( link );
+        subcnt = n;
+      }
+      else {
+        list.push_tl( link );
+      }
+      linkcnt++;
+      /* if not a DAEMON session, it is unique */
+      if ( ( svc->svc_state & EvRvService::IS_RV_DAEMON ) == 0 )
+        break;
+    }
+  }
+  /* calculate the max length of the message */
+  /* hdr + "user" : "name", "end" : 1 */
+  buflen = 8 + 8 + 12 + 12;
+  if ( linkcnt > 0 ) { /* if sessions exist, only unique subjects */
+    link = list.hd;
+    buflen += link->svc.userid_len;
+    for ( ; link != NULL; link = link->next ) {
+      EvRvService & s = link->svc;
+      ::memset( link->bits, 0, sizeof( link->bits ) );
+      if ( s.sub_tab.first( pos ) ) {
+        do {
+          if ( /*linkcnt == 1 ||*/
+               link->check_subject( pos.rt->value, pos.rt->len, pos.rt->hash ) )
+            buflen += pos.rt->len + 8 + pos.rt->segments() * 2;
+        } while ( s.sub_tab.next( pos ) );
+      }
+      if ( s.pat_tab.first( ppos ) ) {
+        do {
+          for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
+            if ( /*linkcnt == 1 ||*/
+                 link->check_pattern( ppos.rt->value, ppos.rt->len,
+                                      ppos.rt->hash, m ) )
+              buflen += m->len + 8 + m->segments() * 2;
+          }
+        } while ( s.pat_tab.next( ppos ) );
+      }
+    }
+  }
+  /* create the message with unique subjects */
+  mem.alloc( buflen, &buf );
+  RvMsgWriter msg( buf, buflen );
+
+  if ( linkcnt > 0 ) {
+    link = list.hd;
+    msg.append_string( SARG( "user" ), link->svc.userid,
+                                       link->svc.userid_len + 1 );
+    for ( ; link != NULL; link = link->next ) {
+      EvRvService & s = link->svc;
+      ::memset( link->bits, 0, sizeof( link->bits ) );
+      if ( s.sub_tab.first( pos ) ) {
+        do {
+          if ( /*linkcnt == 1 ||*/
+               link->check_subject( pos.rt->value, pos.rt->len, pos.rt->hash ) )
+            msg.append_subject( NULL, 0, pos.rt->value, pos.rt->len );
+        } while ( s.sub_tab.next( pos ) );
+      }
+      if ( s.pat_tab.first( ppos ) ) {
+        do {
+          for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
+            if ( /*linkcnt == 1 ||*/
+                 link->check_pattern( ppos.rt->value, ppos.rt->len,
+                                      ppos.rt->hash, m ) )
+              msg.append_subject( NULL, 0, m->value, m->len );
+          }
+        } while ( s.pat_tab.next( ppos ) );
+      }
+    }
+  }
+  else {
+    msg.append_string( SARG( "user" ), SARG( "nobody" ) );
+  }
+  msg.append_int<int32_t>( SARG( "end" ), 1 );
+  buflen = msg.update_hdr();
+  EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
+                 this->sub_route, this->fd, kv_crc_c( reply, reply_len, 0 ),
+                 RVMSG_TYPE_ID, 'p' );
+  this->sub_route.forward_msg( pub );
+}
+
+bool
+RvDaemonRpc::on_msg( EvPublish &pub ) noexcept
+{
+  if ( pub.reply_len == 0 /*|| pub.msg_enc != (uint8_t) RVMSG_TYPE_ID*/ )
+    return true;
+  MDMsgMem     mem;
+  /*MDOutput     mout;*/
+  RvMsg       * m;
+  MDFieldIter * it;
+  MDReference   mref;
+
+  m = RvMsg::unpack_rv( (void *) pub.msg, 0, pub.msg_len, 0, NULL, &mem );
+  if ( m != NULL ) {
+    /*m->print( &mout );*/
+    /* "op":"get", "what":"sessions"
+     * "op":"get", "what":"subscriptions", "session":"0A040416.5FCC7B705B5" */
+    if ( m->get_field_iter( it ) == 0 ) {
+      if ( it->find( SARG( "op" ), mref ) == 0 &&
+           match_string( SARG( "get" ), mref ) ) {
+        if ( it->find( SARG( "what" ), mref ) == 0 ) {
+          if ( match_string( SARG( "sessions" ), mref ) ) {
+            this->send_sessions( pub.reply, pub.reply_len );
+          }
+          else if ( match_string( SARG( "subscriptions" ), mref ) ) {
+            if ( it->find( SARG( "session" ), mref ) == 0 ) {
+              if ( mref.ftype == MD_STRING ) {
+                this->send_subscriptions( (const char *) mref.fptr,
+                                         mref.fsize, pub.reply, pub.reply_len );
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return true;
+}
+
+void RvDaemonRpc::write( void ) noexcept {}
+void RvDaemonRpc::read( void ) noexcept {}
+void RvDaemonRpc::process( void ) noexcept {}
+void RvDaemonRpc::release( void ) noexcept {}
 
