@@ -44,8 +44,10 @@ RvHost::timer_cb( uint64_t,  uint64_t eid ) noexcept
 {
   /* stop timer when host stops */
   if ( eid != (uint64_t) this->host_status_timer ) {
-    if ( eid == (uint64_t) this->host_delay_timer )
+    if ( eid == (uint64_t) this->host_delay_timer ) {
+      /*printf( "delay start %s expire\n", this->service );*/
       this->start_host2( 0 );
+    }
     return false;
   }
   this->send_host_status(); /* still going */
@@ -55,6 +57,7 @@ RvHost::timer_cb( uint64_t,  uint64_t eid ) noexcept
 int
 RvHost::start_host2( uint32_t delay_secs ) noexcept
 {
+  /*printf( "start_host2 %s, delay = %u\n", this->service, delay_secs );*/
   if ( delay_secs != 0 ) {
     this->host_delay_timer = ++this->listener.host_timer_id;
     this->listener.poll.timer.add_timer_seconds( *this, delay_secs, 0,

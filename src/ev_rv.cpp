@@ -633,7 +633,7 @@ EvRvService::add_sub( void ) noexcept
     h = kv_crc_c( sub, len, 0 );
     if ( this->sub_tab.put( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
       NotifySub nsub( sub, len, this->msg_in.reply, this->msg_in.replylen,
-                      h, this->fd, coll, 'V' );
+                      h, this->fd, coll, 'V', this->host );
       this->sub_route.add_sub( nsub );
     }
   }
@@ -685,7 +685,7 @@ EvRvService::add_sub( void ) noexcept
             this->pat_tab.sub_count++;
             NotifyPattern npat( cvt, sub, len,
                                 this->msg_in.reply, this->msg_in.replylen,
-                                h, this->fd, coll, 'V' );
+                                h, this->fd, coll, 'V', this->host );
             this->sub_route.add_pat( npat );
           }
           else {
@@ -748,7 +748,7 @@ EvRvService::rem_sub( void ) noexcept
     uint32_t h = kv_crc_c( sub, len, 0 );
     if ( this->sub_tab.rem( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
       if ( refcnt == 0 ) {
-        NotifySub nsub( sub, len, h, this->fd, coll, 'V' );
+        NotifySub nsub( sub, len, h, this->fd, coll, 'V', this->host );
         this->sub_route.del_sub( nsub );
       }
     }
@@ -784,7 +784,8 @@ EvRvService::rem_sub( void ) noexcept
               if ( rt->count == 0 )
                 this->pat_tab.tab.remove( loc );
 
-              NotifyPattern npat( cvt, sub, len, h, this->fd, coll, 'V' );
+              NotifyPattern npat( cvt, sub, len, h, this->fd, coll, 'V',
+                                  this->host );
               this->sub_route.del_pat( npat );
             }
             break;
@@ -837,7 +838,7 @@ EvRvService::rem_all_sub( void ) noexcept
     do {
       bool coll = this->sub_tab.rem_collision( pos.rt );
       NotifySub nsub( pos.rt->value, pos.rt->len, pos.rt->hash,
-                      this->fd, coll, 'V' );
+                      this->fd, coll, 'V', this->host );
       this->sub_route.del_sub( nsub );
     } while ( this->sub_tab.next( pos ) );
   }
@@ -848,7 +849,7 @@ EvRvService::rem_all_sub( void ) noexcept
         if ( cvt.convert_rv( m->value, m->len ) == 0 ) {
           bool coll = this->pat_tab.rem_collision( ppos.rt, m );
           NotifyPattern npat( cvt, m->value, m->len, ppos.rt->hash,
-                              this->fd, coll, 'V' );
+                              this->fd, coll, 'V', this->host );
           this->sub_route.del_pat( npat );
         }
       }
