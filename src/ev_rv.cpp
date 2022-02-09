@@ -93,13 +93,8 @@ EvRvListen::listen( const char *ip,  int port,  int opts ) noexcept
 {
   int status;
   status = this->kv::EvTcpListen::listen( ip, port, opts, "rv_listen" );
-  if ( status == 0 ) {
+  if ( status == 0 )
     this->ipport = htons( port ); /* network order */
-#if 0
-    this->poll.add_timer_seconds( this->fd, 1, this->timer_id, 0 );
-    this->idle_push( EV_PROCESS );
-#endif
-  }
   return status;
 }
 
