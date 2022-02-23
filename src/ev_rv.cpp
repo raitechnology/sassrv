@@ -260,6 +260,7 @@ EvRvService::process( void ) noexcept
         goto break_loop;
       status = this->dispatch_msg( &this->recv[ this->off ], msglen );
       this->off      += msglen;
+      this->msgs_recv++;
       this->host->br += msglen;
       this->host->mr++;
     } while ( status == 0 );
@@ -306,9 +307,9 @@ EvRvService::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
       return 0;
     if ( msglen != 0 ) {
       MDOutput mout;
-      fprintf( stderr, "rv status %d: \"%s\"\n", status,
-               rv_status_string[ status ] );
-      mout.print_hex( msgbuf, msglen );
+      fprintf( stderr, "rv status %d: \"%s\" msglen=%lu\n", status,
+               rv_status_string[ status ], msglen );
+      mout.print_hex( msgbuf, msglen > 256 ? 256 : msglen );
     }
     return status;
   }
@@ -1062,6 +1063,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
         this->print( m, off + msg_len );
       }
       this->host->bs += off + msg_len;
+      this->msgs_sent++;
       this->host->ms++;
       /*this->send( buf, off, msg, msg_len );*/
       bool flow_good = ( this->pending() <= this->send_highwater );
