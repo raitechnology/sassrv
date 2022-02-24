@@ -383,15 +383,28 @@ struct EvRvService : public kv::EvConnection {
                vmaj,           /* vhat version of client is connected */
                vmin,
                vupd;
-  bool         host_started;
+  bool         host_started,
+               sent_initresp,
+               sent_rvdconn;
   uint64_t     timer_id;       /* timerid unique for this service */
 
   EvRvService( kv::EvPoll &p,  const uint8_t t,  EvRvListen &l )
     : kv::EvConnection( p, t ), sub_route( l.sub_route ),
-      listener( l ), host( 0 ) {}
+      listener( l ) {}
   void initialize_state( uint64_t id ) {
-    this->svc_state = VERS_RECV;
-    this->timer_id = id;
+    this->svc_state     = VERS_RECV;
+    this->host          = NULL;
+    this->session_len   = 0;
+    this->control_len   = 0;
+    this->userid_len    = 0;
+    this->gob_len       = 0;
+    this->vmaj          = 0;
+    this->vmin          = 0;
+    this->vupd          = 0;
+    this->host_started  = false;
+    this->sent_initresp = false;
+    this->sent_rvdconn  = false;
+    this->timer_id      = id;
     this->msg_in.init();
     ::memset( this->session, 0, (char *) (void *) &this->timer_id - 
                                 &this->session[ 0 ] );

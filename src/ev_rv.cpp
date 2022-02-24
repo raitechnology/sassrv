@@ -396,7 +396,6 @@ EvRvService::respond_info( void ) noexcept
                 submsg( NULL, 0 );
   size_t        size;
   uint32_t      net_len = 0, svc_len = 0;
-  bool          has_session = false;
   RvHostError   status = HOST_OK;
 
   if ( this->gob_len == 0 )
@@ -417,7 +416,6 @@ EvRvService::respond_info( void ) noexcept
         case 8:
           if ( match_str( nm, mref, "session", this->session,
                           sizeof( this->session ) ) ) {
-            has_session = true;
             this->session_len = mref.fsize - 1;
           }
           else if ( match_str( nm, mref, "control", this->control,
@@ -467,9 +465,10 @@ EvRvService::respond_info( void ) noexcept
     size = rvmsg.update_hdr( submsg );
     this->push( EV_SHUTDOWN );
   }
-  else if ( ! has_session ) {
+  else if ( ! this->sent_initresp ) {
     /* { sub: RVD.INITRESP, mtype: R,
      *   data: { ipaddr: a.b.c.d, ipport: 7500, vmaj: 5, vmin: 4, vupd: 2 } } */
+    this->sent_initresp = true;
     rvmsg.append_subject( SARG( "sub" ), "RVD.INITRESP" );
     rvmsg.append_string( SARG( "mtype" ), SARG( "R" ) );
     rvmsg.append_msg( SARG( "data" ), submsg );
@@ -485,6 +484,7 @@ EvRvService::respond_info( void ) noexcept
   else {
     /* { sub: _RV.INFO.SYSTEM.RVD.CONNECTED, mtype: D,
      *   data: { ADV_CLASS: INFO, ADV_SOURCE: SYSTEM, ADV_NAME: RVD.CONNECTED } } */
+    this->sent_rvdconn = true;
     rvmsg.append_subject( SARG( "sub" ), "_RV.INFO.SYSTEM.RVD.CONNECTED" );
     rvmsg.append_string( SARG( "mtype" ), SARG( "D" ) );
     rvmsg.append_msg( SARG( "data" ), submsg );
@@ -502,7 +502,7 @@ EvRvService::respond_info( void ) noexcept
     if ( this->svc_state < DATA_RECV )
       this->svc_state = DATA_RECV; /* continue, need another info message */
 
-    if ( has_session ) {
+    if ( this->sent_rvdconn ) {
       if ( this->session_len > 9 &&
           ::strcmp( this->gob, &this->session[ 9 ] ) == 0 ) {
         ::memcpy( this->session, this->host->daemon_id,
