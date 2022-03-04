@@ -18,6 +18,12 @@ struct EvRvClientParameters {
     : daemon( d ), network( n ), service( s ), port( p ), opts( o ) {}
 };
 
+struct EvRvClient;
+struct RvClientCB {
+  RvClientCB() {}
+  virtual bool on_msg( kv::EvPublish &pub ) noexcept;
+};
+
 struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
   void * operator new( size_t, void *ptr ) { return ptr; }
   enum RvState {
@@ -30,6 +36,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
   };
   kv::RoutePublish & sub_route;
   RvMsgIn      msg_in;         /* current message recvd */
+  RvClientCB * cb;
   RvState      rv_state;       /* one of the above states */
   char         session[ 64 ],  /* session id of this connection */
                control[ 64 ],  /* the inbox name */
@@ -49,17 +56,21 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
   uint32_t     ipaddr;
   const char * network,
              * service;
+  void       * save_buf;
+  size_t       save_len;
 
   EvRvClient( kv::EvPoll &p ) noexcept;
 
   /* connect to a NATS server */
   bool connect( EvRvClientParameters &p,
-                kv::EvConnectionNotify *n = NULL ) noexcept;
+                kv::EvConnectionNotify *n = NULL,
+                RvClientCB *c = NULL ) noexcept;
   bool is_connected( void ) const {
     return this->EvSocket::fd != -1;
   }
   /* restart the protocol parser */
   void initialize_state( void ) {
+    this->cb          = NULL;
     this->rv_state    = VERS_RECV;
     this->session_len = 0;
     this->control_len = 0;
@@ -73,6 +84,8 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
     this->network     = NULL;
     this->service     = NULL;
     this->notify      = NULL;
+    this->save_buf    = NULL;
+    this->save_len    = 0;
   }
   static void trace_msg( char dir,  void *msg, size_t msglen ) noexcept;
   void send_vers( void ) noexcept;
@@ -82,13 +95,17 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
   int recv_conn( void ) noexcept;
   int dispatch_msg( void *msgbuf, size_t msglen ) noexcept;
   bool fwd_pub( void ) noexcept;
-
+  bool queue_send( const void *buf,  size_t buflen,  const void *msg = NULL,
+                   size_t msglen = 0 ) noexcept;
+  void flush_pending_send( void ) noexcept;
+  bool publish( kv::EvPublish &pub ) noexcept;
   virtual void process( void ) noexcept;
   virtual bool on_msg( kv::EvPublish &pub ) noexcept;
   virtual void release( void ) noexcept;
     /* a new subscription */
-  void do_sub( const char *sub,  size_t sublen,
-               const char *rep,  size_t replen ) noexcept;
+  void subscribe( const char *sub,  size_t sublen,
+                  const char *rep = NULL,  size_t replen = 0 ) noexcept;
+  void unsubscribe( const char *sub,  size_t sublen ) noexcept;
   virtual void on_sub( kv::NotifySub &sub ) noexcept;
   /* an unsubscribed sub */
   virtual void on_unsub( kv::NotifySub &sub ) noexcept;

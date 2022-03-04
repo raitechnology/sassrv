@@ -43,7 +43,8 @@ getenv_bool( const char *var )
 EvRvClient::EvRvClient( EvPoll &p ) noexcept
   : EvConnection( p, p.register_type( "rvclient" ) ),
     RouteNotify( p.sub_route ), sub_route( p.sub_route ),
-    rv_state( VERS_RECV ), fwd_all_msgs( 1 ), fwd_all_subs( 1 )
+    cb( 0 ), rv_state( VERS_RECV ), fwd_all_msgs( 1 ), fwd_all_subs( 1 ),
+    network( 0 ), service( 0 ), save_buf( 0 ), save_len( 0 )
 {
   if ( ! rv_client_init ) {
     rv_client_init = 1;
@@ -58,19 +59,56 @@ EvRvClient::EvRvClient( EvPoll &p ) noexcept
   md_init_auto_unpack();
 }
 
+bool RvClientCB::on_msg( EvPublish & ) noexcept { return true; }
 
 bool
 EvRvClient::connect( EvRvClientParameters &p,
-                     EvConnectionNotify *n ) noexcept
+                     EvConnectionNotify *n,
+                     RvClientCB *c ) noexcept
 {
+  char * daemon = NULL, buf[ 256 ];
+  int port = p.port;
   if ( this->fd != -1 )
     return false;
+  if ( p.daemon != NULL ) {
+    size_t len = ::strlen( p.daemon );
+    if ( len >= sizeof( buf ) )
+      len = sizeof( buf ) - 1;
+    ::memcpy( buf, p.daemon, len );
+    buf[ len ] = '\0';
+    daemon = buf;
+  }
+  if ( port == 0 && daemon != NULL ) {
+    char * pt;
+    if ( (pt = ::strrchr( daemon, ':' )) != NULL ) {
+      port = atoi( pt + 1 );
+      *pt = '\0';
+    }
+    else {
+      for ( pt = daemon; *pt != '\0'; pt++ )
+        if ( *pt < '0' || *pt > '9' )
+          break;
+      if ( *pt == '\0' ) {
+        port = atoi( daemon );
+        daemon = NULL;
+      }
+    }
+    if ( daemon != NULL ) { /* strip tcp: prefix */
+      if ( ::strncmp( daemon, "tcp:", 4 ) == 0 )
+        daemon += 4;
+      if ( ::strcmp( daemon, "tcp" ) == 0 )
+        daemon += 3;
+      if ( daemon[ 0 ] == '\0' )
+        daemon = NULL;
+    }
+  }
   this->initialize_state();
-  if ( EvTcpConnection::connect( *this, p.daemon, p.port, p.opts ) != 0 )
+  if ( EvTcpConnection::connect( *this, daemon, port, p.opts ) != 0 )
     return false;
   this->network = p.network;
   this->service = p.service;
   this->notify  = n;
+  this->cb      = c;
   return true;
 }
 
@@ -334,7 +372,7 @@ EvRvClient::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
       return 0;
     if ( msglen != 0 ) {
       MDOutput mout;
-      fprintf( stderr, "rv status %d: \"%s\"\n", status,
+      fprintf( stderr, "RV unpack status %d: \"%s\"\n", status,
                rv_status_string[ status ] );
       mout.print_hex( msgbuf, msglen );
     }
@@ -394,8 +432,11 @@ EvRvClient::fwd_pub( void ) noexcept
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
                  this->sub_route, this->fd, h, ftype, 'p' );
+  if ( this->cb != NULL )
+    return this->cb->on_msg( pub );
   return this->sub_route.forward_msg( pub );
 }
+
 /* a message from the network, forward if matched by a subscription only once
  * as it may match multiple wild subscriptions as well as a normal sub
  * each sub is looked up in order to increment the msg count */
@@ -405,6 +446,12 @@ EvRvClient::on_msg( EvPublish &pub ) noexcept
   if ( pub.src_route == (uint32_t) this->fd )
     return true;
 
+  return this->publish( pub );
+}
+
+bool
+EvRvClient::publish( EvPublish &pub ) noexcept
+{
   uint8_t buf[ 2 * 1024 ], * b = buf;
   size_t  buf_len = sizeof( buf );
 
@@ -505,19 +552,45 @@ EvRvClient::on_msg( EvPublish &pub ) noexcept
         msg_len = 0;
         break;
     }
-    if ( off > 0 ) {
-      this->append2( buf, off, msg, msg_len );
-      /*this->send( buf, off, msg, msg_len );*/
-      bool flow_good = ( this->pending() <= this->send_highwater );
-      this->idle_push( flow_good ? EV_WRITE : EV_WRITE_HI );
-      return flow_good;
-    }
-    else {
-      fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %lu\n",
-               msg_enc, (int) pub.subject_len, pub.subject, off );
-    }
+    if ( off > 0 )
+      return this->queue_send( buf, off, msg, msg_len );
+    fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %lu\n",
+             msg_enc, (int) pub.subject_len, pub.subject, off );
   }
   return true;
+}
+
+bool
+EvRvClient::queue_send( const void *buf,  size_t buflen,
+                        const void *msg,  size_t msglen ) noexcept
+{
+  if ( this->rv_state >= DATA_RECV ) {
+    this->append2( buf, buflen, msg, msglen );
+    /*this->send( buf, off, msg, msg_len );*/
+    bool flow_good = ( this->pending() <= this->send_highwater );
+    this->idle_push( flow_good ? EV_WRITE : EV_WRITE_HI );
+    return flow_good;
+  }
+  size_t newlen = this->save_len + buflen + msglen;
+  this->save_buf = ::realloc( this->save_buf, newlen );
+  ::memcpy( &((char *) this->save_buf)[ this->save_len ], buf, buflen );
+  this->save_len += buflen;
+  ::memcpy( &((char *) this->save_buf)[ this->save_len ], msg, msglen );
+  this->save_len += msglen;
+  return false;
+}
+
+void
+EvRvClient::flush_pending_send( void ) noexcept
+{
+  if ( this->save_len > 0 ) {
+    this->append( this->save_buf, this->save_len );
+    ::free( this->save_buf );
+    this->save_buf = NULL;
+    this->save_len = 0;
+    bool flow_good = ( this->pending() <= this->send_highwater );
+    this->idle_push( flow_good ? EV_WRITE : EV_WRITE_HI );
+  }
 }
 
 void
@@ -535,8 +608,8 @@ EvRvClient::release( void ) noexcept
 }
 /* a new subscription */
 void
-EvRvClient::do_sub( const char *sub,  size_t sublen,
-                    const char *rep,  size_t replen ) noexcept
+EvRvClient::subscribe( const char *sub,  size_t sublen,
+                       const char *rep,  size_t replen ) noexcept
 {
   uint8_t buf[ 2 * 1024 ], * b = buf;
   size_t  len    = sublen + replen,
@@ -558,40 +631,45 @@ EvRvClient::do_sub( const char *sub,  size_t sublen,
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )
     this->trace_msg( '>', buf, size );
-  this->append( buf, size );
+  this->queue_send( buf, size );
 }
 
 void
-EvRvClient::on_sub( NotifySub &sub ) noexcept
-{
-  this->do_sub( sub.subject, sub.subject_len,
-                sub.reply, sub.reply_len );
-  this->idle_push( EV_WRITE );
-}
-/* an unsubscribed sub */
-void
-EvRvClient::on_unsub( NotifySub &sub ) noexcept
+EvRvClient::unsubscribe( const char *sub,  size_t sublen ) noexcept
 {
   uint8_t buf[ 2 * 1024 ], * b = buf;
   size_t  buflen = sizeof( buf );
 
-  if ( sub.sub_count != 0 ) /* if no routes left */
-    return;
-  
-  if ( buflen < (size_t) sub.subject_len * 2 + 32 ) {
-    b = (uint8_t *) this->alloc_temp( sub.subject_len * 2 + 32 );
-    buflen = (size_t) sub.subject_len * 2 + 32;
+  if ( buflen < (size_t) sublen * 2 + 32 ) {
+    b = (uint8_t *) this->alloc_temp( sublen * 2 + 32 );
+    buflen = (size_t) sublen * 2 + 32;
     if ( b == NULL )
       return;
   }
   RvMsgWriter msg( b, buflen );
   msg.append_string( SARG( "mtype" ), SARG( "C" ) );
-  msg.append_subject( SARG( "sub" ), sub.subject, sub.subject_len );
+  msg.append_subject( SARG( "sub" ), sub, sublen );
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )
     this->trace_msg( '>', buf, size );
-  this->append( buf, size );
+  this->queue_send( buf, size );
 }
+
+void
+EvRvClient::on_sub( NotifySub &sub ) noexcept
+{
+  this->subscribe( sub.subject, sub.subject_len,
+                   sub.reply, sub.reply_len );
+}
+/* an unsubscribed sub */
+void
+EvRvClient::on_unsub( NotifySub &sub ) noexcept
+{
+  if ( sub.sub_count != 0 ) /* if no routes left */
+    return;
+  this->unsubscribe( sub.subject, sub.subject_len );
+}
+
 /* a new pattern subscription */
 void
 EvRvClient::do_psub( const char *prefix,  uint8_t prefix_len ) noexcept
@@ -612,14 +690,13 @@ EvRvClient::do_psub( const char *prefix,  uint8_t prefix_len ) noexcept
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )
     this->trace_msg( '>', buf, size );
-  this->append( buf, size );
+  this->queue_send( buf, size );
 }
 
 void
 EvRvClient::on_psub( NotifyPattern &pat ) noexcept
 {
   this->do_psub( pat.pattern, pat.cvt.prefixlen );
-  this->idle_push( EV_WRITE );
 }
 /* an unsubscribed pattern sub */
 void
@@ -656,8 +733,7 @@ EvRvClient::on_punsub( NotifyPattern &pat ) noexcept
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )
     this->trace_msg( '>', buf, size );
-  this->append( buf, size );
-  this->idle_push( EV_WRITE );
+  this->queue_send( buf, size );
 }
 /* reassert subs after reconnect */
 void
@@ -668,10 +744,9 @@ EvRvClient::on_reassert( uint32_t /*fd*/,  kv::RouteVec<kv::RouteSub> &sub_db,
   RouteSub * sub;
 
   for ( sub = sub_db.first( loc ); sub != NULL; sub = sub_db.next( loc ) ) {
-    this->do_sub( sub->value, sub->len, NULL, 0 );
+    this->subscribe( sub->value, sub->len, NULL, 0 );
   }
   for ( sub = pat_db.first( loc ); sub != NULL; sub = pat_db.next( loc ) ) {
     this->do_psub( sub->value, sub->len );
   }
-  this->idle_push( EV_WRITE );
 }

@@ -211,6 +211,17 @@ $(bind)/rv_server: $(rv_server_objs) $(rv_server_libs) $(lnk_dep)
 all_exes    += $(bind)/rv_server
 all_depends += $(rv_server_deps)
 
+rv_client_files := client
+rv_client_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_client_files)))
+rv_client_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_client_files)))
+rv_client_libs  := $(sassrv_lib)
+rv_client_lnk   := $(sassrv_lib) $(lnk_lib) -lpcre2-8
+
+$(bind)/rv_client: $(rv_client_objs) $(rv_client_libs) $(lnk_dep)
+
+all_exes    += $(bind)/rv_client
+all_depends += $(rv_client_deps)
+
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
 # the default targets
