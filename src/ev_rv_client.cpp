@@ -2,20 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <ctype.h>
-#include <time.h>
-#include <sys/time.h>
-#include <errno.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <netinet/tcp.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-#include <sys/ioctl.h>
-#include <linux/types.h>
-#include <linux/ip.h>
-#include <linux/if.h>
 #include <raikv/util.h>
 #include <raikv/ev_publish.h>
 #include <raikv/pattern_cvt.h>
@@ -115,8 +101,8 @@ EvRvClient::connect( EvRvClientParameters &p,
 void
 EvRvClient::process( void ) noexcept
 {
-  size_t  buflen, msglen;
-  int32_t status = 0;
+  uint32_t buflen, msglen;
+  int      status = 0;
 
   /* state from VERS_RECV->INFO_RECV->INIT_RECV->CONN_RECV->DATA_RECV */
   if ( this->rv_state >= INIT_RECV ) { /* main state, rv msg envelope */
@@ -303,7 +289,7 @@ EvRvClient::recv_info( void ) noexcept
          match_field( it, SARG( "gob" ),    this->gob, glen, MD_STRING ) ) {
       size_t i;
       char * ptr = this->session;
-      this->gob_len = glen - 1;
+      this->gob_len = (uint16_t) ( glen - 1 );
       /* <ipaddr>.<pid><time><ptr> */
       for ( i = 0; i < 8; i += 2 ) {
         *ptr++ = hexchar2( ( ip[ i/2 ] >> 4 ) & 0xf );
@@ -312,9 +298,10 @@ EvRvClient::recv_info( void ) noexcept
       *ptr++ = '.';
       this->start_stamp = kv_current_realtime_ns();
       ptr += RvHost::time_to_str( this->start_stamp, ptr );
-      this->session_len = (size_t) ( ptr - this->session );
-      this->control_len = ::snprintf( this->control, sizeof( this->control ),
-                                      "_INBOX.%s.1", this->session );
+      this->session_len = (uint16_t) ( ptr - this->session );
+      this->control_len = (uint16_t)
+        ::snprintf( this->control, sizeof( this->control ),
+                    "_INBOX.%s.1", this->session );
       this->send_init_rec(); /* resend with session */
       this->rv_state = CONN_RECV;
       return 0;
@@ -411,8 +398,8 @@ EvRvClient::fwd_pub( void ) noexcept
            replen  = this->msg_in.replylen;
   uint32_t h       = kv_crc_c( sub, sublen, 0 );
   void   * msg     = this->msg_in.data.fptr;
-  uint32_t msg_len = this->msg_in.data.fsize,
-           ftype   = this->msg_in.data.ftype;
+  size_t   msg_len = this->msg_in.data.fsize;
+  uint32_t ftype   = this->msg_in.data.ftype;
 
 /*  printf( "fwd %.*s\n", (int) sublen, sub );*/
   if ( ftype == MD_MESSAGE ) {
@@ -479,10 +466,11 @@ EvRvClient::publish( EvPublish &pub ) noexcept
     buf[ rvmsg.off - 1 ] = '\0';
   }
   if ( status == 0 ) {
-    uint8_t msg_enc = pub.msg_enc;
+    uint32_t msg_enc = pub.msg_enc;
+    static const char data_hdr[] = "\005data";
     /* depending on message type, encode the hdr to send to the client */
     switch ( msg_enc ) {
-      case (uint8_t) RVMSG_TYPE_ID:
+      case RVMSG_TYPE_ID:
       do_rvmsg:;
         rvmsg.append_msg( SARG( "data" ), submsg );
         off         = rvmsg.off + submsg.off;
@@ -502,14 +490,13 @@ EvRvClient::publish( EvPublish &pub ) noexcept
             msg_enc = MD_OPAQUE;
         }
         /* FALLTHRU */
-      case (uint8_t) RAIMSG_TYPE_ID:
-      case (uint8_t) TIB_SASS_TYPE_ID:
-      case (uint8_t) TIB_SASS_FORM_TYPE_ID:
+      case RAIMSG_TYPE_ID:
+      case TIB_SASS_TYPE_ID:
+      case TIB_SASS_FORM_TYPE_ID:
       do_tibmsg:;
         msg     = pub.msg;
         msg_len = pub.msg_len;
 
-        static const char data_hdr[] = "\005data";
         ::memcpy( &buf[ rvmsg.off ], data_hdr, sizeof( data_hdr ) );
         rvmsg.off += sizeof( data_hdr );
         buf[ rvmsg.off++ ] = ( msg_enc == MD_STRING ) ? 8 : 7/*RV_OPAQUE*/;
@@ -554,8 +541,8 @@ EvRvClient::publish( EvPublish &pub ) noexcept
     }
     if ( off > 0 )
       return this->queue_send( buf, off, msg, msg_len );
-    fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %lu\n",
-             msg_enc, (int) pub.subject_len, pub.subject, off );
+    fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %u\n",
+             msg_enc, (int) pub.subject_len, pub.subject, (uint32_t) off );
   }
   return true;
 }
@@ -696,7 +683,7 @@ EvRvClient::do_psub( const char *prefix,  uint8_t prefix_len ) noexcept
 void
 EvRvClient::on_psub( NotifyPattern &pat ) noexcept
 {
-  this->do_psub( pat.pattern, pat.cvt.prefixlen );
+  this->do_psub( pat.pattern, (uint8_t) pat.cvt.prefixlen );
 }
 /* an unsubscribed pattern sub */
 void
@@ -747,6 +734,6 @@ EvRvClient::on_reassert( uint32_t /*fd*/,  kv::RouteVec<kv::RouteSub> &sub_db,
     this->subscribe( sub->value, sub->len, NULL, 0 );
   }
   for ( sub = pat_db.first( loc ); sub != NULL; sub = pat_db.next( loc ) ) {
-    this->do_psub( sub->value, sub->len );
+    this->do_psub( sub->value, (uint8_t) sub->len );
   }
 }

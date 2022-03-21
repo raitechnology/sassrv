@@ -2,20 +2,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <unistd.h>
 #include <ctype.h>
 #include <time.h>
-#include <sys/time.h>
-#include <errno.h>
+#ifndef _MSC_VER
+#include <unistd.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <netinet/tcp.h>
 #include <netdb.h>
-#include <arpa/inet.h>
 #include <sys/ioctl.h>
-#include <linux/types.h>
-#include <linux/ip.h>
 #include <linux/if.h>
+#else
+#include <raikv/win.h>
+#endif
 #include <raikv/util.h>
 #include <raikv/ev_publish.h>
 #include <sassrv/ev_rv.h>
@@ -257,8 +254,8 @@ RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
   if ( n <= 0 || n > 0xffff )
     return ERR_BAD_SERVICE_NUM;
 
-  this->network_len = net_len;
-  this->service_len = svc_len;
+  this->network_len = (uint16_t) net_len;
+  this->service_len = (uint16_t) svc_len;
   this->service_port = htons( n );
   ::memcpy( this->network, net, net_len );
   this->network[ net_len ] = '\0';
@@ -274,7 +271,7 @@ RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
   ::memcpy( this->daemon_id, this->session_ip, this->session_ip_len );
   ::memcpy( &this->daemon_id[ this->session_ip_len ], ".DAEMON.", 8 );
   this->daemon_len = this->session_ip_len + 8;
-  this->daemon_len += time_to_str( this->start_stamp,
+  this->daemon_len += (uint16_t) time_to_str( this->start_stamp,
                                    &this->daemon_id[ this->daemon_len ] );
   this->rpc = NULL;
 #if 0
@@ -311,7 +308,7 @@ RvFwdAdv::RvFwdAdv( RvHost &h,  EvRvService *svc,  const char *prefix,
                  kv_crc_c( this->subj, this->sublen, 0 ), RVMSG_TYPE_ID, 'p' );
   if ( is_rv_debug )
     EvRvService::print( this->buf, this->size );
-  h.sub_route.forward_msg( pub, NULL, 0, NULL );
+  h.sub_route.forward_msg( pub );
 }
 
 void
@@ -480,6 +477,7 @@ RvMcast::lookup_host_ip4( const char *host,  uint32_t &netmask ) noexcept
   if ( (ipaddr = lookup_host_ip4( host )) == 0 )
     return 0;
 
+#ifndef _MSC_VER
   ifconf conf;
   ifreq  ifbuf[ 256 ],
        * ifp, ifa, ifm;
@@ -509,6 +507,7 @@ RvMcast::lookup_host_ip4( const char *host,  uint32_t &netmask ) noexcept
         if ( ( addr & mask ) == ( ipaddr & mask ) ) {
           netmask = mask;
           ipaddr  = addr;
+          ::close( s );
           goto found_address;
         }
       }
@@ -516,18 +515,54 @@ RvMcast::lookup_host_ip4( const char *host,  uint32_t &netmask ) noexcept
   }
   ::close( s );
   return 0;
+#else
+  SOCKET s = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
+  DWORD  nbytes;
+  char   buf_out[ 64 * 1024 ];
+  char   buf_in[ 64 * 1024 ];
+
+  if ( ::WSAIoctl( s, SIO_GET_INTERFACE_LIST,
+                   buf_in, sizeof( buf_in ),
+                   buf_out, sizeof( buf_out ),
+                   &nbytes, NULL, NULL ) != SOCKET_ERROR ) {
+    LPINTERFACE_INFO info;
+
+    if ( nbytes != 0 ) {
+      for ( info = (INTERFACE_INFO *) buf_out;
+            info < (INTERFACE_INFO *) &buf_out[ nbytes ];
+            info++ ) {
+        if ( ( info->iiFlags & IFF_UP ) != 0 &&
+             /*( info->iiFlags & IFF_MULTICAST ) != 0 &&*/
+             ((struct sockaddr_in &) info->iiAddress).sin_family == AF_INET ) {
+          uint32_t mask, addr;
+          mask = ((struct sockaddr_in &) info->iiNetmask).sin_addr.s_addr;
+          addr = ((struct sockaddr_in &) info->iiAddress).sin_addr.s_addr;
+
+          if ( ( addr & mask ) == ( ipaddr & mask ) ) {
+            netmask = mask;
+            ipaddr  = addr;
+            ::closesocket( s );
+            goto found_address;
+          }
+        }
+      }
+    }
+  }
+  ::closesocket( s );
+  return 0;
+#endif
 found_address:;
-  ::close( s );
   return ipaddr;
 }
 
 uint32_t
 RvMcast::lookup_dev_ip4( const char *dev,  uint32_t &netmask ) noexcept
 {
-  ifreq    ifa, ifm;
   uint32_t ipaddr = 0;
-  int      s  = ::socket( PF_INET, SOCK_DGRAM, IPPROTO_UDP );
   netmask = 0;
+#ifndef _MSC_VER
+  ifreq    ifa, ifm;
+  int      s  = ::socket( PF_INET, SOCK_DGRAM, IPPROTO_UDP );
   if ( ::strlen( dev ) < sizeof( ifa.ifr_name ) ) {
     ::strcpy( ifa.ifr_name, dev );
     ::strcpy( ifm.ifr_name, dev );
@@ -539,6 +574,7 @@ RvMcast::lookup_dev_ip4( const char *dev,  uint32_t &netmask ) noexcept
     }
   }
   ::close( s );
+#endif
   return ipaddr;
 }
 
@@ -900,4 +936,3 @@ void RvDaemonRpc::write( void ) noexcept {}
 void RvDaemonRpc::read( void ) noexcept {}
 void RvDaemonRpc::process( void ) noexcept {}
 void RvDaemonRpc::release( void ) noexcept {}
-

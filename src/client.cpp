@@ -2,16 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <signal.h>
 #include <sassrv/ev_rv_client.h>
 #include <raimd/md_msg.h>
 #include <raimd/md_dict.h>
 #include <raimd/cfile.h>
 #include <raimd/app_a.h>
 #include <raimd/enum_def.h>
-#include <raikv/mainloop.h>
 #include <raikv/ev_publish.h>
 
 using namespace rai;
@@ -19,11 +15,11 @@ using namespace kv;
 using namespace sassrv;
 using namespace md;
 
-static const char      DICT_SUBJ[]   = "_TIC.REPLY.SASS.DATA.DICTIONARY";
-static const int       DICT_SUBJ_LEN = sizeof( DICT_SUBJ ) - 1;
-                                          /* _INBOX.<session>.1   = control */
-static const int      DICT_INBOX_ID  = 2, /* _INBOX.<session>.2   = dictionary*/
-                      SUB_INBOX_BASE = 3; /* _INBOX.<session>.3++ = sub[] */
+static const char     DICT_SUBJ[]     = "_TIC.REPLY.SASS.DATA.DICTIONARY";
+static const int      DICT_SUBJ_LEN   = sizeof( DICT_SUBJ ) - 1;
+                                           /* _INBOX.<session>.1   = control */
+static const int      DICT_INBOX_ID   = 2, /* _INBOX.<session>.2   = dictionary*/
+                      SUB_INBOX_BASE  = 3; /* _INBOX.<session>.3++ = sub[] */
 static const uint32_t DICT_TIMER_SECS = 3;
 static const uint64_t FIRST_TIMER_ID  = 1, /* first dict request */
                       SECOND_TIMER_ID = 2; /* second dict request */
@@ -42,7 +38,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  int cnt,  bool n )
     : poll( p ), client( c ), dict( 0 ), sub( s ), sub_count( cnt ),
-      no_dictionary( n ), is_subscribed( false ) {}
+      no_dictionary( n ), is_subscribed( false ), have_dictionary( false ) {}
 
   /* after CONNECTED message */
   virtual void on_connect( EvSocket &conn ) noexcept;
@@ -88,13 +84,13 @@ RvDataCallback::start_subscriptions( void ) noexcept
   if ( this->is_subscribed ) /* subscribing multiple times is allowed, */
     return;                  /* but must unsub multiple times as well */
   for ( int i = 0; i < this->sub_count; i++ ) {
-    char inbox[ 72 ]; /* _INBOX.<session>.3 + <sub> */
-    int  sub_len   = ::strlen( this->sub[ i ] ),
-         inbox_len = ::snprintf( inbox, sizeof( inbox ), "%.*s.%d",
+    char   inbox[ 72 ]; /* _INBOX.<session>.3 + <sub> */
+    size_t sub_len   = ::strlen( this->sub[ i ] ),
+           inbox_len = ::snprintf( inbox, sizeof( inbox ), "%.*s.%d",
                            this->client.control_len - 2,
                            this->client.control, i + SUB_INBOX_BASE );
-    printf( "Subscribe \"%.*s\", reply \"%.*s\"\n", sub_len, this->sub[ i ],
-            inbox_len, inbox );
+    printf( "Subscribe \"%.*s\", reply \"%.*s\"\n",
+            (int) sub_len, this->sub[ i ], (int) inbox_len, inbox );
     /* subscribe with inbox reply */
     this->client.subscribe( this->sub[ i ], sub_len, inbox, inbox_len );
   }
@@ -109,8 +105,8 @@ RvDataCallback::on_unsubscribe( void ) noexcept
     return;
   this->is_subscribed = false;
   for ( int i = 0; i < this->sub_count; i++ ) {
-    int  sub_len = ::strlen( this->sub[ i ] );
-    printf( "Unsubscribe \"%.*s\"\n", sub_len, this->sub[ i ] );
+    size_t sub_len = ::strlen( this->sub[ i ] );
+    printf( "Unsubscribe \"%.*s\"\n", (int) sub_len, this->sub[ i ] );
     /* unsubscribe sub */
     this->client.unsubscribe( this->sub[ i ], sub_len );
   }
@@ -238,7 +234,7 @@ int
 main( int argc, const char *argv[] )
 {
   SignalHandler sighndl;
-  const char * daemon  = get_arg( argc, argv, 1, "-d", "-daemon", "7500" ),
+  const char * daemon  = get_arg( argc, argv, 1, "-d", "-daemon", "tcp:7500" ),
              * network = get_arg( argc, argv, 1, "-n", "-network", "127.0.0.1"),
              * service = get_arg( argc, argv, 1, "-s", "-service", "7500" ),
              * path    = get_arg( argc, argv, 1, "-c", "-cfile", NULL ),
@@ -267,6 +263,10 @@ main( int argc, const char *argv[] )
     }
   }
   if ( first_sub >= argc ) {
+    /*static const char *test[] = { "RSF.REC.MSFT.O" };
+    argv = test;
+    argc = 1;
+    first_sub = 0;*/
     fprintf( stderr, "No subjects subscribed\n" );
     goto help;
   }

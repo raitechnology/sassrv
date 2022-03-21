@@ -184,6 +184,7 @@ all_depends :=
 gen_files   :=
 
 libsassrv_files := ev_rv rv_host ev_rv_client
+libsassrv_cfile := $(addprefix src/, $(addsuffix .cpp, $(libsassrv_files)))
 libsassrv_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libsassrv_files)))
 libsassrv_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libsassrv_files)))
 libsassrv_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(libsassrv_files))) \
@@ -201,6 +202,7 @@ all_depends += $(libsassrv_deps)
 
 server_defines := -DSASSRV_VER=$(ver_build)
 rv_server_files := server
+rv_server_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv_server_files)))
 rv_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_server_files)))
 rv_server_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_server_files)))
 rv_server_libs  := $(sassrv_lib)
@@ -212,6 +214,7 @@ all_exes    += $(bind)/rv_server
 all_depends += $(rv_server_deps)
 
 rv_client_files := client
+rv_client_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv_client_files)))
 rv_client_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_client_files)))
 rv_client_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_client_files)))
 rv_client_libs  := $(sassrv_lib)
@@ -226,7 +229,60 @@ all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
 # the default targets
 .PHONY: all
-all: $(all_libs) $(all_dlls) $(all_exes)
+all: $(all_libs) $(all_dlls) $(all_exes) cmake
+
+.PHONY: cmake
+cmake: CMakeLists.txt
+
+.ONESHELL: CMakeLists.txt
+CMakeLists.txt: .copr/Makefile
+	@cat <<'EOF' > $@
+	cmake_minimum_required (VERSION 3.9.0)
+	if (POLICY CMP0111)
+	  cmake_policy(SET CMP0111 OLD)
+	endif ()
+	project (raikv)
+	set (CMAKE_VERBOSE_MAKEFILE ON)
+	if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+	  include_directories (include pcre2/build raikv/include raimd/include raimd/libdecnumber/include)
+	  add_definitions(/DPCRE2_STATIC)
+	  if ($$<CONFIG:Release>)
+	    add_compile_options (/arch:AVX2 /GL /std:c11)
+	  else ()
+	    add_compile_options (/arch:AVX2 /std:c11)
+	  endif ()
+	  add_library(pcre2-8 STATIC IMPORTED)
+	  set_property(TARGET pcre2-8 PROPERTY IMPORTED_LOCATION_DEBUG ../pcre2/build/Debug/pcre2-8-staticd.lib)
+	  set_property(TARGET pcre2-8 PROPERTY IMPORTED_LOCATION_RELEASE ../pcre2/build/Release/pcre2-8-static.lib)
+	  add_library(raikv STATIC IMPORTED)
+	  set_property(TARGET raikv PROPERTY IMPORTED_LOCATION_DEBUG ../raikv/build/Debug/raikv.lib)
+	  set_property(TARGET raikv PROPERTY IMPORTED_LOCATION_RELEASE ../raikv/build/Release/raikv.lib)
+	  add_library(raimd STATIC IMPORTED)
+	  set_property(TARGET raimd PROPERTY IMPORTED_LOCATION_DEBUG ../raimd/build/Debug/raimd.lib)
+	  set_property(TARGET raimd PROPERTY IMPORTED_LOCATION_RELEASE ../raimd/build/Release/raimd.lib)
+	  add_library(decnumber STATIC IMPORTED)
+	  set_property(TARGET decnumber PROPERTY IMPORTED_LOCATION_DEBUG ../raimd/libdecnumber/build/Debug/decnumber.lib)
+	  set_property(TARGET decnumber PROPERTY IMPORTED_LOCATION_RELEASE ../raimd/libdecnumber/build/Release/decnumber.lib)
+	else ()
+	  include_directories (include raikv/include raimd/include raimd/libdecnumber/include)
+	  add_compile_options ($(cflags))
+	  add_library(raikv STATIC IMPORTED)
+	  set_property(TARGET raikv PROPERTY IMPORTED_LOCATION ../raikv/build/libraikv.a)
+	  add_library(raimd STATIC IMPORTED)
+	  set_property(TARGET raimd PROPERTY IMPORTED_LOCATION ../raimd/build/libraimd.a)
+	  add_library(decnumber STATIC IMPORTED)
+	  set_property(TARGET decnumber PROPERTY IMPORTED_LOCATION ../raimd/libdecnumber/build/libdecnumber.a)
+	endif ()
+	add_library (sassrv STATIC $(libsassrv_cfile))
+	if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+	  link_libraries (sassrv raikv raimd decnumber pcre2-8 ws2_32)
+	else ()
+	  link_libraries (sassrv raikv raimd decnumber -lpcre2-8 -lpthread -lrt)
+	endif ()
+	add_definitions(-DSASSRV_VER=$(ver_build))
+	add_executable (rv_server $(rv_server_cfile))
+	add_executable (rv_client $(rv_client_cfile))
+	EOF
 
 .PHONY: dnf_depend
 dnf_depend:

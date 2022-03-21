@@ -2,16 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <time.h>
-#include <sys/time.h>
-#include <errno.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <netinet/tcp.h>
-#include <netdb.h>
+#ifndef _MSC_VER
 #include <arpa/inet.h>
+#else
+#include <winsock.h>
+#endif
 #include <sassrv/ev_rv.h>
 #include <raikv/key_hash.h>
 #include <raikv/util.h>
@@ -92,7 +87,7 @@ int
 EvRvListen::listen( const char *ip,  int port,  int opts ) noexcept
 {
   int status;
-  status = this->kv::EvTcpListen::listen( ip, port, opts, "rv_listen" );
+  status = this->kv::EvTcpListen::listen2( ip, port, opts, "rv_listen" );
   if ( status == 0 )
     this->ipport = htons( port ); /* network order */
   return status;
@@ -101,36 +96,15 @@ EvRvListen::listen( const char *ip,  int port,  int opts ) noexcept
 bool
 EvRvListen::accept( void ) noexcept
 {
-  struct sockaddr_storage addr;
-  socklen_t addrlen = sizeof( addr );
-  int sock = ::accept( this->fd, (struct sockaddr *) &addr, &addrlen );
-  if ( sock < 0 ) {
-    if ( errno != EINTR ) {
-      if ( errno != EAGAIN )
-        perror( "accept" );
-      this->pop3( EV_READ, EV_READ_LO, EV_READ_HI );
-    }
-    return false;
-  }
   EvRvService *c =
-    this->poll.get_free_list2<EvRvService, EvRvListen>(
+    this->poll.get_free_list<EvRvService, EvRvListen &>(
       this->accept_sock_type, *this );
-  if ( c == NULL ) {
-    perror( "accept: no memory" );
-    ::close( sock );
+  if ( c == NULL )
     return false;
-  }
-  EvTcpListen::set_sock_opts( this->poll, sock, this->sock_opts );
-  ::fcntl( sock, F_SETFL, O_NONBLOCK | ::fcntl( sock, F_GETFL ) );
+  if ( ! this->accept2( *c, "rv" ) )
+    return false;
 
-  c->PeerData::init_peer( sock, (struct sockaddr *) &addr, "rv" );
   c->initialize_state( ++this->timer_id );
-  if ( this->poll.add_sock( c ) < 0 ) {
-    fprintf( stderr, "failed to add sock %d\n", sock );
-    ::close( sock );
-    this->poll.push_free_list( c );
-    return false;
-  }
   uint32_t ver_rec[ 3 ] = { 0, 4, 0 };
   ver_rec[ 1 ] = get_u32<MD_BIG>( &ver_rec[ 1 ] ); /* flip */
   c->append( ver_rec, sizeof( ver_rec ) );
@@ -245,8 +219,8 @@ EvRvService::send_info( bool agree ) noexcept
 void
 EvRvService::process( void ) noexcept
 {
-  size_t  buflen, msglen;
-  int32_t status = 0;
+  uint32_t buflen, msglen;
+  int      status = 0;
 
   /* state trasition from VERS_RECV -> INFO_RECV -> DATA_RECV */
   if ( this->svc_state >= DATA_RECV ) { /* main state */
@@ -307,8 +281,8 @@ EvRvService::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
       return 0;
     if ( msglen != 0 ) {
       MDOutput mout;
-      fprintf( stderr, "rv status %d: \"%s\" msglen=%lu\n", status,
-               rv_status_string[ status ], msglen );
+      fprintf( stderr, "rv status %d: \"%s\" msglen=%u\n", status,
+               rv_status_string[ status ], (uint32_t) msglen );
       mout.print_hex( msgbuf, msglen > 256 ? 256 : msglen );
     }
     return status;
@@ -399,7 +373,8 @@ EvRvService::respond_info( void ) noexcept
   RvHostError   status = HOST_OK;
 
   if ( this->gob_len == 0 )
-    this->gob_len = RvHost::time_to_str( this->active_ns, this->gob );
+    this->gob_len = (uint16_t)
+                    RvHost::time_to_str( this->active_ns, this->gob );
   net[ 0 ] = 0;
   svc[ 0 ] = 0;
 
@@ -411,20 +386,20 @@ EvRvService::respond_info( void ) noexcept
         case 7:
           if ( match_str( nm, mref, "userid", this->userid,
                           sizeof( this->userid ) ) )
-            this->userid_len = mref.fsize - 1;
+            this->userid_len = (uint16_t) ( mref.fsize - 1 );
           break;
         case 8:
           if ( match_str( nm, mref, "session", this->session,
                           sizeof( this->session ) ) ) {
-            this->session_len = mref.fsize - 1;
+            this->session_len = (uint16_t) ( mref.fsize - 1 );
           }
           else if ( match_str( nm, mref, "control", this->control,
                                sizeof( this->control ) ) )
-            this->control_len = mref.fsize - 1;
+            this->control_len = (uint16_t) ( mref.fsize - 1 );
           else if ( match_str( nm, mref, "service", svc , sizeof( svc ) ) )
-            svc_len = mref.fsize - 1;
+            svc_len = (uint32_t) ( mref.fsize - 1 );
           else if ( match_str( nm, mref, "network", net, sizeof( net ) ) )
-            net_len = mref.fsize - 1;
+            net_len = (uint32_t) ( mref.fsize - 1 );
           break;
         case 5:
           if ( ! match_int( nm, mref, "vmaj", this->vmaj ) )
@@ -619,11 +594,11 @@ EvRvService::is_psubscribed( const NotifyPattern &pat ) noexcept
 void
 EvRvService::add_sub( void ) noexcept
 {
-  const char   * sub    = this->msg_in.sub;
-  const uint32_t len    = this->msg_in.sublen;
-  uint32_t       refcnt = 0,
-                 h;
-  bool           coll   = false;
+  const char * sub    = this->msg_in.sub;
+  const size_t len    = this->msg_in.sublen;
+  uint32_t     refcnt = 0,
+               h;
+  bool         coll   = false;
 
   if ( ! this->msg_in.is_wild ) {
     h = kv_crc_c( sub, len, 0 );
@@ -866,7 +841,7 @@ EvRvService::fwd_pub( void ) noexcept
            replen  = this->msg_in.replylen;
   uint32_t h       = kv_crc_c( sub, sublen, 0 );
   void   * msg     = this->msg_in.data.fptr;
-  uint32_t msg_len = this->msg_in.data.fsize;
+  size_t   msg_len = this->msg_in.data.fsize;
   uint32_t ftype   = this->msg_in.data.ftype;
 
 /*  printf( "fwd %.*s\n", (int) sublen, sub );*/
@@ -985,6 +960,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
   }
   if ( status == 0 ) {
     uint32_t msg_enc = pub.msg_enc;
+    static const char data_hdr[] = "\005data";
     /* depending on message type, encode the hdr to send to the client */
     switch ( msg_enc ) {
       case RVMSG_TYPE_ID:
@@ -1014,7 +990,6 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
         msg     = pub.msg;
         msg_len = pub.msg_len;
 
-        static const char data_hdr[] = "\005data";
         ::memcpy( &buf[ rvmsg.off ], data_hdr, sizeof( data_hdr ) );
         rvmsg.off += sizeof( data_hdr );
         buf[ rvmsg.off++ ] = ( msg_enc == MD_STRING ) ? 8 : 7/*RV_OPAQUE*/;
@@ -1071,8 +1046,8 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       return flow_good;
     }
     else {
-      fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %lu\n",
-               msg_enc, (int) pub.subject_len, pub.subject, off );
+      fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %u\n",
+               msg_enc, (int) pub.subject_len, pub.subject, (uint32_t) off );
     }
   }
   return true;
@@ -1129,7 +1104,6 @@ EvRvService::release( void ) noexcept
   this->pat_tab.release();
   this->msg_in.release();
   this->EvConnection::release_buffers();
-  this->poll.push_free_list( this );
 }
 
 bool
@@ -1184,7 +1158,7 @@ RvMsgIn::subject_to_string( const uint8_t *buf,  size_t buflen ) noexcept
       break;
   } 
   this->sub[ k ] = '\0';
-  this->sublen = k;
+  this->sublen = (uint16_t) k;
   return true;
 
 bad_subject:;
@@ -1292,7 +1266,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
           case 7:
             if ( ::memcmp( nm.fname, SARG( "return" ) ) == 0 ) {
               this->reply    = (char *) mref.fptr;
-              this->replylen = mref.fsize;
+              this->replylen = (uint16_t) mref.fsize;
               if ( this->replylen > 0 /*&& this->reply[ this->replylen - 1 ] == '\0'*/ )
                 this->replylen--;
               cnt |= 4;

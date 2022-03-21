@@ -46,7 +46,7 @@ struct EvRvListen : public kv::EvTcpListen/*, public RvHost*/ {
 
 /* count the number of segments in a subject:  4 = A.B.C.D */
 static inline uint16_t
-count_segments( const char *value,  uint16_t len )
+count_segments( const char *value,  size_t len )
 {
   uint16_t     n = 1;
   const char * p = (const char *) ::memchr( value, '.', len );
@@ -199,17 +199,17 @@ struct RvWildMatch {
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   void operator delete( void *ptr ) { ::free( ptr ); }
-  RvWildMatch( uint16_t patlen,  const char *pat,  pcre2_real_code_8 *r,
+  RvWildMatch( size_t patlen,  const char *pat,  pcre2_real_code_8 *r,
                pcre2_real_match_data_8 *m )
     : next( 0 ), back( 0 ), re( r ), md( m ), msg_cnt( 0 ),
-      refcnt( 1 ), len( patlen ) {
+      refcnt( 1 ), len( (uint16_t) patlen ) {
     ::memcpy( this->value, pat, patlen );
     this->value[ patlen ] = '\0';
   }
   uint16_t segments( void ) const {
     return count_segments( this->value, this->len );
   }
-  static RvWildMatch *create( uint16_t patlen,  const char *pat,
+  static RvWildMatch *create( size_t patlen,  const char *pat,
                            pcre2_real_code_8 *r, pcre2_real_match_data_8 *m ) {
     size_t sz = sizeof( RvWildMatch ) + patlen - 2;
     void * p  = ::malloc( sz );
@@ -452,7 +452,7 @@ struct RvServiceLink {
     return this->bits[ ( h >> 3 ) & 0xff ] & ( 1 << ( h & 7 ) );
   }
   /* used to uniquely identify a list of subjects among a list of sessions */
-  bool check_subject( const char *subj,  uint16_t len,  uint32_t hash ) {
+  bool check_subject( const char *subj,  size_t len,  uint32_t hash ) {
     if ( is_restricted_subject( subj, len ) )
       return false;
     this->set( hash );
@@ -464,7 +464,7 @@ struct RvServiceLink {
     return true;
   }
   /* used to uniquely identify a list of patterns among a list of sessions */
-  bool check_pattern( const char *pat,  uint16_t len,  uint32_t hash,
+  bool check_pattern( const char *pat,  size_t len,  uint32_t hash,
                       RvWildMatch *check ) {
     if ( is_restricted_subject( pat, len ) )
       return false;
