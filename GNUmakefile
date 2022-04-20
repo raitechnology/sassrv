@@ -350,9 +350,10 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server
+dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server $(bind)/rv_client
 	chrpath -d $(libd)/libsassrv.so
 	chrpath -d $(bind)/rv_server
+	chrpath -d $(bind)/rv_client
 
 .PHONY: dist_rpm
 dist_rpm: srpm
@@ -379,6 +380,8 @@ install: dist_bins
 	install $$f $(install_prefix)/lib ; \
 	fi ; \
 	done
+	install -m 755 $(bind)/rv_server $(install_prefix)/bin
+	install -m 755 $(bind)/rv_client $(install_prefix)/bin
 	install -m 644 include/sassrv/*.h $(install_prefix)/include/sassrv
 
 $(objd)/%.o: src/%.cpp
