@@ -166,7 +166,7 @@ endif
 #clean_hdr:
 #	$(MAKE) -C HdrHistogram_c clean
 #clean_subs += clean_hdr
-endif
+#endif
 
 # copr/fedora build (with version env vars)
 # copr uses this to generate a source rpm with the srpm target
