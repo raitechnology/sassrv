@@ -65,7 +65,7 @@ thread_lib  := -pthread -lrt
 have_md_submodule    := $(shell if [ -f raimd/GNUmakefile ]; then echo yes; else echo no; fi )
 have_dec_submodule   := $(shell if [ -f raimd/libdecnumber/GNUmakefile ]; then echo yes; else echo no; fi )
 have_kv_submodule    := $(shell if [ -f raikv/GNUmakefile ]; then echo yes; else echo no; fi )
-have_hdr_submodule   := $(shell if [ -f ./HdrHistogram_c/GNUmakefile ]; then echo yes; else echo no; fi )
+#have_hdr_submodule   := $(shell if [ -f ./HdrHistogram_c/GNUmakefile ]; then echo yes; else echo no; fi )
 
 lnk_lib     :=
 dlnk_lib    :=
@@ -112,15 +112,15 @@ lnk_lib     += -ldecnumber
 dlnk_lib    += -ldecnumber
 endif
 
-ifeq (yes,$(have_hdr_submodule))
-hdr_lib     := HdrHistogram_c/$(libd)/libhdrhist.a
-hdr_dll     := HdrHistogram_c/$(libd)/libhdrhist.so
-rpath2       = ,-rpath,$(pwd)/HdrHistogram_c/$(libd)
-hdr_includes = -IHdrHistogram_c/src
-else
-hdr_lib     := -lhdrhist
-hdr_includes = -I/usr/include/hdrhist
-endif
+#ifeq (yes,$(have_hdr_submodule))
+#hdr_lib     := HdrHistogram_c/$(libd)/libhdrhist.a
+#hdr_dll     := HdrHistogram_c/$(libd)/libhdrhist.so
+#rpath2       = ,-rpath,$(pwd)/HdrHistogram_c/$(libd)
+#hdr_includes = -IHdrHistogram_c/src
+#else
+#hdr_lib     := -lhdrhist
+#hdr_includes = -I/usr/include/hdrhist
+#endif
 
 sassrv_lib := $(libd)/libsassrv.a
 rpath       := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)$(rpath6)$(rpath7)
@@ -159,13 +159,13 @@ clean_md:
 	$(MAKE) -C raimd clean
 clean_subs += clean_md
 endif
-ifeq (yes,$(have_hdr_submodule))
-$(hdr_lib) $(hdr_dll):
-	$(MAKE) -C HdrHistogram_c
-.PHONY: clean_hdr
-clean_hdr:
-	$(MAKE) -C HdrHistogram_c clean
-clean_subs += clean_hdr
+#ifeq (yes,$(have_hdr_submodule))
+#$(hdr_lib) $(hdr_dll):
+#	$(MAKE) -C HdrHistogram_c
+#.PHONY: clean_hdr
+#clean_hdr:
+#	$(MAKE) -C HdrHistogram_c clean
+#clean_subs += clean_hdr
 endif
 
 # copr/fedora build (with version env vars)
