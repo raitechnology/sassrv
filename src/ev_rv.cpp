@@ -24,6 +24,13 @@ using namespace sassrv;
 using namespace kv;
 using namespace md;
 
+extern "C" {
+const char *
+sassrv_get_version( void )
+{
+  return kv_stringify( SASSRV_VER );
+}
+}
 uint32_t rai::sassrv::rv_debug = 0;
 
 /*
@@ -1041,9 +1048,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       this->msgs_sent++;
       this->host->ms++;
       /*this->send( buf, off, msg, msg_len );*/
-      bool flow_good = ( this->pending() <= this->send_highwater );
-      this->idle_push( flow_good ? EV_WRITE : EV_WRITE_HI );
-      return flow_good;
+      return this->idle_push_write();
     }
     else {
       fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %u\n",

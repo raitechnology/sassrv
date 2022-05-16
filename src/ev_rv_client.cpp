@@ -554,9 +554,7 @@ EvRvClient::queue_send( const void *buf,  size_t buflen,
   if ( this->rv_state >= DATA_RECV ) {
     this->append2( buf, buflen, msg, msglen );
     /*this->send( buf, off, msg, msg_len );*/
-    bool flow_good = ( this->pending() <= this->send_highwater );
-    this->idle_push( flow_good ? EV_WRITE : EV_WRITE_HI );
-    return flow_good;
+    return this->idle_push_write();
   }
   size_t newlen = this->save_len + buflen + msglen;
   this->save_buf = ::realloc( this->save_buf, newlen );
@@ -575,8 +573,7 @@ EvRvClient::flush_pending_send( void ) noexcept
     ::free( this->save_buf );
     this->save_buf = NULL;
     this->save_len = 0;
-    bool flow_good = ( this->pending() <= this->send_highwater );
-    this->idle_push( flow_good ? EV_WRITE : EV_WRITE_HI );
+    this->idle_push_write();
   }
 }
 

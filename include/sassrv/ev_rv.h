@@ -5,6 +5,7 @@ extern "C" {
   struct pcre2_real_code_8;
   struct pcre2_real_match_data_8;
   struct sockaddr_in;
+  const char *sassrv_get_version( void );
 }
 
 #include <raikv/ev_tcp.h>
@@ -15,6 +16,8 @@ extern "C" {
 
 namespace rai {
 namespace sassrv {
+
+extern uint32_t rv_debug;
 
 typedef kv::ArrayCount<RvHost *, 4> RvHostTab;
 typedef kv::ArrayCount<RvDaemonRpc *, 4> RvDaemonTab;
