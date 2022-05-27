@@ -68,7 +68,7 @@ Loop::initialize( void *me ) noexcept
 int
 main( int argc, const char *argv[] )
 {
-  EvShm shm;
+  EvShm shm( "rv_server" );
   Args  r;
 
   r.no_threads   = true;

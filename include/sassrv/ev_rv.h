@@ -36,7 +36,7 @@ struct EvRvListen : public kv::EvTcpListen/*, public RvHost*/ {
   EvRvListen( kv::EvPoll &p,  kv::RoutePublish &sr ) noexcept;
   EvRvListen( kv::EvPoll &p ) noexcept;
   /* EvListen */
-  virtual bool accept( void ) noexcept;
+  virtual EvSocket *accept( void ) noexcept;
   virtual int listen( const char *ip,  int port,  int opts ) noexcept;
 
   RvHostError start_network( RvHost *&h, const RvMcast &mc,  const char *net,

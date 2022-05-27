@@ -100,16 +100,16 @@ EvRvListen::listen( const char *ip,  int port,  int opts ) noexcept
   return status;
 }
 
-bool
+EvSocket *
 EvRvListen::accept( void ) noexcept
 {
   EvRvService *c =
     this->poll.get_free_list<EvRvService, EvRvListen &>(
       this->accept_sock_type, *this );
   if ( c == NULL )
-    return false;
+    return NULL;
   if ( ! this->accept2( *c, "rv" ) )
-    return false;
+    return NULL;
 
   c->initialize_state( ++this->timer_id );
   uint32_t ver_rec[ 3 ] = { 0, 4, 0 };
@@ -117,7 +117,7 @@ EvRvListen::accept( void ) noexcept
   c->append( ver_rec, sizeof( ver_rec ) );
   c->idle_push( EV_WRITE_HI );
 
-  return true;
+  return c;
 }
 
 RvHostError
