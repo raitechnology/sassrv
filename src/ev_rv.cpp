@@ -94,7 +94,8 @@ int
 EvRvListen::listen( const char *ip,  int port,  int opts ) noexcept
 {
   int status;
-  status = this->kv::EvTcpListen::listen2( ip, port, opts, "rv_listen" );
+  status = this->kv::EvTcpListen::listen2( ip, port, opts, "rv_listen",
+                                           this->sub_route.route_id );
   if ( status == 0 )
     this->ipport = htons( port ); /* network order */
   return status;

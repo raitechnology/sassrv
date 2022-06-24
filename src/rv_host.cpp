@@ -693,7 +693,8 @@ int
 RvDaemonRpc::init_rpc( void ) noexcept
 {
   int pfd = this->poll.get_null_fd();
-  this->PeerData::init_peer( pfd, NULL, "rv_daemon_rpc" );
+  this->PeerData::init_peer( pfd, this->sub_route.route_id, NULL,
+                             "rv_daemon_rpc" );
   return this->poll.add_sock( this );
 }
 
