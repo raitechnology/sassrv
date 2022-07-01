@@ -740,6 +740,8 @@ RvDaemonRpc::is_subscribed( const NotifySub &sub ) noexcept
 void
 RvDaemonRpc::process_close( void ) noexcept
 {
+  this->client_stats( this->sub_route.peer_stats );
+  this->EvSocket::process_close();
 }
 
 static bool

@@ -578,6 +578,13 @@ EvRvClient::flush_pending_send( void ) noexcept
 }
 
 void
+EvRvClient::process_close( void ) noexcept
+{
+  this->client_stats( this->sub_route.peer_stats );
+  this->EvSocket::process_close();
+}
+
+void
 EvRvClient::release( void ) noexcept
 {
   if ( this->fwd_all_msgs ) {

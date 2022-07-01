@@ -101,6 +101,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
   bool publish( kv::EvPublish &pub ) noexcept;
   virtual void process( void ) noexcept;
   virtual bool on_msg( kv::EvPublish &pub ) noexcept;
+  virtual void process_close( void ) noexcept;
   virtual void release( void ) noexcept;
     /* a new subscription */
   void subscribe( const char *sub,  size_t sublen,

@@ -275,6 +275,10 @@ break_loop:;
   if ( status != 0 )
     this->push( EV_CLOSE );
 }
+#if 0
+#include <unistd.h>
+#include <fcntl.h>
+#endif
 /* dispatch a msg: 'C' - unsubscribe subject
  *                 'L' - subscribe subject
  *                 'I' - information for connection
@@ -297,6 +301,17 @@ EvRvService::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
   }
   /*this->msg_in.print();*/
   if ( this->msg_in.mtype == 'D' ) { /* publish */
+#if 0
+    static int xfd[ 100 ];
+    if ( xfd[ this->fd ] == 0 ) {
+      char fn[ 32 ];
+      ::snprintf( fn, sizeof( fn ), "rv.%d", this->fd );
+      xfd[ this->fd ] = ::open( fn, O_APPEND | O_WRONLY | O_CREAT, 0666 );
+    }
+    ::write( xfd[ this->fd ], "--------", 8 );
+    ::write( xfd[ this->fd ], &this->msgs_recv, 8 );
+    ::write( xfd[ this->fd ], msgbuf, msglen );
+#endif
     this->fwd_pub();
     return 0;
   }
@@ -1100,6 +1115,8 @@ EvRvService::process_close( void ) noexcept
     if ( --this->host->active_clients == 0 )
       this->host->stop_network();
   }
+  this->client_stats( this->sub_route.peer_stats );
+  this->EvSocket::process_close();
 }
 
 void

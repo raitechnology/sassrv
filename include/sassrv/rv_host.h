@@ -159,7 +159,7 @@ struct RvHost : public kv::EvTimerCallback {
   int start_host2( uint32_t delay_secs ) noexcept;
   int start_host( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.START */
   int stop_host( void ) noexcept;  /* send _RV.INFO.SYSTEM.HOST.STOP */
-  virtual bool timer_cb( uint64_t tid, uint64_t eid ) noexcept final;
+  virtual bool timer_cb( uint64_t tid, uint64_t eid ) noexcept;
   void reassert_subs( void ) noexcept;
 };
 
@@ -190,13 +190,13 @@ struct RvDaemonRpc : public kv::EvSocket {
   RvDaemonRpc( RvHost &h ) noexcept;
 
   int init_rpc( void ) noexcept;
-  virtual void process( void ) noexcept final;
-  virtual void write( void ) noexcept final;
-  virtual void read( void ) noexcept final;
-  virtual void release( void ) noexcept final;
-  virtual void process_close( void ) noexcept final;
-  virtual bool on_msg( kv::EvPublish &pub ) noexcept final;
-  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept final;
+  virtual void process( void ) noexcept;
+  virtual void write( void ) noexcept;
+  virtual void read( void ) noexcept;
+  virtual void release( void ) noexcept;
+  virtual void process_close( void ) noexcept;
+  virtual bool on_msg( kv::EvPublish &pub ) noexcept;
+  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept;
 
   void subscribe_daemon_inbox( void ) noexcept;
   void unsubscribe_daemon_inbox( void ) noexcept;
