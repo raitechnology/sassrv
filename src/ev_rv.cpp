@@ -78,14 +78,16 @@ uint32_t rai::sassrv::rv_debug = 0;
 
 EvRvListen::EvRvListen( EvPoll &p ) noexcept
   : EvTcpListen( p, "rv_listen", "rv_sock" ), /*RvHost( *this ),*/
-    sub_route( p.sub_route ), dummy_host( 0 ), host_timer_id( 0 )
+    sub_route( p.sub_route ), dummy_host( 0 ), host_timer_id( 0 ),
+    ipport( 0 ), has_service_prefix( true )
 {
   md_init_auto_unpack();
 }
 
 EvRvListen::EvRvListen( EvPoll &p,  RoutePublish &sr ) noexcept
   : EvTcpListen( p, "rv_listen", "rv_sock" ), /*RvHost( *this ),*/
-    sub_route( sr ), dummy_host( 0 ), host_timer_id( 0 )
+    sub_route( sr ), dummy_host( 0 ), host_timer_id( 0 ),
+    ipport( 0 ), has_service_prefix( true )
 {
   md_init_auto_unpack();
 }
@@ -138,14 +140,15 @@ EvRvListen::start_network( RvHost *&h, const RvMcast &mc,  const char *net,
   }
   if ( i == this->host_tab.count ) {
     void * p = ::malloc( sizeof( RvHost ) );
-    host = new ( p ) RvHost( *this, this->sub_route );
+    host = new ( p ) RvHost( *this, this->sub_route, this->has_service_prefix );
     this->host_tab[ i ] = host;
   }
   status = host->start_network( mc, net, net_len, svc, svc_len );
   if ( status != HOST_OK ) {
     if ( this->dummy_host == NULL ) {
       void * p = ::malloc( sizeof( RvHost ) );
-      this->dummy_host = new ( p ) RvHost( *this, this->sub_route );
+      this->dummy_host = new ( p ) RvHost( *this, this->sub_route,
+                                           this->has_service_prefix );
     }
     h = this->dummy_host;
     return status;
@@ -386,8 +389,8 @@ EvRvService::respond_info( void ) noexcept
   RvFieldIter * iter = this->msg_in.iter;
   MDName        nm;
   MDReference   mref;
-  char          net[ RvHost::MAX_NETWORK_LEN ],
-                svc[ RvHost::MAX_SERVICE_LEN ];
+  char          net[ MAX_RV_NETWORK_LEN ],
+                svc[ MAX_RV_SERVICE_LEN ];
   uint8_t       buf[ 8 * 1024 ];
   RvMsgWriter   rvmsg( buf, sizeof( buf ) ),
                 submsg( NULL, 0 );
@@ -532,6 +535,8 @@ EvRvService::send_start( void ) noexcept
     if ( ( this->svc_state & SENT_SESSION_START ) == 0 )
       this->host->send_session_start( this );
   }
+  if ( this->host->has_service_prefix )
+    this->msg_in.set_prefix( this->host->service, this->host->service_len );
 }
 
 void
@@ -617,12 +622,12 @@ EvRvService::is_psubscribed( const NotifyPattern &pat ) noexcept
 void
 EvRvService::add_sub( void ) noexcept
 {
-  const char * sub    = this->msg_in.sub;
-  const size_t len    = this->msg_in.sublen;
-  uint32_t     refcnt = 0,
-               h;
-  bool         coll   = false;
+  char   * sub;
+  size_t   len;
+  uint32_t refcnt = 0, h;
+  bool     coll   = false;
 
+  this->msg_in.pre_subject( sub, len );
   if ( ! this->msg_in.is_wild ) {
     h = kv_crc_c( sub, len, 0 );
     if ( this->sub_tab.put( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
@@ -696,12 +701,16 @@ EvRvService::add_sub( void ) noexcept
     }
   }
   /* if first ref & no listen starts on restricted subjects _RV. _INBOX. */
+  sub = this->msg_in.sub;
+  len = this->msg_in.sublen;
   if ( refcnt != 0 && ! is_restricted_subject( sub, len ) ) {
     static const char start[] = "_RV.INFO.SYSTEM.LISTEN.START."; /* 16+13=29 */
     uint8_t * buf;
     char    * listen;
     size_t    listenlen = 29 + len, /* start strlen + subject len */
               size      = 256 + len + listenlen + 10; /* session size max 64 */
+    char    * rep       = NULL;
+    size_t    replen    = 0;
 
     size   = align<size_t>( size, 8 );
     this->msg_in.mem.alloc( size, &buf );
@@ -722,9 +731,13 @@ EvRvService::add_sub( void ) noexcept
     msg.append_uint( SARG( "refcnt" ), refcnt );
     size = msg.update_hdr();
 
-    EvPublish pub( listen, listenlen, this->msg_in.reply, this->msg_in.replylen,
-                   buf, size, this->sub_route, this->fd,
-                   kv_crc_c( listen, listenlen, 0 ), RVMSG_TYPE_ID, 'p' );
+    this->msg_in.make_pre_subject( sub, len, listen, listenlen );
+    if ( this->msg_in.replylen > 0 )
+      this->msg_in.make_pre_subject( rep, replen, this->msg_in.reply,
+                                     this->msg_in.replylen );
+    h = kv_crc_c( sub, len, 0 );
+    EvPublish pub( sub, len, rep, replen, buf, size, this->sub_route, this->fd,
+                   h, RVMSG_TYPE_ID, 'p');
     this->sub_route.forward_msg( pub );
   }
 }
@@ -733,13 +746,14 @@ EvRvService::add_sub( void ) noexcept
 void
 EvRvService::rem_sub( void ) noexcept
 {
-  const char   * sub    = this->msg_in.sub;
-  const uint32_t len    = this->msg_in.sublen;
-  uint32_t       refcnt = 0xffffffffU;
-  bool           coll   = false;
+  char   * sub;
+  size_t   len;
+  uint32_t refcnt = 0xffffffffU, h;
+  bool     coll   = false;
 
+  this->msg_in.pre_subject( sub, len );
   if ( ! this->msg_in.is_wild ) {
-    uint32_t h = kv_crc_c( sub, len, 0 );
+    h = kv_crc_c( sub, len, 0 );
     if ( this->sub_tab.rem( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
       if ( refcnt == 0 ) {
         NotifySub nsub( sub, len, h, this->fd, coll, 'V', this->host );
@@ -751,7 +765,6 @@ EvRvService::rem_sub( void ) noexcept
     PatternCvt       cvt;
     RouteLoc         loc;
     RvPatternRoute * rt;
-    uint32_t         h;
 
     if ( cvt.convert_rv( sub, len ) == 0 ) {
       h = kv_crc_c( sub, cvt.prefixlen,
@@ -789,6 +802,8 @@ EvRvService::rem_sub( void ) noexcept
     }
   }
   /* if found ref, no listen stops on restricted subjects _RV. _INBOX. */
+  sub = this->msg_in.sub;
+  len = this->msg_in.sublen;
   if ( refcnt != 0xffffffffU && ! is_restricted_subject( sub, len ) ) {
     static const char stop[] = "_RV.INFO.SYSTEM.LISTEN.STOP."; /* 16+12=28 */
     uint8_t * buf;
@@ -815,9 +830,10 @@ EvRvService::rem_sub( void ) noexcept
     msg.append_uint( SARG( "refcnt" ), refcnt );
     size = msg.update_hdr();
 
-    EvPublish pub( listen, listenlen, NULL, 0, buf, size,
-                   this->sub_route, this->fd, kv_crc_c( listen, listenlen, 0 ),
-                   RVMSG_TYPE_ID, 'p' );
+    this->msg_in.make_pre_subject( sub, len, listen, listenlen );
+    h = kv_crc_c( sub, len, 0 );
+    EvPublish pub( sub, len, NULL, 0, buf, size, this->sub_route, this->fd,
+                   h, RVMSG_TYPE_ID, 'p' );
     this->sub_route.forward_msg( pub );
   }
 }
@@ -858,11 +874,6 @@ EvRvService::rem_all_sub( void ) noexcept
 bool
 EvRvService::fwd_pub( void ) noexcept
 {
-  char   * sub     = this->msg_in.sub,
-         * rep     = this->msg_in.reply;
-  size_t   sublen  = this->msg_in.sublen,
-           replen  = this->msg_in.replylen;
-  uint32_t h       = kv_crc_c( sub, sublen, 0 );
   void   * msg     = this->msg_in.data.fptr;
   size_t   msg_len = this->msg_in.data.fsize;
   uint32_t ftype   = this->msg_in.data.ftype;
@@ -883,6 +894,16 @@ EvRvService::fwd_pub( void ) noexcept
     if ( ft != 0 )
       ftype = ft;
   }
+  char   * sub,
+         * rep    = NULL;
+  size_t   sublen,
+           replen = 0;
+  uint32_t h;
+  this->msg_in.pre_subject( sub, sublen );
+  h = kv_crc_c( sub, sublen, 0 );
+  if ( this->msg_in.replylen > 0 )
+    this->msg_in.make_pre_subject( rep, replen, this->msg_in.reply,
+                                   this->msg_in.replylen );
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
                  this->sub_route, this->fd, h, ftype, 'p' );
   return this->sub_route.forward_msg( pub );
@@ -941,11 +962,29 @@ EvRvService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
 bool
 EvRvService::fwd_msg( EvPublish &pub ) noexcept
 {
+  const char * sub     = pub.subject,
+             * reply   = (const char *) pub.reply;
+  size_t       sublen  = pub.subject_len,
+               replen  = pub.reply_len,
+               preflen = this->msg_in.prefix_len;
+
   uint8_t buf[ 2 * 1024 ], * b = buf;
   size_t  buf_len = sizeof( buf );
 
-  if ( pub.subject_len + pub.reply_len > 2 * 1024 - 512 ) {
-    buf_len = pub.subject_len + pub.reply_len + 512;
+  if ( sublen < preflen ) {
+    fprintf( stderr, "sub %.*s is less than prefix (%u)\n", (int) sublen, sub,
+             (int) preflen );
+    return true;
+  }
+  sub = &sub[ preflen ];
+  sublen -= preflen;
+  if ( replen > preflen ) {
+    reply   = &reply[ preflen ];
+    replen -= preflen;
+  }
+
+  if ( sublen + pub.reply_len > 2 * 1024 - 512 ) {
+    buf_len = sublen + pub.reply_len + 512;
     b = (uint8_t *) this->alloc_temp( buf_len );
     if ( b == NULL )
       return true;
@@ -957,28 +996,26 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
   const void * msg;
   int          status;
 
-  status = rvmsg.append_subject( SARG( "sub" ), pub.subject,
-                                 pub.subject_len );
+  status = rvmsg.append_subject( SARG( "sub" ), sub, sublen );
   /* some subjects may not encode */
   if ( status == 0 ) {
     const char * mtype = "D"; /* data */
-    if ( pub.subject_len > 16 && pub.subject[ 0 ] == '_' ) {
-      if ( ::memcmp( "_RV.INFO.SYSTEM.", pub.subject, 16 ) == 0 ) {
+    if ( sublen > 16 && sub[ 0 ] == '_' ) {
+      if ( ::memcmp( "_RV.INFO.SYSTEM.", sub, 16 ) == 0 ) {
         /* HOST.START, SESSION.START, LISTEN.START, UNREACHABLE.TRANSPORT */
-        if ( ::memcmp( "HOST.", &pub.subject[ 16 ], 5 ) == 0 ||
-             ::memcmp( "SESSION.", &pub.subject[ 16 ], 8 ) == 0 ||
-             ::memcmp( "LISTEN.", &pub.subject[ 16 ], 7 ) == 0 ||
-             ::memcmp( "UNREACHABLE.", &pub.subject[ 16 ], 12 ) == 0 )
+        if ( ::memcmp( "HOST.", &sub[ 16 ], 5 ) == 0 ||
+             ::memcmp( "SESSION.", &sub[ 16 ], 8 ) == 0 ||
+             ::memcmp( "LISTEN.", &sub[ 16 ], 7 ) == 0 ||
+             ::memcmp( "UNREACHABLE.", &sub[ 16 ], 12 ) == 0 )
           mtype = "A"; /* advisory */
       }
-      else if ( ::memcmp( "_RV.ERROR.SYSTEM.", pub.subject, 17 ) == 0 )
+      else if ( ::memcmp( "_RV.ERROR.SYSTEM.", sub, 17 ) == 0 )
         mtype = "A"; /* advisory */
     }
     status = rvmsg.append_string( SARG( "mtype" ), mtype, 2 );
   }
-  if ( status == 0 && pub.reply_len > 0 ) {
-    status = rvmsg.append_string( SARG( "return" ), (const char *) pub.reply,
-                                  pub.reply_len + 1 );
+  if ( status == 0 && replen > 0 ) {
+    status = rvmsg.append_string( SARG( "return" ), reply, replen + 1 );
     b[ rvmsg.off - 1 ] = '\0';
   }
   if ( status == 0 ) {
@@ -1068,7 +1105,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
     }
     else {
       fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %u\n",
-               msg_enc, (int) pub.subject_len, pub.subject, (uint32_t) off );
+               msg_enc, (int) sublen, sub, (uint32_t) off );
     }
   }
   return true;
@@ -1152,13 +1189,20 @@ RvMsgIn::subject_to_string( const uint8_t *buf,  size_t buflen ) noexcept
     j += buf[ j ];
     k += j - ( i + 1 );
     segs -= 1;
-  } 
+  }
   if ( k > 0xffffU )
     goto bad_subject;
-  if ( k + 1 > sizeof( this->sub_buf ) )
-    this->mem.alloc( k + 1, &this->sub );
-  else
+  if ( k + 1 > sizeof( this->sub_buf ) ) {
+    this->mem.alloc( k + 1 + this->prefix_len, &this->sub );
+    if ( this->prefix_len > 0 ) {
+      uint16_t n = sizeof( this->prefix ) - this->prefix_len;
+      ::memcpy( this->sub, &this->prefix[ n ], this->prefix_len );
+      this->sub = &this->sub[ this->prefix_len ];
+    }
+  }
+  else {
     this->sub = this->sub_buf;
+  }
   segs = buf[ 0 ];
   j = 1;
   k = 0;
@@ -1234,6 +1278,7 @@ RvMsgIn::print( int status,  void *m,  size_t len ) noexcept
 int
 RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
 {
+  enum { HAS_SUB = 1, HAS_MTYPE = 2, HAS_RETURN = 4, HAS_DATA = 8 };
   MDFieldIter * it;
   MDName        nm;
   MDReference   mref;
@@ -1255,7 +1300,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
           case 4:
             if ( ::memcmp( nm.fname, SARG( "sub" ) ) == 0 ) {
               if ( this->subject_to_string( mref.fptr, mref.fsize ) )
-                cnt |= 1;
+                cnt |= HAS_SUB;
               else
                 return ERR_RV_SUB;
             }
@@ -1263,7 +1308,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
           case 5:
             if ( ::memcmp( nm.fname, SARG( "data" ) ) == 0 ) {
               this->data = mref;
-              cnt |= 8;
+              cnt |= HAS_DATA;
             }
             break;
           case 6:
@@ -1280,7 +1325,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
                       | B( 'L' ) /* listen */
                       | B( 'R' );/* response */
                   if ( ( B( this->mtype ) & valid ) != 0 )
-                    cnt |= 2;
+                    cnt |= HAS_MTYPE;
                   #undef B
                 }
               }
@@ -1292,7 +1337,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
               this->replylen = (uint16_t) mref.fsize;
               if ( this->replylen > 0 /*&& this->reply[ this->replylen - 1 ] == '\0'*/ )
                 this->replylen--;
-              cnt |= 4;
+              cnt |= HAS_RETURN;
             }
             break;
           default:
@@ -1300,21 +1345,21 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
         }
       } while ( cnt < 15 && this->iter->next() == 0 );
     }
-    if ( ( cnt & 2 ) == 0 )
+    if ( ( cnt & HAS_MTYPE ) == 0 )
       status = ERR_RV_MTYPE; /* no mtype */
   }
-  if ( ( cnt & 1 ) == 0 ) {
+  if ( ( cnt & HAS_SUB ) == 0 ) {
     this->sub      = this->sub_buf;
     this->sub[ 0 ] = '\0';
     this->sublen = 0; /* no subject */
   }
-  if ( ( cnt & 2 ) == 0 )
+  if ( ( cnt & HAS_MTYPE ) == 0 )
     this->mtype = 0;
-  if ( ( cnt & 4 ) == 0 ) {
+  if ( ( cnt & HAS_RETURN ) == 0 ) {
     this->reply    = NULL;
     this->replylen = 0;
   }
-  if ( ( cnt & 8 ) == 0 )
+  if ( ( cnt & HAS_DATA ) == 0 )
     this->data.zero();
   if ( is_rv_debug )
     this->print( status, msgbuf, msglen );

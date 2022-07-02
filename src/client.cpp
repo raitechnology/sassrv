@@ -235,7 +235,7 @@ main( int argc, const char *argv[] )
 {
   SignalHandler sighndl;
   const char * daemon  = get_arg( argc, argv, 1, "-d", "-daemon", "tcp:7500" ),
-             * network = get_arg( argc, argv, 1, "-n", "-network", "127.0.0.1"),
+             * network = get_arg( argc, argv, 1, "-n", "-network", ""),
              * service = get_arg( argc, argv, 1, "-s", "-service", "7500" ),
              * path    = get_arg( argc, argv, 1, "-c", "-cfile", NULL ),
              * nodict  = get_arg( argc, argv, 0, "-x", "-nodict", NULL ),

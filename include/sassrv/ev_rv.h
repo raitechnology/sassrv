@@ -32,6 +32,7 @@ struct EvRvListen : public kv::EvTcpListen/*, public RvHost*/ {
   RvHost    * dummy_host;
   uint32_t    host_timer_id; /* timer for HOST.STATUS */
   uint16_t    ipport;
+  bool        has_service_prefix;
 
   EvRvListen( kv::EvPoll &p,  kv::RoutePublish &sr ) noexcept;
   EvRvListen( kv::EvPoll &p ) noexcept;
@@ -336,20 +337,56 @@ struct RvMsgIn {
   bool              is_wild;  /* if a '*' or '>' pattern match in sub */
   uint8_t           mtype;    /* the type message (Data, Info, Listen, Cancel)*/
   char            * sub,      /* the subject of message, sub : X */
+                    prefix[ MAX_RV_SERVICE_LEN + 8 ], /* _service. */
                     sub_buf[ 64 ]; /* buffer for subject string decoded */
+  uint16_t          prefix_len; /* if has_service_prefix _7500. */
 
   RvMsgIn() { this->init(); }
 
   void init( void ) {
-    this->msg      = NULL;
-    this->iter     = NULL;
-    this->sub      = this->sub_buf;
-    this->sublen   = 0;
-    this->replylen = 0;
+    this->msg        = NULL;
+    this->iter       = NULL;
+    this->sub        = this->sub_buf;
+    this->sublen     = 0;
+    this->replylen   = 0;
+    this->prefix_len = 0;
   }
   void release( void ) {
     this->init();
     this->mem.reuse();
+  }
+  void set_prefix( const char *pref,  uint16_t len ) {
+    uint16_t i = sizeof( this->prefix ),
+             j = len;
+    this->prefix[ --i ] = '.';
+    for (;;) {
+      this->prefix[ --i ] = pref[ --j ];
+      if ( i == 1 || j == 0 )
+        break;
+    }
+    this->prefix[ --i ] = '_';
+    this->prefix_len = sizeof( this->prefix ) - i;
+  }
+  void pre_subject( char *&str,  size_t &sz ) {
+    str = this->sub - this->prefix_len;
+    sz  = this->sublen + this->prefix_len;
+  }
+  size_t cat_pre_subject( char *str,  const char *suf,  size_t suflen ) {
+    size_t sz = this->prefix_len;
+    ::memcpy( str, this->sub - sz, sz );
+    ::memcpy( &str[ sz ], suf, suflen );
+    sz += suflen; str[ sz ] = '\0';
+    return sz;
+  }
+  void make_pre_subject( char *&str,  size_t &sz,  char *suf, size_t suflen ) {
+    if ( this->prefix_len > 0 ) {
+      str = (char *) this->mem.make( suflen + this->prefix_len + 1 );
+      sz  = this->cat_pre_subject( str, suf, suflen );
+    }
+    else {
+      str = suf;
+      sz  = suflen;
+    }
   }
   bool subject_to_string( const uint8_t *buf,  size_t buflen ) noexcept;
   int unpack( void *msgbuf,  size_t msglen ) noexcept;
@@ -455,8 +492,12 @@ struct RvServiceLink {
     return this->bits[ ( h >> 3 ) & 0xff ] & ( 1 << ( h & 7 ) );
   }
   /* used to uniquely identify a list of subjects among a list of sessions */
-  bool check_subject( const char *subj,  size_t len,  uint32_t hash ) {
-    if ( is_restricted_subject( subj, len ) )
+  bool check_subject( RvSubRoute &rt,  uint16_t prelen ) {
+    const char * subj = rt.value;
+    size_t       len  = rt.len;
+    uint32_t     hash = rt.hash;
+    if ( len <= prelen ||
+         is_restricted_subject( &subj[ prelen ], len - prelen ) )
       return false;
     this->set( hash );
     for ( RvServiceLink *link = this->back; link != NULL; link = link->back ) {
@@ -467,9 +508,12 @@ struct RvServiceLink {
     return true;
   }
   /* used to uniquely identify a list of patterns among a list of sessions */
-  bool check_pattern( const char *pat,  size_t len,  uint32_t hash,
-                      RvWildMatch *check ) {
-    if ( is_restricted_subject( pat, len ) )
+  bool check_pattern( RvPatternRoute &rt,  uint16_t prelen,  RvWildMatch *check ) {
+    const char * pat  = rt.value;
+    size_t       len  = rt.len;
+    uint32_t     hash = rt.hash;
+    if ( len < prelen ||
+         is_restricted_subject( &pat[ prelen ], len - prelen ) )
       return false;
     for ( RvServiceLink *link = this->back; link != NULL; link = link->back ) {
       RvPatternRoute * rt;

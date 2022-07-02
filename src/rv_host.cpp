@@ -22,10 +22,11 @@ using namespace sassrv;
 using namespace kv;
 using namespace md;
 
-RvHost::RvHost( EvRvListen &l,  RoutePublish &sr ) noexcept
+RvHost::RvHost( EvRvListen &l,  RoutePublish &sr,  bool has_svc_pre ) noexcept
       : listener( l ), sub_route( sr )
 {
   ::memset( this->host, 0, (char *) (void *) &this->mcast - this->host );
+  this->has_service_prefix = has_svc_pre;
 }
 #if 0
 int
@@ -225,7 +226,7 @@ rai::sassrv::get_rv_host_error( int status ) noexcept
     case ERR_BAD_SERVICE_NUM:
       return "the service number invalid";
     case ERR_BAD_PARAMETERS:
-      return "the length of network overflows MAX_NETWORK";
+      return "the length of network overflows MAX_RV_NETWORK";
     case ERR_START_HOST_FAILED:
       return "host start failed";
     default:
@@ -245,7 +246,7 @@ RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
       return HOST_OK;
     return ERR_SAME_SVC_TWO_NETS;
   }
-  if ( net_len >= MAX_NETWORK_LEN || svc_len >= MAX_SERVICE_LEN )
+  if ( net_len >= MAX_RV_NETWORK_LEN || svc_len >= MAX_RV_SERVICE_LEN )
     return ERR_BAD_PARAMETERS;
 
   ::memcpy( this->service, svc, svc_len );
@@ -297,18 +298,50 @@ RvHost::stop_network( void ) noexcept
   }
 }
 
-RvFwdAdv::RvFwdAdv( RvHost &h,  EvRvService *svc,  const char *prefix,
+RvFwdAdv::RvFwdAdv( RvHost &host,  EvRvService *svc,  const char *prefix,
                     int flags ) noexcept
         : rvmsg( this->buf, sizeof( this->buf ) )
 {
-  this->sublen = h.pack_advisory( this->rvmsg, prefix, this->subj, flags, svc );
+  char pre[ MAX_RV_SERVICE_LEN + 8 ];
+  size_t prelen = 0;
+  if ( host.has_service_prefix ) {
+    pre[ prelen++ ] = '_';
+    ::memcpy( &pre[ prelen ], host.service, host.service_len );
+    prelen += host.service_len;
+    pre[ prelen++ ] = '.';
+    pre[ prelen ] = '\0';
+  }
+  this->fwd( pre, prelen, host, svc, prefix, flags );
+}
+
+void
+RvFwdAdv::fwd( const char *pre,  size_t pre_len,
+               RvHost &host,  EvRvService *svc,  const char *prefix,
+               int flags ) noexcept
+{
+  this->sublen = host.pack_advisory( this->rvmsg, prefix, this->subj,
+                                     flags, svc );
   this->size   = this->rvmsg.update_hdr();
-  EvPublish pub( this->subj, this->sublen, NULL, 0, this->buf, this->size,
-                 h.sub_route, h.listener.fd,
-                 kv_crc_c( this->subj, this->sublen, 0 ), RVMSG_TYPE_ID, 'p' );
+
+  char * sub;
+  size_t sublen;
+  if ( pre_len > 0 ) {
+    sub = this->subj2;
+    ::memcpy( sub, pre, pre_len );
+    ::memcpy( &sub[ pre_len ], this->subj, this->sublen );
+    sublen = pre_len + this->sublen;
+    sub[ sublen ] = '\0';
+  }
+  else {
+    sub    = this->subj;
+    sublen = this->sublen;
+  }
+  uint32_t h = kv_crc_c( sub, sublen, 0 );
+  EvPublish pub( sub, sublen, NULL, 0, this->buf, this->size,
+                 host.sub_route, host.listener.fd, h, RVMSG_TYPE_ID, 'p' );
   if ( is_rv_debug )
     EvRvService::print( this->buf, this->size );
-  h.sub_route.forward_msg( pub );
+  host.sub_route.forward_msg( pub );
 }
 
 void
@@ -704,6 +737,8 @@ RvDaemonRpc::subscribe_daemon_inbox( void ) noexcept
   if ( ! this->in_list( IN_ACTIVE_LIST ) )
     this->init_rpc();
   if ( this->host_refs++ == 0 ) {
+    if ( is_rv_debug )
+      printf( "subscribe daemon %.*s\n", (int) this->ibx.len, this->ibx.buf );
     NotifySub nsub( this->ibx.buf, this->ibx.len, this->ibx.h,
                     this->fd, false, 'V' );
     this->sub_route.add_sub( nsub );
@@ -765,6 +800,8 @@ RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
   have_daemon = false; /* include daemon onlly once */
   for ( p = iter.first(); p != NULL; p = iter.next() ) {
     EvRvService * svc = (EvRvService *) p;
+    if ( svc->host == NULL || svc->host->rpc != this )
+      continue;
     if ( ( svc->svc_state & EvRvService::IS_RV_DAEMON ) != 0 && have_daemon )
       continue;
     buflen += svc->session_len + 8; /* field + type + session str */
@@ -776,6 +813,8 @@ RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
   have_daemon = false;
   for ( p = iter.first(); p != NULL; p = iter.next() ) {
     EvRvService * svc = (EvRvService *) p;
+    if ( svc->host == NULL || svc->host->rpc != this )
+      continue;
     if ( ( svc->svc_state & EvRvService::IS_RV_DAEMON ) != 0 && have_daemon )
       continue;
     msg.append_string( NULL, 0, svc->session, svc->session_len + 1 );
@@ -783,6 +822,8 @@ RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
       have_daemon = true;
   }
   buflen = msg.update_hdr();
+  if ( is_rv_debug )
+    printf( "pub sessions reply %.*s\n", (int) reply_len, (char *) reply );
   EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
                  this->sub_route, this->fd, kv_crc_c( reply, reply_len, 0 ),
                  RVMSG_TYPE_ID, 'p' );
@@ -804,10 +845,13 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
   size_t            buflen,
                     subcnt,
                     linkcnt;
+  uint16_t          prelen;
   subcnt  = 0;
   linkcnt = 0;
   for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
     EvRvService *svc = (EvRvService *) p;
+    if ( svc->host == NULL || svc->host->rpc != this )
+      continue;
     /* sessions may be the same when link uses the DAEMON session */
     if ( (size_t) svc->session_len + 1 == session_len &&
          ::memcmp( session, svc->session, svc->session_len ) == 0 ) {
@@ -837,19 +881,17 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
     for ( ; link != NULL; link = link->next ) {
       EvRvService & s = link->svc;
       ::memset( link->bits, 0, sizeof( link->bits ) );
+      prelen = s.msg_in.prefix_len;
       if ( s.sub_tab.first( pos ) ) {
         do {
-          if ( /*linkcnt == 1 ||*/
-               link->check_subject( pos.rt->value, pos.rt->len, pos.rt->hash ) )
+          if ( link->check_subject( *pos.rt, prelen ) )
             buflen += pos.rt->len + 8 + pos.rt->segments() * 2;
         } while ( s.sub_tab.next( pos ) );
       }
       if ( s.pat_tab.first( ppos ) ) {
         do {
           for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
-            if ( /*linkcnt == 1 ||*/
-                 link->check_pattern( ppos.rt->value, ppos.rt->len,
-                                      ppos.rt->hash, m ) )
+            if ( link->check_pattern( *ppos.rt, prelen, m ) )
               buflen += m->len + 8 + m->segments() * 2;
           }
         } while ( s.pat_tab.next( ppos ) );
@@ -867,20 +909,20 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
     for ( ; link != NULL; link = link->next ) {
       EvRvService & s = link->svc;
       ::memset( link->bits, 0, sizeof( link->bits ) );
+      prelen = s.msg_in.prefix_len;
       if ( s.sub_tab.first( pos ) ) {
         do {
-          if ( /*linkcnt == 1 ||*/
-               link->check_subject( pos.rt->value, pos.rt->len, pos.rt->hash ) )
-            msg.append_subject( NULL, 0, pos.rt->value, pos.rt->len );
+          if ( link->check_subject( *pos.rt, prelen ) )
+            msg.append_subject( NULL, 0, &pos.rt->value[ prelen ],
+                                pos.rt->len - prelen );
         } while ( s.sub_tab.next( pos ) );
       }
       if ( s.pat_tab.first( ppos ) ) {
         do {
           for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
-            if ( /*linkcnt == 1 ||*/
-                 link->check_pattern( ppos.rt->value, ppos.rt->len,
-                                      ppos.rt->hash, m ) )
-              msg.append_subject( NULL, 0, m->value, m->len );
+            if ( link->check_pattern( *ppos.rt, prelen, m ) )
+              msg.append_subject( NULL, 0, &m->value[ prelen ],
+                                  m->len - prelen );
           }
         } while ( s.pat_tab.next( ppos ) );
       }
@@ -891,6 +933,8 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
   }
   msg.append_int<int32_t>( SARG( "end" ), 1 );
   buflen = msg.update_hdr();
+  if ( is_rv_debug )
+    printf( "pub subs reply %.*s\n", (int) reply_len, (char *) reply );
   EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
                  this->sub_route, this->fd, kv_crc_c( reply, reply_len, 0 ),
                  RVMSG_TYPE_ID, 'p' );
@@ -908,6 +952,8 @@ RvDaemonRpc::on_msg( EvPublish &pub ) noexcept
   MDFieldIter * it;
   MDReference   mref;
 
+  if ( is_rv_debug )
+    printf( "daemon rpc %.*s\n", (int) pub.subject_len, pub.subject );
   m = RvMsg::unpack_rv( (void *) pub.msg, 0, pub.msg_len, 0, NULL, &mem );
   if ( m != NULL ) {
     /*m->print( &mout );*/

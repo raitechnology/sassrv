@@ -37,13 +37,20 @@ enum RvAdv {
   ADV_SESSION     = ADV_HOSTADDR | ADV_ID | ADV_USERID
 };
 
+static const size_t MAX_RV_NETWORK_LEN = 1680,
+                    MAX_RV_SERVICE_LEN = 32;
+
 struct RvFwdAdv {
+  size_t          sublen, size;
+  char            subj[ 64 ],
+                  subj2[ 64 + MAX_RV_SERVICE_LEN + 8 ];
   uint8_t         buf[ 8 * 1024 ];
   md::RvMsgWriter rvmsg;
-  char            subj[ 64 ];
-  size_t          sublen, size;
 
-  RvFwdAdv( RvHost &h,  EvRvService *svc,  const char *prefix,
+  RvFwdAdv( RvHost &host,  EvRvService *svc,  const char *prefix,
+            int flags ) noexcept;
+  void fwd( const char *pre,  size_t pre_len,
+            RvHost &host,  EvRvService *svc,  const char *prefix,
             int flags ) noexcept;
 };
 
@@ -55,7 +62,7 @@ enum RvHostError {
   ERR_SAME_SVC_TWO_NETS  = 5, /* the same service with two different networks */
   ERR_NETWORK_NOT_FOUND  = 17,/* network not found */
   ERR_BAD_SERVICE_NUM    = 18,/* svc number bad */
-  ERR_BAD_PARAMETERS     = 19,/* the length of network overflows MAX_NETWORK */
+  ERR_BAD_PARAMETERS     = 19,/* the length of network overfl MAX_RV_NETWORK */
   ERR_START_HOST_FAILED  = 20 /* EvRvListener::host_start() failed */
 };
 
@@ -98,16 +105,14 @@ struct RvMcast {
 /* host stats for the service */
 struct RvDaemonRpc;
 struct RvHost : public kv::EvTimerCallback {
-  static const size_t MAX_NETWORK_LEN = 1680,
-                      MAX_SERVICE_LEN = 32;
   EvRvListen       & listener;
   kv::RoutePublish & sub_route;
 
   char         host[ 256 ],       /* gethostname */
                session_ip[ 16 ],  /* ip address string 0A040416 */
                daemon_id[ 64 ],   /* hexip.DAEMON.gob */
-               network[ MAX_NETWORK_LEN ], /* network string */
-               service[ MAX_SERVICE_LEN ]; /* service string */
+               network[ MAX_RV_NETWORK_LEN ], /* network string */
+               service[ MAX_RV_SERVICE_LEN ]; /* service string */
   uint16_t     host_len,          /* len of above */
                daemon_len,        /* len of this->daomon_id[] */
                network_len,       /* len of this->network[] */
@@ -115,7 +120,8 @@ struct RvHost : public kv::EvTimerCallback {
                service_port;      /* service in network order */
   bool         network_started,   /* if start_network() called and succeeded */
                daemon_subscribed,
-               start_in_process;
+               start_in_process,
+               has_service_prefix;
   static const size_t session_ip_len = 8;
   uint64_t     timer_id,
                ms, bs,            /* msgs sent, bytes sent */
@@ -132,7 +138,7 @@ struct RvHost : public kv::EvTimerCallback {
   RvMcast      mcast;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
-  RvHost( EvRvListen &l,  kv::RoutePublish &sr ) noexcept;
+  RvHost( EvRvListen &l,  kv::RoutePublish &sr,  bool has_svc_pre ) noexcept;
 
   void zero_stats( uint64_t now ) {
     ::memset( &this->ms, 0, (char *) (void *) &this->start_stamp -
@@ -164,19 +170,28 @@ struct RvHost : public kv::EvTimerCallback {
 };
 
 struct DaemonInbox {
-  static const size_t len = 22;
-  char     buf[ len + 1 ];
+  char     buf[ MAX_RV_SERVICE_LEN + 2 + 22 + 2 ];
   uint32_t h;
+  uint16_t len;
 
   bool equals( const DaemonInbox &ibx ) const {
-    return ibx.h == this->h && ::memcmp( ibx.buf, this->buf, len ) == 0;
+    return ibx.h == this->h && ibx.len == this->len &&
+           ::memcmp( ibx.buf, this->buf, this->len ) == 0;
   }
 
   DaemonInbox( RvHost &host ) {
-    ::memcpy( this->buf, "_INBOX.", 7 );
-    ::memcpy( &this->buf[ 7 ], host.session_ip, 8 );
-    ::memcpy( &this->buf[ 15 ], ".DAEMON", 8 );
-    this->h = kv_crc_c( this->buf, this->len, 0 );
+    uint16_t i = 0;
+    if ( host.has_service_prefix ) {
+      this->buf[ i++ ] = '_';
+      ::memcpy( &this->buf[ i ], host.service, host.service_len );
+      i += host.service_len;
+      this->buf[ i++ ] = '.';
+    }
+    ::memcpy( &this->buf[ i ], "_INBOX.", 7 );       i += 7;
+    ::memcpy( &this->buf[ i ], host.session_ip, 8 ); i += 8;
+    ::memcpy( &this->buf[ i ], ".DAEMON", 8 );       i += 7;
+    this->len = i;
+    this->h = kv_crc_c( this->buf, i, 0 );
   }
 };
 
