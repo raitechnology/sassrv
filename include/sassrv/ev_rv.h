@@ -393,6 +393,25 @@ struct RvMsgIn {
   void print( int status,  void *m,  size_t len ) noexcept;
 };
 
+struct RvIDLElem {
+  uint32_t hash,         /* hash of subject */
+           msg_loss,     /* number of messages lost */
+           pub_msg_loss; /* count lost published */
+  uint16_t len;          /* length of subject */
+  char     value[ 2 ];   /* the subject string */
+};
+
+struct RvIDLQueue {
+  kv::RouteVec<RvIDLElem> tab;
+
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  void operator delete( void *ptr ) { ::free( ptr ); }
+  RvIDLQueue() {}
+  ~RvIDLQueue() {
+    this->tab.release();
+  }
+};
+
 struct EvRvService : public kv::EvConnection {
   void * operator new( size_t, void *ptr ) { return ptr; }
   enum RvState {
@@ -426,11 +445,14 @@ struct EvRvService : public kv::EvConnection {
   bool         host_started,
                sent_initresp,
                sent_rvdconn;
+  RvIDLQueue * loss_queue;
   uint64_t     timer_id;       /* timerid unique for this service */
+  uint32_t     pub_events,
+               pub_status[ 4 ]; /* loss, start, cycle, restart */
 
   EvRvService( kv::EvPoll &p,  const uint8_t t,  EvRvListen &l )
     : kv::EvConnection( p, t ), sub_route( l.sub_route ),
-      listener( l ) {}
+      listener( l ), loss_queue( 0 ) {}
   void initialize_state( uint64_t id ) {
     this->svc_state     = VERS_RECV;
     this->host          = NULL;
@@ -450,6 +472,13 @@ struct EvRvService : public kv::EvConnection {
                                 &this->session[ 0 ] );
     ::strcpy( this->userid, "nobody" );
     this->userid_len = 6;
+    if ( this->loss_queue != NULL ) {
+      delete this->loss_queue;
+      this->loss_queue = NULL;
+    }
+    this->pub_events = 0;
+    for ( int i = 0; i < 4; i++ )
+      this->pub_status[ i ] = 0;
   }
   void send_info( bool agree ) noexcept; /* info rec during connection start */
   int dispatch_msg( void *msg,  size_t msg_len ) noexcept; /* route msgs */
@@ -462,6 +491,9 @@ struct EvRvService : public kv::EvConnection {
   bool fwd_pub( void ) noexcept;     /* fwd a message from client to network */
   /* forward a message from network to client */
   bool fwd_msg( kv::EvPublish &pub ) noexcept;
+  void inbound_data_loss( const char *sub,  size_t sublen,
+                          kv::EvPublish &pub ) noexcept;
+  bool pub_inbound_data_loss( void ) noexcept;
   static void print( void *m,  size_t len ) noexcept;
   /* EvSocket */
   virtual void read( void ) noexcept final;

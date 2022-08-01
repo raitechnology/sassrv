@@ -554,6 +554,20 @@ EvRvService::timer_expire( uint64_t tid,  uint64_t ) noexcept
 {
   if ( this->timer_id != tid )
     return false;
+  if ( this->pub_events != 0 ) {
+    static const char *event[ 4 ] =
+      { "pub_start", "pub_cycle", "pub_restart", "msg_loss" };
+    fprintf( stderr, "rv_%s (%s): msg loss events: %u\n",
+             this->host->service, this->peer_address.buf, this->pub_events );
+    for ( int i = 0; i < 4; i++ ) {
+      if ( this->pub_status[ i ] != 0 ) {
+        fprintf( stderr, " event %s: %u\n", event[ i ], this->pub_status[ i ] );
+        this->pub_status[ i ] = 0;
+      }
+    }
+    this->pub_events = 0;
+  }
+  return this->pub_inbound_data_loss();
 #if 0
   int err = 0;
   socklen_t errsz = sizeof( err );
@@ -568,8 +582,8 @@ EvRvService::timer_expire( uint64_t tid,  uint64_t ) noexcept
             this->bytes_sent, this->poll_bytes_sent );
     printf( "wr_pending %lu\n", this->pending() );
   }
-#endif
   return true;
+#endif
 }
 
 uint8_t
@@ -956,6 +970,132 @@ EvRvService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
   ::memcpy( key, rt->value, keylen );
   return true;
 }
+
+void
+EvRvService::inbound_data_loss( const char *sub,  size_t sublen,
+                                EvPublish &pub ) noexcept
+{
+  if ( pub.pub_status <= EV_MAX_LOSS ) /* if message loss */
+    this->pub_status[ 3 ] += pub.pub_status;
+  else
+    this->pub_status[ pub.pub_status & EV_MAX_LOSS ]++; /* other event */
+
+  if ( this->pub_events++ == 0 )
+    this->poll.timer.add_timer_seconds( this->fd, 1, this->timer_id, 0 );
+
+  uint32_t msg_loss = pub.pub_status;
+  if ( msg_loss == EV_PUB_RESTART )
+    msg_loss = 1; /* not sure how many lost */
+  if ( msg_loss <= EV_MAX_LOSS ) { /* if message loss */
+    this->host->idl += msg_loss;
+
+    if ( this->loss_queue == NULL )
+      this->loss_queue = new ( ::malloc( sizeof( RvIDLQueue ) ) ) RvIDLQueue();
+
+    RouteLoc    loc;
+    RvIDLElem * el;
+    el = this->loss_queue->tab.upsert( pub.subj_hash, sub, sublen, loc );
+    if ( loc.is_new ) {
+      el->msg_loss     = msg_loss;
+      el->pub_msg_loss = 0;
+    }
+    else {
+      el->msg_loss += msg_loss;
+    }
+
+    if ( this->pub_events == 1 )
+      this->pub_inbound_data_loss();
+  }
+}
+
+bool
+EvRvService::pub_inbound_data_loss( void ) noexcept
+{
+  RvIDLElem * el;
+  RouteLoc    loc;
+  if ( this->loss_queue == NULL )
+    return false;
+
+  const char * sub[ 9 ];
+  size_t       sublen[ 9 ];
+  uint32_t     msg_loss[ 9 ],
+               sub_cnt      = 0,
+               extra_sublen = 0;
+  uint64_t     total_loss   = 0;
+
+  sub[ 0 ]      = NULL;
+  sublen[ 0 ]   = 0;
+  msg_loss[ 0 ] = 0;
+  for ( el = this->loss_queue->tab.first( loc ); el != NULL;
+        el = this->loss_queue->tab.next( loc ) ) {
+    if ( el->pub_msg_loss != el->msg_loss ) {
+      uint32_t loss = el->msg_loss - el->pub_msg_loss;
+      if ( sub_cnt < 9 ) {
+        sub[ sub_cnt ]      = el->value;
+        sublen[ sub_cnt ]   = el->len;
+        msg_loss[ sub_cnt ] = loss;
+        extra_sublen       += el->len;
+      }
+      sub_cnt++;
+      total_loss += loss;
+      el->pub_msg_loss = el->msg_loss;
+    }
+  }
+  if ( total_loss == 0 ) {
+    delete this->loss_queue;
+    this->loss_queue = NULL;
+    return false;
+  }
+
+  static const char   sys_sub[] = "_RV.ERROR.SYSTEM.DATALOSS.INBOUND.BCAST";
+  static const size_t sys_sublen = sizeof( sys_sub ) - 1;
+  uint8_t  buf[ 2 * 1024 ],
+         * b    = buf;
+  size_t   size,
+           blen = sizeof( buf );
+  uint32_t extra_sub = ( sub_cnt < 9 ? sub_cnt : 9 );
+
+  if ( extra_sublen + extra_sub * 32 > sizeof( buf ) - 512 ) {
+    blen = extra_sublen + extra_sub * 32 + 512;
+    b = (uint8_t *) this->alloc_temp( blen );
+    if ( b == NULL )
+      return true;
+  }
+  RvMsgWriter rvmsg( b, blen ),
+              submsg( NULL, 0 );
+
+  rvmsg.append_string( SARG( "mtype" ), "A", 2 );
+  rvmsg.append_subject( SARG( "sub" ), sys_sub, sys_sublen );
+  rvmsg.append_msg( SARG( "data" ), submsg );
+
+  submsg.append_string( SARG( "ADV_CLASS" ), SARG( "ERROR" ) );
+  submsg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
+  submsg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.INBOUND.BCAST" ) );
+  submsg.append_string( SARG( "ADV_DESC" ), SARG( "lost msgs" ) );
+  submsg.append_uint( SARG( "lost" ), (uint32_t) ( total_loss < 0x7fffffffU ?
+    (uint32_t) total_loss : 0x7fffffffU ) );
+  submsg.append_uint( SARG( "sub_cnt" ), sub_cnt );
+  for ( uint32_t i = 0; i < extra_sub; i++ ) {
+    static const char *sub1[ 9 ] = { "sub1", "sub2", "sub3", "sub4",
+                                     "sub5", "sub6", "sub7", "sub8", "sub9" };
+    static const char *lost1[ 9 ] = { "lost1", "lost2", "lost3", "lost4",
+                                  "lost5", "lost6", "lost7", "lost8", "lost9" };
+    submsg.append_string( sub1[ i ], 5, sub[ i ], sublen[ i ] );
+    submsg.append_uint( lost1[ i ], 6, msg_loss[ i ] );
+  }
+  submsg.append_ipdata( SARG( "scid" ), this->listener.ipport );
+  size = rvmsg.update_hdr( submsg );
+
+  this->append( b, size );
+  if ( is_rv_debug ) {
+    this->print( b, size );
+  }
+  this->host->bs += size;
+  this->msgs_sent++;
+  this->host->ms++;
+  return true;
+}
+
 /* message from network, encapsulate the message into the client format:
  * { mtype: 'D', sub: <subject>, data: <msg-data> }
  */
@@ -981,6 +1121,12 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
   if ( replen > preflen ) {
     reply   = &reply[ preflen ];
     replen -= preflen;
+  }
+
+  if ( pub.pub_status != EV_PUB_NORMAL ) {
+    /* start and cycle are normal events */
+    if ( pub.pub_status <= EV_MAX_LOSS || pub.pub_status == EV_PUB_RESTART )
+      this->inbound_data_loss( sub, sublen, pub );
   }
 
   if ( sublen + pub.reply_len > 2 * 1024 - 512 ) {
