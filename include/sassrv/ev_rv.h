@@ -40,11 +40,14 @@ struct EvRvListen : public kv::EvTcpListen/*, public RvHost*/ {
   virtual EvSocket *accept( void ) noexcept;
   virtual int listen( const char *ip,  int port,  int opts ) noexcept;
 
-  RvHostError start_network( RvHost *&h, const RvMcast &mc,  const char *net,
-                             size_t net_len,  const char *svc,
-                             size_t svc_len ) noexcept;
-  virtual int start_host( RvHost &h ) noexcept; /* send _RV.INFO.SYSTEM.HOST.START */
-  virtual int stop_host( RvHost &h ) noexcept;  /* send _RV.INFO.SYSTEM.HOST.STOP */
+  int start_network( RvHost *&h, const char *net,  size_t net_len,
+                     const char *svc,  size_t svc_len ) noexcept;
+  /* send _RV.INFO.SYSTEM.HOST.START */
+  virtual int start_host( RvHost &h, const char *net,  size_t net_len,
+                          const char *svc,  size_t svc_len ) noexcept;
+  /* send _RV.INFO.SYSTEM.HOST.STOP */
+  virtual int stop_host( RvHost &h ) noexcept; 
+
   int start_host2( RvHost &h,  uint32_t delay_secs ) noexcept;
 };
 

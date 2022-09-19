@@ -24,13 +24,20 @@ struct Args : public MainLoopVars { /* argv[] parsed args */
 struct MyListener : public EvRvListen {
   MyListener( kv::EvPoll &p ) : EvRvListen( p ) {}
 
-  virtual int start_host( RvHost &h ) noexcept final {
-    printf( "start_network:        service %.*s, \"%.*s\"\n",
-            (int) h.service_len, h.service, (int) h.network_len,
-            h.network );
-    return this->EvRvListen::start_host( h );
+  virtual int start_host( RvHost &h,  const char *net,  size_t net_len,
+                          const char *svc,  size_t svc_len ) noexcept {
+    bool not_running = ! h.start_in_progress && ! h.network_started;
+    int status = this->EvRvListen::start_host( h, net, net_len, svc, svc_len );
+    if ( status != 0 )
+      return status;
+    if ( not_running ) {
+      printf( "start_network:        service %.*s, \"%.*s\"\n",
+              (int) h.service_len, h.service, (int) h.network_len,
+              h.network );
+    }
+    return HOST_OK;
   }
-  virtual int stop_host( RvHost &h ) noexcept final {
+  virtual int stop_host( RvHost &h ) noexcept {
     printf( "stop_network:         service %.*s, \"%.*s\"\n",
             (int) h.service_len, h.service, (int) h.network_len,
             h.network );

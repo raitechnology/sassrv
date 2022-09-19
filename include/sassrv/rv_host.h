@@ -88,7 +88,7 @@ struct RvMcast {
   }
   /* fill out above fields by parsing a rv network string:
    * "eth0;228.8.8.8,226.6.6.6;224.4.4.4", reeturn RvHostError if failed */
-  RvHostError parse_network( const char *network ) noexcept;
+  RvHostError parse_network( const char *network,  size_t net_len ) noexcept;
 
   static bool is_empty_string( const char *s ) noexcept;
   /* return ip4 addr */
@@ -112,15 +112,17 @@ struct RvHost : public kv::EvTimerCallback {
                session_ip[ 16 ],  /* ip address string 0A040416 */
                daemon_id[ 64 ],   /* hexip.DAEMON.gob */
                network[ MAX_RV_NETWORK_LEN ], /* network string */
-               service[ MAX_RV_SERVICE_LEN ]; /* service string */
+               service[ MAX_RV_SERVICE_LEN ], /* service string */
+               host_ip[ 4 * 4 ];  /* quad ip address */
   uint16_t     host_len,          /* len of above */
                daemon_len,        /* len of this->daomon_id[] */
                network_len,       /* len of this->network[] */
                service_len,       /* len of this->service[] */
-               service_port;      /* service in network order */
+               service_port,      /* service in network order */
+               host_ip_len;       /* len of host_ip[] */
   bool         network_started,   /* if start_network() called and succeeded */
                daemon_subscribed,
-               start_in_process,
+               start_in_progress,
                has_service_prefix;
   static const size_t session_ip_len = 8;
   uint64_t     timer_id,
@@ -140,14 +142,23 @@ struct RvHost : public kv::EvTimerCallback {
   void * operator new( size_t, void *ptr ) { return ptr; }
   RvHost( EvRvListen &l,  kv::RoutePublish &sr,  bool has_svc_pre ) noexcept;
 
+  bool is_same_network( const char *net,  size_t net_len,
+                        const char *svc,  size_t svc_len ) const {
+    return ( (size_t) this->network_len == net_len &&
+             (size_t) this->service_len == svc_len &&
+             ::memcmp( this->network, net, net_len ) == 0 &&
+             ::memcmp( this->service, svc, svc_len ) == 0 );
+  }
   void zero_stats( uint64_t now ) {
     ::memset( &this->ms, 0, (char *) (void *) &this->start_stamp -
                             (char *) (void *) &this->ms );
     this->start_stamp = now;
   }
-  RvHostError start_network( const RvMcast &mc,  const char *net,
-                             size_t net_len,  const char *svc,
-                             size_t svc_len ) noexcept;
+  int check_network( const char *net,  size_t net_len,
+                     const char *svc,  size_t svc_len ) noexcept;
+  int start_network( const RvMcast &mc,  const char *net,
+                     size_t net_len,  const char *svc,
+                     size_t svc_len ) noexcept;
   void send_host_start( EvRvService *svc ) noexcept;
   void send_session_start( EvRvService *svc ) noexcept;
   void send_host_stop( EvRvService *svc ) noexcept;

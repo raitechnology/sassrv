@@ -123,14 +123,13 @@ EvRvListen::accept( void ) noexcept
   return c;
 }
 
-RvHostError
-EvRvListen::start_network( RvHost *&h, const RvMcast &mc,  const char *net,
-                           size_t net_len,  const char *svc,
-                           size_t svc_len ) noexcept
+int
+EvRvListen::start_network( RvHost *&h, const char *net,  size_t net_len,
+                           const char *svc,  size_t svc_len ) noexcept
 {
-  RvHost    * host = NULL;
-  RvHostError status = HOST_OK;
-  size_t      i;
+  RvHost * host   = NULL;
+  int      status = HOST_OK;
+  size_t   i;
 
   for ( i = 0; i < this->host_tab.count; i++ ) {
     host = this->host_tab.ptr[ i ];
@@ -143,40 +142,12 @@ EvRvListen::start_network( RvHost *&h, const RvMcast &mc,  const char *net,
     host = new ( p ) RvHost( *this, this->sub_route, this->has_service_prefix );
     this->host_tab[ i ] = host;
   }
-  status = host->start_network( mc, net, net_len, svc, svc_len );
-  if ( status != HOST_OK ) {
-    if ( this->dummy_host == NULL ) {
-      void * p = ::malloc( sizeof( RvHost ) );
-      this->dummy_host = new ( p ) RvHost( *this, this->sub_route,
-                                           this->has_service_prefix );
-    }
-    h = this->dummy_host;
-    return status;
-  }
-  if ( host->rpc == NULL ) {
-    DaemonInbox   ibx( *host );
-    RvDaemonRpc * rpc;
-    for ( i = 0; i < this->daemon_tab.count; i++ ) {
-      rpc = this->daemon_tab.ptr[ i ];
-      if ( rpc->ibx.equals( ibx ) )
-        break;
-    }
-    if ( i == this->daemon_tab.count ) {
-      void * p = ::malloc( sizeof( RvDaemonRpc ) );
-      rpc = new ( p ) RvDaemonRpc( *host );
-      this->daemon_tab[ i ] = rpc;
-    }
-    host->rpc = rpc;
-  }
   h = host;
-  if ( ! host->network_started ) {
-    if ( ! host->start_in_process ) {
-      host->start_in_process = true;
-      if ( this->start_host( *host ) != 0 ) {
-        host->start_in_process = false;
-        return ERR_START_HOST_FAILED;
-      }
-    }
+  status = this->start_host( *host, net, net_len, svc, svc_len );
+  if ( status != 0 ) {
+    if ( status < 0 )
+      return ERR_START_HOST_FAILED;
+    return (RvHostError) status;
   }
   return HOST_OK;
 }
@@ -199,9 +170,24 @@ EvRvListen::start_host2( RvHost &h,  uint32_t delay_secs ) noexcept
 }
 
 int
-EvRvListen::start_host( RvHost &h) noexcept
+EvRvListen::start_host( RvHost &h, const char *net,  size_t net_len,
+                        const char *svc,  size_t svc_len ) noexcept
 {
-  return h.start_host();
+  int status = HOST_OK;
+  if ( ! h.network_started ) {
+    if ( ! h.start_in_progress ) {
+      status = h.check_network( net, net_len, svc, svc_len );
+      if ( status == HOST_OK ) {
+        h.start_in_progress = true;
+        status = h.start_host();
+      }
+      return status;
+    }
+  }
+  if ( h.mcast.host_ip == 0 ||
+       ! h.is_same_network( net, net_len, svc, svc_len ) )
+    return ERR_SAME_SVC_TWO_NETS;
+  return HOST_OK;
 }
 
 int
@@ -396,7 +382,7 @@ EvRvService::respond_info( void ) noexcept
                 submsg( NULL, 0 );
   size_t        size;
   uint32_t      net_len = 0, svc_len = 0;
-  RvHostError   status = HOST_OK;
+  int           status = HOST_OK;
 
   if ( this->gob_len == 0 )
     this->gob_len = (uint16_t)
@@ -438,23 +424,18 @@ EvRvService::respond_info( void ) noexcept
     } while ( iter->next() == 0 );
   }
 
-  RvMcast mc;
   if ( svc_len == 0 ) {
     ::strcpy( svc, "7500" );
     svc_len = 4;
   }
-  status = mc.parse_network( net );
   /* check that the network is valid and start it */
-  if ( status == HOST_OK ) {
-    status = this->listener.start_network( this->host, mc, net, net_len, svc,
-                                           svc_len );
-    if ( this->host->network_started ) {
-      if ( ! this->host_started ) {
-        this->host_started = true;
-        this->host->active_clients++;
-      }
+  status = this->listener.start_network( this->host, net, net_len,
+                                                     svc, svc_len );
+  if ( this->host->network_started ) {
+    if ( ! this->host_started ) {
+      this->host_started = true;
+      this->host->active_clients++;
     }
-    /*status = this->host->start_network( mc, net, net_len, svc, svc_len );*/
   }
   if ( status != HOST_OK ) {
     /* { sub: RVD.INITREFUSED, mtype: R,

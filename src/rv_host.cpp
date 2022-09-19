@@ -25,7 +25,7 @@ using namespace md;
 RvHost::RvHost( EvRvListen &l,  RoutePublish &sr,  bool has_svc_pre ) noexcept
       : listener( l ), sub_route( sr )
 {
-  ::memset( this->host, 0, (char *) (void *) &this->mcast - this->host );
+  ::memset( this->host, 0, (char *) (void *) &this[ 1 ] - this->host );
   this->has_service_prefix = has_svc_pre;
 }
 #if 0
@@ -64,7 +64,7 @@ RvHost::start_host2( uint32_t delay_secs ) noexcept
   }
   if ( this->host_status_timer == 0 ) {
     /* subscribe _INBOX.DAEMON.iphex */
-    if ( ! this->daemon_subscribed ) {
+    if ( this->rpc != NULL && ! this->daemon_subscribed ) {
       this->rpc->subscribe_daemon_inbox();
       this->daemon_subscribed = true;
     }
@@ -87,8 +87,8 @@ RvHost::start_host2( uint32_t delay_secs ) noexcept
       svc->idle_push( EV_READ );
     }
   }
-  this->network_started  = true;
-  this->start_in_process = false;
+  this->network_started   = true;
+  this->start_in_progress = false;
   return 0;
 }
 
@@ -112,7 +112,7 @@ RvHost::stop_host( void ) noexcept
     this->host_delay_timer  = 0;
     /* unsubscribe _INBOX.DAEMON.iphex */
     /*this->unsubscribe_daemon_inbox();*/
-    if ( this->daemon_subscribed ) {
+    if ( this->rpc != NULL && this->daemon_subscribed ) {
       this->rpc->unsubscribe_daemon_inbox();
       this->daemon_subscribed = false;
     }
@@ -234,15 +234,30 @@ rai::sassrv::get_rv_host_error( int status ) noexcept
   }
 }
 
-RvHostError
+int
+RvHost::check_network( const char *net,  size_t net_len,
+                       const char *svc,  size_t svc_len ) noexcept
+{
+  int status = HOST_OK;
+  if ( this->mcast.host_ip == 0 ||
+       ! this->is_same_network( net, net_len, svc, svc_len ) ) {
+    RvMcast mc;
+    status = mc.parse_network( net, net_len );
+    if ( status == HOST_OK )
+      status = this->start_network( mc, net, net_len, svc, svc_len );
+    if ( status != HOST_OK )
+      return status;
+  }
+
+  return status;
+}
+
+int
 RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
                        const char *svc,  size_t svc_len ) noexcept
 {
   if ( this->network_started ) {
-    if ( (size_t) this->network_len == net_len &&
-         (size_t) this->service_len == svc_len &&
-         ::memcmp( this->network, net, net_len ) == 0 &&
-         ::memcmp( this->service, svc, svc_len ) == 0 )
+    if ( this->is_same_network( net, net_len, svc, svc_len ) )
       return HOST_OK;
     return ERR_SAME_SVC_TWO_NETS;
   }
@@ -264,24 +279,32 @@ RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
   const uint8_t * q = (const uint8_t *) (const void *) &mc.host_ip;
   this->zero_stats( kv_current_realtime_ns() );
   this->mcast.copy( mc );
-  for ( int i = 0; i < 8; i += 2 ) {
-    this->session_ip[ i ] = hexchar2( ( q[ i/2 ] >> 4 ) & 0xf );
-    this->session_ip[ i+1 ] = hexchar2( q[ i/2 ] & 0xf );
+  for ( int k = 0; k < 8; k += 2 ) {
+    this->session_ip[ k ] = hexchar2( ( q[ k/2 ] >> 4 ) & 0xf );
+    this->session_ip[ k+1 ] = hexchar2( q[ k/2 ] & 0xf );
   }
   this->session_ip[ this->session_ip_len ] = '\0';
+  this->host_ip_len = ::snprintf( this->host_ip, sizeof( this->host_ip ),
+                                "%u.%u.%u.%u", q[ 0 ], q[ 1 ], q[ 2 ], q[ 3 ] );
   ::memcpy( this->daemon_id, this->session_ip, this->session_ip_len );
   ::memcpy( &this->daemon_id[ this->session_ip_len ], ".DAEMON.", 8 );
   this->daemon_len = this->session_ip_len + 8;
   this->daemon_len += (uint16_t) time_to_str( this->start_stamp,
                                    &this->daemon_id[ this->daemon_len ] );
-  this->rpc = NULL;
-#if 0
-  if ( this->start_host() != 0 )
-    return ERR_START_HOST_FAILED;
-  this->network_started = true;
-#endif
-/*  printf( "start network: %.*s, \"%.*s\"\n",
-          (int) svc_len, svc, (int) net_len, net );*/
+  DaemonInbox ibx( *this );
+  RvDaemonTab &daemon_tab = this->listener.daemon_tab;
+  size_t i;
+  for ( i = 0; i < daemon_tab.count; i++ ) {
+    this->rpc = daemon_tab.ptr[ i ];
+    if ( this->rpc->ibx.equals( ibx ) )
+      break;
+  }
+  if ( i == daemon_tab.count ) {
+    void * p = ::malloc( sizeof( RvDaemonRpc ) );
+    this->rpc = new ( p ) RvDaemonRpc( *this );
+    daemon_tab[ i ] = this->rpc;
+  }
+
   return HOST_OK;
 }
 
@@ -293,8 +316,8 @@ RvHost::stop_network( void ) noexcept
           this->network ); */
   if ( this->network_started ) {
     this->listener.stop_host( *this );
-    this->network_started  = false;
-    this->start_in_process = false;
+    this->network_started   = false;
+    this->start_in_progress = false;
   }
 }
 
@@ -486,9 +509,16 @@ uint32_t
 RvMcast::lookup_host_ip4( const char *host ) noexcept
 {
   struct addrinfo * h = NULL,
-                  * res;
+                  * res,
+                    hints;
   uint32_t ipaddr = 0;
-  if ( ::getaddrinfo( host, NULL, NULL, &h ) == 0 ) {
+
+  ::memset( &hints, 0, sizeof( hints ) );
+  hints.ai_family   = AF_INET;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = IPPROTO_UDP;
+
+  if ( ::getaddrinfo( host, NULL, &hints, &h ) == 0 ) {
     for ( res = h; res != NULL; res = res->ai_next ) {
       if ( res->ai_family == AF_INET &&
            res->ai_addrlen >= sizeof( struct sockaddr_in ) ) {
@@ -612,7 +642,7 @@ RvMcast::lookup_dev_ip4( const char *dev,  uint32_t &netmask ) noexcept
 }
 
 RvHostError
-RvMcast::parse_network( const char *network ) noexcept
+RvMcast::parse_network( const char *network,  size_t net_len ) noexcept
 {
   char tmp_buf[ 4 * 1024 ],
        recv_host[ 16 ],
@@ -626,8 +656,11 @@ RvMcast::parse_network( const char *network ) noexcept
 
   /* network is format: network;mcast,mcast;sendmcast:port,port */
   send_part = NULL;
-  ::strncpy( tmp_buf, network ? network : "", sizeof( tmp_buf ) );
-  tmp_buf[ sizeof( tmp_buf ) - 1 ] = '\0';
+  if ( net_len > sizeof( tmp_buf ) - 1 )
+    net_len = sizeof( tmp_buf ) - 1;
+  ::memcpy( tmp_buf, network, net_len );
+  tmp_buf[ net_len ] = '\0';
+
   net_part = tmp_buf;
   while ( isspace( *net_part ) )
     net_part++;
@@ -679,9 +712,9 @@ RvMcast::parse_network( const char *network ) noexcept
     net_part = host;
   }
   if ( ! is_empty_string( net_part ) ) {
-    this->host_ip = this->lookup_host_ip4( net_part, this->netmask );
+    this->host_ip = this->lookup_dev_ip4( net_part, this->netmask );
     if ( this->host_ip == 0 )
-      this->host_ip = this->lookup_dev_ip4( net_part, this->netmask );
+      this->host_ip = this->lookup_host_ip4( net_part, this->netmask );
     if ( this->host_ip == 0 )
       status = ERR_NO_INTERFACE_FOUND;
   }
