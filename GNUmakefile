@@ -123,7 +123,8 @@ endif
 
 sassrv_lib := $(libd)/libsassrv.a
 rpath       := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)$(rpath6)$(rpath7)
-dlnk_lib    += -lpcre2-8
+dlnk_lib    += -lpcre2-8 -lcares
+lnk_lib     += -lpcre2-8 -lcares
 malloc_lib  :=
 
 .PHONY: everything
@@ -206,7 +207,7 @@ rv_server_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv_server_files)))
 rv_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_server_files)))
 rv_server_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_server_files)))
 rv_server_libs  := $(sassrv_lib)
-rv_server_lnk   := $(sassrv_lib) $(lnk_lib) -lpcre2-8
+rv_server_lnk   := $(sassrv_lib) $(lnk_lib)
 
 $(bind)/rv_server: $(rv_server_objs) $(rv_server_libs) $(lnk_dep)
 
@@ -218,7 +219,7 @@ rv_client_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv_client_files)))
 rv_client_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_client_files)))
 rv_client_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_client_files)))
 rv_client_libs  := $(sassrv_lib)
-rv_client_lnk   := $(sassrv_lib) $(lnk_lib) -lpcre2-8
+rv_client_lnk   := $(sassrv_lib) $(lnk_lib)
 
 $(bind)/rv_client: $(rv_client_objs) $(rv_client_libs) $(lnk_dep)
 
@@ -302,9 +303,9 @@ CMakeLists.txt: .copr/Makefile
 	  link_libraries (sassrv raikv raimd decnumber pcre2-8-static ws2_32)
 	else ()
 	  if (TARGET pcre2-8-static)
-	    link_libraries (sassrv raikv raimd decnumber pcre2-8-static -lpthread -lrt)
+	    link_libraries (sassrv raikv raimd decnumber pcre2-8-static -lcares -lpthread -lrt)
 	  else ()
-	    link_libraries (sassrv raikv raimd decnumber -lpcre2-8 -lpthread -lrt)
+	    link_libraries (sassrv raikv raimd decnumber -lpcre2-8 -lcares -lpthread -lrt)
 	  endif ()
 	endif ()
 	add_definitions(-DSASSRV_VER=$(ver_build))
@@ -314,15 +315,15 @@ CMakeLists.txt: .copr/Makefile
 
 .PHONY: dnf_depend
 dnf_depend:
-	sudo dnf -y install make gcc-c++ git redhat-lsb openssl-devel pcre2-devel chrpath
+	sudo dnf -y install make gcc-c++ git redhat-lsb openssl-devel pcre2-devel chrpath c-ares-devel
 
 .PHONY: yum_depend
 yum_depend:
-	sudo yum -y install make gcc-c++ git redhat-lsb openssl-devel pcre2-devel chrpath
+	sudo yum -y install make gcc-c++ git redhat-lsb openssl-devel pcre2-devel chrpath c-ares-devel
 
 .PHONY: deb_depend
 deb_depend:
-	sudo apt-get install -y install make g++ gcc devscripts libpcre2-dev chrpath git lsb-release libssl-dev
+	sudo apt-get install -y install make g++ gcc devscripts libpcre2-dev chrpath git lsb-release libssl-dev c-ares-dev
 
 # create directories
 $(dependd):
