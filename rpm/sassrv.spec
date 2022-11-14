@@ -16,10 +16,12 @@ BuildRequires:  raimd
 BuildRequires:  libdecnumber
 BuildRequires:  pcre2-devel
 BuildRequires:  git-core
+BuildRequires:  c-ares-devel
 Requires:       raikv
 Requires:       raimd
 Requires:       libdecnumber
 Requires:       pcre2
+Requires:       c-ares
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
