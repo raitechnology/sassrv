@@ -38,7 +38,8 @@ enum RvAdv {
 };
 
 static const size_t MAX_RV_NETWORK_LEN = 1680,
-                    MAX_RV_SERVICE_LEN = 32;
+                    MAX_RV_SERVICE_LEN = 32,
+                    MAX_RV_HOST_ID_LEN = 64;
 
 struct RvFwdAdv {
   size_t          sublen, size;
@@ -71,18 +72,21 @@ const char * get_rv_host_error( int status ) noexcept;
 /* eth0    ; 228.8.8.8,226.6.6.6 ; 224.4.4.4 */
 /* host_ip   recv_ip[ 2 ],         send_ip  (all in network order) */
 struct RvMcast {
-  static const uint32_t MAX_RECV_MCAST = 60;
+  static const uint32_t MAX_RECV_MCAST = 59;
   uint32_t host_ip,                   /* eth0 */
            netmask,                   /* netmask for host_ip */
            send_ip,                   /* 224.4.4.4 */
            recv_ip[ MAX_RECV_MCAST ], /* 228.8.8.8,226.6.6.6 */
-           recv_cnt;                  /* 2 */
+           recv_cnt,                  /* 2 */
+           fake_ip;
   /* these are in network order */
-  RvMcast() : host_ip( 0 ), netmask( 0 ), send_ip( 0 ), recv_cnt( 0 ) {}
+  RvMcast() : host_ip( 0 ), netmask( 0 ), send_ip( 0 ), recv_cnt( 0 ),
+              fake_ip( 0 ) {}
   RvMcast( const RvMcast &mc ) { this->copy( mc ); }
   void copy( const RvMcast &mc ) {
     this->host_ip = mc.host_ip; this->netmask =  mc.netmask;
     this->send_ip = mc.send_ip; this->recv_cnt = mc.recv_cnt;
+    this->fake_ip = mc.fake_ip;
     ::memcpy( this->recv_ip, mc.recv_ip, sizeof( this->recv_ip[ 0 ] ) *
               mc.recv_cnt );
   }
@@ -113,13 +117,17 @@ struct RvHost : public kv::EvTimerCallback {
                daemon_id[ 64 ],   /* hexip.DAEMON.gob */
                network[ MAX_RV_NETWORK_LEN ], /* network string */
                service[ MAX_RV_SERVICE_LEN ], /* service string */
-               host_ip[ 4 * 4 ];  /* quad ip address */
+               host_ip[ 4 * 4 ],  /* quad ip address */
+               host_id[ MAX_RV_HOST_ID_LEN ];
   uint16_t     host_len,          /* len of above */
                daemon_len,        /* len of this->daomon_id[] */
                network_len,       /* len of this->network[] */
                service_len,       /* len of this->service[] */
                service_port,      /* service in network order */
-               host_ip_len;       /* len of host_ip[] */
+               host_ip_len,       /* len of host_ip[] */
+               host_id_len,       /* len of host_id[] */
+               http_port;
+  uint32_t     http_addr;
   bool         network_started,   /* if start_network() called and succeeded */
                daemon_subscribed,
                start_in_progress,

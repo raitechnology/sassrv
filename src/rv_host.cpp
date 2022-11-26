@@ -277,6 +277,8 @@ RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
   this->network[ net_len ] = '\0';
 
   const uint8_t * q = (const uint8_t *) (const void *) &mc.host_ip;
+  if ( mc.fake_ip != 0 )
+    q = (const uint8_t *) (const void *) &mc.fake_ip;
   this->zero_stats( kv_current_realtime_ns() );
   this->mcast.copy( mc );
   for ( int k = 0; k < 8; k += 2 ) {
@@ -284,6 +286,7 @@ RvHost::start_network( const RvMcast &mc,  const char *net,  size_t net_len,
     this->session_ip[ k+1 ] = hexchar2( q[ k/2 ] & 0xf );
   }
   this->session_ip[ this->session_ip_len ] = '\0';
+  q = (const uint8_t *) (const void *) &mc.host_ip;
   this->host_ip_len = ::snprintf( this->host_ip, sizeof( this->host_ip ),
                                 "%u.%u.%u.%u", q[ 0 ], q[ 1 ], q[ 2 ], q[ 3 ] );
   ::memcpy( this->daemon_id, this->session_ip, this->session_ip_len );
@@ -437,21 +440,26 @@ RvHost::pack_advisory( RvMsgWriter &msg,  const char *subj_prefix,
   msg.append_string( SARG( "ADV_NAME" ), &subj_buf[ 12 + class_len ],
                      sublen - ( 12 + class_len ) + 1 );
 
-  if ( ( flags & ADV_HOSTADDR ) != 0 )
+  if ( ( flags & ADV_HOSTADDR ) != 0 ) {
     msg.append_ipdata( SARG( "hostaddr" ), this->mcast.host_ip );
+    if ( this->host_id_len > 0 )
+      msg.append_string( SARG( "hostid" ), this->host_id,
+                         this->host_id_len + 1 );
+  }
   if ( ( flags & ADV_SN ) != 0 )
     msg.append_uint( SARG( "sn" ), (uint32_t) 1 );
   if ( ( flags & ADV_OS ) != 0 )
     msg.append_uint( SARG( "os" ), (uint8_t) 1 );
   if ( ( flags & ADV_VER ) != 0 )
     msg.append_string( SARG( "ver" ), SARG( "5.4.2" ) );
-  /* no daemon http port */
-#if 0
   if ( ( flags & ADV_HTTPADDR ) != 0 ) {
+    if ( this->http_addr != 0 || this->http_port != 0 )
+      msg.append_ipdata( SARG( "httpaddr" ), this->http_addr );
   }
   if ( ( flags & ADV_HTTPPORT ) != 0 ) {
+    if ( this->http_addr != 0 || this->http_port != 0 )
+      msg.append_ipdata( SARG( "httpport" ), this->http_port );
   }
-#endif
   uint64_t now = kv_current_realtime_ns();
   if ( ( flags & ADV_TIME ) != 0 ) {
     uint64_t s = now / 1000000000,

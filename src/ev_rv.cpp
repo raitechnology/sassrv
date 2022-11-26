@@ -454,7 +454,9 @@ EvRvService::respond_info( void ) noexcept
     rvmsg.append_subject( SARG( "sub" ), "RVD.INITRESP" );
     rvmsg.append_string( SARG( "mtype" ), SARG( "R" ) );
     rvmsg.append_msg( SARG( "data" ), submsg );
-    submsg.append_ipdata( SARG( "ipaddr" ), this->host->mcast.host_ip );
+    submsg.append_ipdata( SARG( "ipaddr" ),
+      this->host->mcast.fake_ip == 0 ? this->host->mcast.host_ip :
+                                       this->host->mcast.fake_ip );
     submsg.append_ipdata( SARG( "ipport" ), this->host->service_port );
     submsg.append_int<int32_t>( SARG( "vmaj" ), 5 );
     submsg.append_int<int32_t>( SARG( "vmin" ), 4 );

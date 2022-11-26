@@ -18,7 +18,7 @@ using namespace md;
 static const char     DICT_SUBJ[]     = "_TIC.REPLY.SASS.DATA.DICTIONARY";
 static const int      DICT_SUBJ_LEN   = sizeof( DICT_SUBJ ) - 1;
                                            /* _INBOX.<session>.1   = control */
-static const int      DICT_INBOX_ID   = 2, /* _INBOX.<session>.2   = dictionary*/
+static const uint64_t DICT_INBOX_ID   = 2, /* _INBOX.<session>.2   = dictionary*/
                       SUB_INBOX_BASE  = 3; /* _INBOX.<session>.3++ = sub[] */
 static const uint32_t DICT_TIMER_SECS = 3;
 static const uint64_t FIRST_TIMER_ID  = 1, /* first dict request */
@@ -31,12 +31,13 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   EvRvClient  & client;          /* connection to rv */
   MDDict      * dict;            /* dictinary to use for decoding msgs */
   const char ** sub;             /* subject strings */
-  int           sub_count;       /* count of sub[] */
+  size_t        sub_count;       /* count of sub[] */
   bool          no_dictionary,   /* don't request dictionary */
                 is_subscribed,   /* sub[] are subscribed */
                 have_dictionary; /* set when dict request succeeded */
 
-  RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  int cnt,  bool n )
+  RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t cnt,
+                  bool n )
     : poll( p ), client( c ), dict( 0 ), sub( s ), sub_count( cnt ),
       no_dictionary( n ), is_subscribed( false ), have_dictionary( false ) {}
 
@@ -83,12 +84,10 @@ RvDataCallback::start_subscriptions( void ) noexcept
 {
   if ( this->is_subscribed ) /* subscribing multiple times is allowed, */
     return;                  /* but must unsub multiple times as well */
-  for ( int i = 0; i < this->sub_count; i++ ) {
-    char   inbox[ 72 ]; /* _INBOX.<session>.3 + <sub> */
-    size_t sub_len   = ::strlen( this->sub[ i ] ),
-           inbox_len = ::snprintf( inbox, sizeof( inbox ), "%.*s.%d",
-                           this->client.control_len - 2,
-                           this->client.control, i + SUB_INBOX_BASE );
+  for ( size_t i = 0; i < this->sub_count; i++ ) {
+    char     inbox[ MAX_RV_INBOX_LEN ]; /* _INBOX.<session>.3 + <sub> */
+    uint16_t inbox_len = this->client.make_inbox( inbox, i + SUB_INBOX_BASE );
+    size_t   sub_len   = ::strlen( this->sub[ i ] );
     printf( "Subscribe \"%.*s\", reply \"%.*s\"\n",
             (int) sub_len, this->sub[ i ], (int) inbox_len, inbox );
     /* subscribe with inbox reply */
@@ -104,7 +103,7 @@ RvDataCallback::on_unsubscribe( void ) noexcept
   if ( ! this->is_subscribed )
     return;
   this->is_subscribed = false;
-  for ( int i = 0; i < this->sub_count; i++ ) {
+  for ( size_t i = 0; i < this->sub_count; i++ ) {
     size_t sub_len = ::strlen( this->sub[ i ] );
     printf( "Unsubscribe \"%.*s\"\n", (int) sub_len, this->sub[ i ] );
     /* unsubscribe sub */
@@ -135,10 +134,8 @@ RvDataCallback::on_dict( MDMsg *m ) noexcept
 void
 RvDataCallback::send_dict_request( void ) noexcept
 {
-  char inbox[ 72 ]; /* _INBOX.<session>.2 */
-  int  inbox_len = ::snprintf( inbox, sizeof( inbox ), "%.*s.%d",
-                         this->client.control_len - 2,
-                         this->client.control, DICT_INBOX_ID );
+  char     inbox[ MAX_RV_INBOX_LEN ]; /* _INBOX.<session>.2 */
+  uint16_t inbox_len = this->client.make_inbox( inbox, DICT_INBOX_ID );
   /* request dictionar */
   EvPublish pub( DICT_SUBJ, DICT_SUBJ_LEN, inbox, inbox_len,
                  NULL, 0, this->client.sub_route, 0, 0, 0, 0 );
@@ -183,18 +180,13 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
   MDMsgMem mem;
   MDMsg  * m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict,
                               &mem );
-  bool     is_inbox = false;
-
   /* check if published to _INBOX.<session>. */
-  if ( pub.subject_len >= this->client.control_len &&
-       ::memcmp( pub.subject, this->client.control,
-                 this->client.control_len - 1 ) == 0 ) {
-    /* find the subscribed subject */
-    int which = atoi( &pub.subject[ this->client.control_len - 1 ] );
-    if ( which >= SUB_INBOX_BASE && which - SUB_INBOX_BASE < this->sub_count ) {
-      printf( "## %s: (inbox: %.*s)\n", this->sub[ which - SUB_INBOX_BASE ],
+  uint64_t which = this->client.is_inbox( pub.subject, pub.subject_len );
+  if ( which != 0 ) {
+    size_t idx = which - SUB_INBOX_BASE;
+    if ( which >= SUB_INBOX_BASE && idx < this->sub_count ) {
+      printf( "## %s: (inbox: %.*s)\n", this->sub[ idx ],
                (int) pub.subject_len, pub.subject );
-      is_inbox = true;
     }
     else if ( which == DICT_INBOX_ID ) {
       printf( "Received dictionary message\n" );
@@ -203,11 +195,10 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
       return true;
     }
     else {
-      fprintf( stderr, "Unknown inbox message\n" );
+      printf( "## Unknown inbox message (%lu)\n", idx );
     }
   }
-  /* not inbox subject */
-  if ( ! is_inbox ) {
+  else { /* not inbox subject */
     printf( "## %.*s:\n", (int) pub.subject_len, pub.subject );
   }
   /* print message */

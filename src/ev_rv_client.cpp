@@ -251,6 +251,19 @@ match_field( MDFieldIter *it,  const char *fname,  size_t fname_size,
   return false;
 }
 
+uint16_t
+EvRvClient::make_inbox( char *inbox,  uint32_t num ) noexcept
+{
+  int16_t off = 7;
+  ::memcpy( inbox, "_INBOX.", off );
+  ::memcpy( &inbox[ off ], this->session, this->session_len );
+  off += this->session_len;
+  inbox[ off++ ] = '.';
+  off += uint32_to_string( num, &inbox[ off ] );
+  inbox[ off ] = '\0';
+  return off;
+}
+
 int
 EvRvClient::recv_info( void ) noexcept
 {
@@ -299,9 +312,7 @@ EvRvClient::recv_info( void ) noexcept
       this->start_stamp = kv_current_realtime_ns();
       ptr += RvHost::time_to_str( this->start_stamp, ptr );
       this->session_len = (uint16_t) ( ptr - this->session );
-      this->control_len = (uint16_t)
-        ::snprintf( this->control, sizeof( this->control ),
-                    "_INBOX.%s.1", this->session );
+      this->control_len = this->make_inbox( this->control, 1 );
       this->send_init_rec(); /* resend with session */
       this->rv_state = CONN_RECV;
       return 0;

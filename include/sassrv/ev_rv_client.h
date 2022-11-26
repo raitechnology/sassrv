@@ -24,6 +24,8 @@ struct RvClientCB {
   virtual bool on_msg( kv::EvPublish &pub ) noexcept;
 };
 
+static const size_t MAX_RV_INBOX_LEN = 88; /* _INBOX.<session>.<number> */
+
 struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
   void * operator new( size_t, void *ptr ) { return ptr; }
   enum RvState {
@@ -86,6 +88,20 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
     this->notify      = NULL;
     this->save_buf    = NULL;
     this->save_len    = 0;
+  }
+  uint16_t make_inbox( char *inbox, uint32_t num ) noexcept;
+  uint64_t is_inbox( const char *sub,  size_t sub_len ) {
+    size_t off = this->control_len - 1;
+    if ( off >= sub_len || sub[ off ] < '0' || sub[ off ] > '9' ||
+         ::memcmp( sub, this->control, off ) != 0 )
+      return 0;
+    uint64_t which = sub[ off ] - '0';
+    while ( ++off < sub_len ) {
+      if ( sub[ off ] < '0' || sub[ off ] > '9' )
+        return 0;
+      which = which * 10 + ( sub[ off ] - '0' );
+    }
+    return which;
   }
   static void trace_msg( char dir,  void *msg, size_t msglen ) noexcept;
   void send_vers( void ) noexcept;
