@@ -18,6 +18,8 @@
 #include <raimd/json_msg.h>
 #include <raimd/tib_msg.h>
 #include <raimd/tib_sass_msg.h>
+#include <raimd/rwf_msg.h>
+#include <raimd/mf_msg.h>
 
 using namespace rai;
 using namespace sassrv;
@@ -1119,11 +1121,8 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       return true;
   }
 
-  RvMsgWriter  rvmsg( b, buf_len ),
-               submsg( NULL, 0 );
-  size_t       off, msg_len;
-  const void * msg;
-  int          status;
+  RvMsgWriter rvmsg( b, buf_len );
+  int         status;
 
   status = rvmsg.append_subject( SARG( "sub" ), sub, sublen );
   /* some subjects may not encode */
@@ -1148,37 +1147,47 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
     b[ rvmsg.off - 1 ] = '\0';
   }
   if ( status == 0 ) {
-    uint32_t msg_enc = pub.msg_enc;
     static const char data_hdr[] = "\005data";
+    RvMsgWriter submsg( NULL, 0 );
+    uint32_t msg_enc = pub.msg_enc;
+    size_t   off,
+             msg_len = pub.msg_len;
+    void   * msg     = (void *) pub.msg;
     /* depending on message type, encode the hdr to send to the client */
     switch ( msg_enc ) {
       case RVMSG_TYPE_ID:
       do_rvmsg:;
         rvmsg.append_msg( SARG( "data" ), submsg );
         off         = rvmsg.off + submsg.off;
-        submsg.off += pub.msg_len - 8;
-        msg         = &((const uint8_t *) pub.msg)[ 8 ];
-        msg_len     = pub.msg_len - 8;
+        submsg.off += msg_len - 8;
+        msg         = &((uint8_t *) msg)[ 8 ];
+        msg_len     = msg_len - 8;
         rvmsg.update_hdr( submsg );
         break;
 
       case MD_OPAQUE:
       case MD_STRING:
-        if ( RvMsg::is_rvmsg( (void *) pub.msg, 0, pub.msg_len, 0 ) )
+        if ( RvMsg::is_rvmsg( msg, 0, msg_len, 0 ) )
           goto do_rvmsg;
         if ( msg_enc == MD_STRING ) {
-          if ( TibMsg::is_tibmsg( (void *) pub.msg, 0, pub.msg_len, 0 ) ||
-             TibSassMsg::is_tibsassmsg( (void *) pub.msg, 0, pub.msg_len, 0 ) )
+          if ( TibMsg::is_tibmsg( msg, 0, msg_len, 0 ) ||
+               TibSassMsg::is_tibsassmsg( msg, 0, msg_len, 0 ) )
             msg_enc = MD_OPAQUE;
+          else {
+            if ( MDMsg::is_msg_type( msg, 0, msg_len, 0 ) == JSON_TYPE_ID ) {
+      case JSON_TYPE_ID:
+              if ( EvRvService::convert_json( this->spc, msg, msg_len ) )
+                goto do_rvmsg;
+            }
+          }
         }
         /* FALLTHRU */
       case RAIMSG_TYPE_ID:
       case TIB_SASS_TYPE_ID:
       case TIB_SASS_FORM_TYPE_ID:
+      case MARKETFEED_TYPE_ID:
+      case RWF_TYPE_ID: /* ??? */
       do_tibmsg:;
-        msg     = pub.msg;
-        msg_len = pub.msg_len;
-
         ::memcpy( &buf[ rvmsg.off ], data_hdr, sizeof( data_hdr ) );
         rvmsg.off += sizeof( data_hdr );
         buf[ rvmsg.off++ ] = ( msg_enc == MD_STRING ) ? 8 : 7/*RV_OPAQUE*/;
@@ -1202,19 +1211,17 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
         break;
 
       case MD_MESSAGE:
-        if ( RvMsg::is_rvmsg( (void *) pub.msg, 0, pub.msg_len, 0 ) )
+        if ( RvMsg::is_rvmsg( msg, 0, msg_len, 0 ) )
           goto do_rvmsg;
-        if ( TibMsg::is_tibmsg( (void *) pub.msg, 0, pub.msg_len, 0 ) )
-          goto do_tibmsg;
-        if ( TibSassMsg::is_tibsassmsg( (void *) pub.msg, 0, pub.msg_len, 0 ) )
-          goto do_tibmsg;
         /* FALLTHRU */
       default:
-        if ( pub.msg_len == 0 ) {
+        if ( msg_len == 0 ) {
           off = rvmsg.off;
           rvmsg.update_hdr();
         }
         else {
+          if ( MDMsg::is_msg_type( msg, 0, msg_len, 0 ) != 0 )
+            goto do_tibmsg;
           off = 0;
         }
         msg     = NULL;
@@ -1237,6 +1244,74 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
                msg_enc, (int) sublen, sub, (uint32_t) off );
     }
   }
+  return true;
+}
+
+static int
+convert_json_submsg( MDMsg *jmsg, RvMsgWriter &rvmsg ) noexcept
+{
+  MDFieldIter *iter;
+  int status;
+  if ( (status = jmsg->get_field_iter( iter )) == 0 ) {
+    status = iter->first();
+    while ( status == 0 ) {
+      MDName      name;
+      MDReference mref;
+      if ( iter->get_name( name ) == 0 && iter->get_reference( mref ) == 0 ) {
+        if ( mref.ftype == MD_DECIMAL ) {
+          MDDecimal dec;
+          if ( dec.get_decimal( mref ) == 0 ) {
+            if ( dec.hint == MD_DEC_INTEGER &&
+                 dec.ival == (int64_t) (int32_t) dec.ival )
+              status = rvmsg.append_int<int32_t>( name.fname, name.fnamelen,
+                                                  (int32_t) dec.ival );
+            else
+              status = rvmsg.append_decimal( name.fname, name.fnamelen, dec );
+          }
+        }
+        else if ( mref.ftype == MD_MESSAGE ) {
+          RvMsgWriter submsg( NULL, 0 );
+          MDMsg * jmsg2 = NULL;
+          status = rvmsg.append_msg( name.fname, name.fnamelen, submsg );
+          if ( status == 0 )
+            status = jmsg->get_sub_msg( mref, jmsg2 );
+          if ( status == 0 ) {
+            status = convert_json_submsg( jmsg2, submsg );
+            if ( status == 0 )
+              rvmsg.update_hdr( submsg );
+          }
+        }
+        else {
+          status = rvmsg.append_ref( name.fname, name.fnamelen, mref );
+        }
+        if ( status != 0 )
+          break;
+      }
+      status = iter->next();
+    }
+  }
+  if ( status != Err::NOT_FOUND )
+    return status;
+  return 0;
+}
+
+bool
+EvRvService::convert_json( MDMsgMem &spc,  void *&msg,
+                           size_t &msg_len ) noexcept
+{
+  MDMsgMem   tmp_mem;
+  JsonMsgCtx ctx;
+
+  if ( ctx.parse( msg, 0, msg_len, NULL, &tmp_mem, false ) != 0 )
+    return false;
+  spc.reuse();
+  RvMsgWriter rvmsg( spc.make( msg_len * 16 ), msg_len * 16 );
+
+  if ( convert_json_submsg( ctx.msg, rvmsg ) != 0 )
+    return false;
+  rvmsg.update_hdr();
+  msg     = rvmsg.buf;
+  msg_len = rvmsg.off;
   return true;
 }
 

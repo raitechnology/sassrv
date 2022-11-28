@@ -60,6 +60,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
              * service;
   void       * save_buf;
   size_t       save_len;
+  md::MDMsgMem spc;
 
   EvRvClient( kv::EvPoll &p ) noexcept;
 

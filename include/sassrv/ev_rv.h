@@ -452,6 +452,7 @@ struct EvRvService : public kv::EvConnection {
   uint64_t     timer_id;       /* timerid unique for this service */
   uint32_t     pub_events,
                pub_status[ 4 ]; /* loss, start, cycle, restart */
+  md::MDMsgMem spc;
 
   EvRvService( kv::EvPoll &p,  const uint8_t t,  EvRvListen &l )
     : kv::EvConnection( p, t ), sub_route( l.sub_route ),
@@ -494,6 +495,8 @@ struct EvRvService : public kv::EvConnection {
   bool fwd_pub( void ) noexcept;     /* fwd a message from client to network */
   /* forward a message from network to client */
   bool fwd_msg( kv::EvPublish &pub ) noexcept;
+  static bool convert_json( md::MDMsgMem &spc,  void *&msg,
+                            size_t &msg_len ) noexcept;
   void inbound_data_loss( const char *sub,  size_t sublen,
                           kv::EvPublish &pub ) noexcept;
   bool pub_inbound_data_loss( void ) noexcept;
