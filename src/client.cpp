@@ -34,12 +34,14 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   size_t        sub_count;       /* count of sub[] */
   bool          no_dictionary,   /* don't request dictionary */
                 is_subscribed,   /* sub[] are subscribed */
-                have_dictionary; /* set when dict request succeeded */
+                have_dictionary, /* set when dict request succeeded */
+                dump_hex;
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t cnt,
-                  bool n )
+                  bool nodict,  bool hex )
     : poll( p ), client( c ), dict( 0 ), sub( s ), sub_count( cnt ),
-      no_dictionary( n ), is_subscribed( false ), have_dictionary( false ) {}
+      no_dictionary( nodict ), is_subscribed( false ), have_dictionary( false ),
+      dump_hex( hex ) {}
 
   /* after CONNECTED message */
   virtual void on_connect( EvSocket &conn ) noexcept;
@@ -206,6 +208,8 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
     printf( "## format: %s, length %u\n", m->get_proto_string(), pub.msg_len );
     MDOutput mout;
     m->print( &mout );
+    if ( this->dump_hex )
+      mout.print_hex( m );
   }
   else
     fprintf( stderr, "Message unpack error\n" );
@@ -230,18 +234,20 @@ main( int argc, const char *argv[] )
              * service = get_arg( argc, argv, 1, "-s", "-service", "7500" ),
              * path    = get_arg( argc, argv, 1, "-c", "-cfile", NULL ),
              * nodict  = get_arg( argc, argv, 0, "-x", "-nodict", NULL ),
+             * dump    = get_arg( argc, argv, 0, "-e", "-hex", NULL ),
              * help    = get_arg( argc, argv, 0, "-h", "-help", 0 );
   int i = argc, first_sub = argc, idle_count = 0;
 
   if ( help != NULL ) {
   help:;
     fprintf( stderr,
- "%s [-d daemon] [-n network] [-s service] [-c cfile_path] [-x] subject ...\n"
+ "%s [-d daemon] [-n network] [-s service] [-c cfile_path] [-x] [-e] subject ...\n"
              "  -d daemon  = daemon port to connect\n"
              "  -n network = network\n"
              "  -s service = service\n"
              "  -c cfile   = if loading dictionary from files\n"
              "  -x         = don't load a dictionary\n"
+             "  -e         = show hex dump of messages\n"
              "  subject    = subject to subscribe\n", argv[ 0 ] );
     return 1;
   }
@@ -268,7 +274,7 @@ main( int argc, const char *argv[] )
   EvRvClientParameters parm( daemon, network, service, 0 );
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, &argv[ first_sub ], argc - first_sub,
-                             nodict != NULL );
+                             nodict != NULL, dump != NULL );
   /* load dictionary if present */
   if ( ! data.no_dictionary ) {
     if ( path != NULL || (path = ::getenv( "cfile_path" )) != NULL ) {

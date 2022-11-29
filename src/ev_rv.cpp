@@ -1247,54 +1247,6 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
   return true;
 }
 
-static int
-convert_json_submsg( MDMsg *jmsg, RvMsgWriter &rvmsg ) noexcept
-{
-  MDFieldIter *iter;
-  int status;
-  if ( (status = jmsg->get_field_iter( iter )) == 0 ) {
-    status = iter->first();
-    while ( status == 0 ) {
-      MDName      name;
-      MDReference mref;
-      if ( iter->get_name( name ) == 0 && iter->get_reference( mref ) == 0 ) {
-        if ( mref.ftype == MD_DECIMAL ) {
-          MDDecimal dec;
-          if ( dec.get_decimal( mref ) == 0 ) {
-            if ( dec.hint == MD_DEC_INTEGER &&
-                 dec.ival == (int64_t) (int32_t) dec.ival )
-              status = rvmsg.append_int<int32_t>( name.fname, name.fnamelen,
-                                                  (int32_t) dec.ival );
-            else
-              status = rvmsg.append_decimal( name.fname, name.fnamelen, dec );
-          }
-        }
-        else if ( mref.ftype == MD_MESSAGE ) {
-          RvMsgWriter submsg( NULL, 0 );
-          MDMsg * jmsg2 = NULL;
-          status = rvmsg.append_msg( name.fname, name.fnamelen, submsg );
-          if ( status == 0 )
-            status = jmsg->get_sub_msg( mref, jmsg2 );
-          if ( status == 0 ) {
-            status = convert_json_submsg( jmsg2, submsg );
-            if ( status == 0 )
-              rvmsg.update_hdr( submsg );
-          }
-        }
-        else {
-          status = rvmsg.append_ref( name.fname, name.fnamelen, mref );
-        }
-        if ( status != 0 )
-          break;
-      }
-      status = iter->next();
-    }
-  }
-  if ( status != Err::NOT_FOUND )
-    return status;
-  return 0;
-}
-
 bool
 EvRvService::convert_json( MDMsgMem &spc,  void *&msg,
                            size_t &msg_len ) noexcept
@@ -1305,9 +1257,9 @@ EvRvService::convert_json( MDMsgMem &spc,  void *&msg,
   if ( ctx.parse( msg, 0, msg_len, NULL, &tmp_mem, false ) != 0 )
     return false;
   spc.reuse();
-  RvMsgWriter rvmsg( spc.make( msg_len * 16 ), msg_len * 16 );
+  RvMsgWriter rvmsg( spc.reuse_make( msg_len * 16 ), msg_len * 16 );
 
-  if ( convert_json_submsg( ctx.msg, rvmsg ) != 0 )
+  if ( rvmsg.convert_msg( *ctx.msg ) != 0 )
     return false;
   rvmsg.update_hdr();
   msg     = rvmsg.buf;
