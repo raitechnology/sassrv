@@ -17,34 +17,25 @@ extern "C" {
 namespace rai {
 namespace sassrv {
 
-extern uint32_t rv_debug;
-
-typedef kv::ArrayCount<RvHost *, 4> RvHostTab;
-typedef kv::ArrayCount<RvDaemonRpc *, 4> RvDaemonTab;
-
 /* tcp listener for accepting EvRvService connections */
 struct EvRvListen : public kv::EvTcpListen/*, public RvHost*/ {
   void * operator new( size_t, void *ptr ) { return ptr; }
 
   kv::RoutePublish & sub_route;
-  RvHostTab   host_tab;
-  RvDaemonTab daemon_tab;
-  RvHost    * dummy_host;
-  uint32_t    host_timer_id; /* timer for HOST.STATUS */
-  uint16_t    ipport;
-  bool        has_service_prefix;
+  RvHostDB         & db;
+  uint16_t           ipport;
+  bool               has_service_prefix;
 
-  EvRvListen( kv::EvPoll &p,  kv::RoutePublish &sr ) noexcept;
-  EvRvListen( kv::EvPoll &p ) noexcept;
+  EvRvListen( kv::EvPoll &p,  kv::RoutePublish &sr,  RvHostDB &d,
+              bool has_svc_pre ) noexcept;
+  EvRvListen( kv::EvPoll &p,  RvHostDB &d,  bool has_svc_pre ) noexcept;
   /* EvListen */
   virtual EvSocket *accept( void ) noexcept;
   virtual int listen( const char *ip,  int port,  int opts ) noexcept;
 
-  int start_network( RvHost *&h, const char *net,  size_t net_len,
-                     const char *svc,  size_t svc_len ) noexcept;
+  int start_network( RvHost *&h, const RvHostNet &hn ) noexcept;
   /* send _RV.INFO.SYSTEM.HOST.START */
-  virtual int start_host( RvHost &h, const char *net,  size_t net_len,
-                          const char *svc,  size_t svc_len ) noexcept;
+  virtual int start_host( RvHost &h, const RvHostNet &hn ) noexcept;
   /* send _RV.INFO.SYSTEM.HOST.STOP */
   virtual int stop_host( RvHost &h ) noexcept; 
 
@@ -399,7 +390,8 @@ struct RvMsgIn {
 struct RvIDLElem {
   uint32_t hash,         /* hash of subject */
            msg_loss,     /* number of messages lost */
-           pub_msg_loss; /* count lost published */
+           pub_msg_loss, /* count lost published */
+           pub_host;     /* source of loss */
   uint16_t len;          /* length of subject */
   char     value[ 2 ];   /* the subject string */
 };
@@ -427,16 +419,19 @@ struct EvRvService : public kv::EvConnection {
     SENT_SESSION_START = 32, /* sent a session start message */
     SENT_SESSION_STOP  = 64  /* sent a session stop message */
   };
+  static const size_t MAX_CONTROL_LEN = 64,
+                      MAX_GOB_LEN     = 16;
+
   kv::RoutePublish & sub_route;
   RvMsgIn      msg_in;         /* current message recvd */
   RvSubMap     sub_tab;        /* subscriptions open by connection */
   RvPatternMap pat_tab;        /* pattern subscriptions open by connection */
   EvRvListen & listener;
   RvHost     * host;           /* the session stats */
-  char         session[ 64 ],  /* session id of this connection */
-               control[ 64 ],  /* the inbox name */
-               userid[ 64 ],   /* the userid */
-               gob[ 16 ];      /* deamon generated session id */
+  char         session[ MAX_SESSION_LEN ], /* session id of this connection */
+               control[ MAX_CONTROL_LEN ], /* the inbox name */
+               userid[ MAX_USERID_LEN ],   /* the userid */
+               gob[ MAX_GOB_LEN ];         /* deamon generated session id */
   uint16_t     svc_state,      /* the rv states */
                session_len,    /* lengths for the above */
                control_len,
@@ -502,69 +497,21 @@ struct EvRvService : public kv::EvConnection {
   bool pub_inbound_data_loss( void ) noexcept;
   static void print( void *m,  size_t len ) noexcept;
   /* EvSocket */
-  virtual void read( void ) noexcept final;
-  virtual void process( void ) noexcept final;
-  virtual void process_close( void ) noexcept final;
-  virtual void process_shutdown( void ) noexcept final;
-  virtual void release( void ) noexcept final;
-  virtual bool timer_expire( uint64_t tid, uint64_t eid ) noexcept final;
-  virtual bool hash_to_sub( uint32_t h, char *k, size_t &klen ) noexcept final;
-  virtual bool on_msg( kv::EvPublish &pub ) noexcept final;
-  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept final;
-  virtual uint8_t is_psubscribed( const kv::NotifyPattern &pat ) noexcept final;
-};
-
-/* temporary list of sessions for subscription listing */
-struct RvServiceLink {
-  void * operator new( size_t, void *ptr ) { return ptr; }
-  RvServiceLink * next, * back;
-  EvRvService   & svc;
-  uint8_t         bits[ 256 ];
-
-  RvServiceLink( EvRvService *s ) : next( 0 ), back( 0 ), svc( *s ) {}
-  /* quickly filter duplicate subjects by hashing a 2048 bit array */
-  void set( uint32_t h ) {
-    this->bits[ ( h >> 3 ) & 0xff ] = 1 << ( h & 7 );
-  }
-  uint8_t test( uint32_t h ) const {
-    return this->bits[ ( h >> 3 ) & 0xff ] & ( 1 << ( h & 7 ) );
-  }
-  /* used to uniquely identify a list of subjects among a list of sessions */
-  bool check_subject( RvSubRoute &rt,  uint16_t prelen ) {
-    const char * subj = rt.value;
-    size_t       len  = rt.len;
-    uint32_t     hash = rt.hash;
-    if ( len <= prelen ||
-         is_restricted_subject( &subj[ prelen ], len - prelen ) )
-      return false;
-    this->set( hash );
-    for ( RvServiceLink *link = this->back; link != NULL; link = link->back ) {
-      if ( link->test( hash ) != 0 )
-        if ( link->svc.sub_tab.tab.find( hash, subj, len ) != NULL )
-          return false;
-    }
-    return true;
-  }
-  /* used to uniquely identify a list of patterns among a list of sessions */
-  bool check_pattern( RvPatternRoute &rt,  uint16_t prelen,  RvWildMatch *check ) {
-    const char * pat  = rt.value;
-    size_t       len  = rt.len;
-    uint32_t     hash = rt.hash;
-    if ( len < prelen ||
-         is_restricted_subject( &pat[ prelen ], len - prelen ) )
-      return false;
-    for ( RvServiceLink *link = this->back; link != NULL; link = link->back ) {
-      RvPatternRoute * rt;
-      if ( (rt = link->svc.pat_tab.tab.find( hash, pat, len )) != NULL ) {
-        for ( RvWildMatch *m = rt->list.hd; m != NULL; m = m->next ) {
-          if ( m->len == check->len &&
-               ::memcmp( m->value, check->value, m->len ) == 0 )
-            return false;
-        }
-      }
-    }
-    return true;
-  }
+  virtual void read( void ) noexcept;
+  virtual void process( void ) noexcept;
+  virtual void process_close( void ) noexcept;
+  virtual void process_shutdown( void ) noexcept;
+  virtual void release( void ) noexcept;
+  virtual bool timer_expire( uint64_t tid, uint64_t eid ) noexcept;
+  virtual bool hash_to_sub( uint32_t h, char *k, size_t &klen ) noexcept;
+  virtual bool on_msg( kv::EvPublish &pub ) noexcept;
+  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept;
+  virtual uint8_t is_psubscribed( const kv::NotifyPattern &pat ) noexcept;
+  virtual size_t get_userid( char userid[ MAX_USERID_LEN ] ) noexcept;
+  virtual size_t get_session( const char *svc,  size_t svc_len,
+                              char session[ MAX_SESSION_LEN ] ) noexcept;
+  virtual size_t get_subscriptions( kv::SubRouteDB &subs, kv::SubRouteDB &pats,
+                                    int &pattern_fmt ) noexcept;
 };
 
 #define is_rv_debug kv_unlikely( rv_debug != 0 )

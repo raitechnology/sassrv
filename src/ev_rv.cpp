@@ -78,18 +78,19 @@ uint32_t rai::sassrv::rv_debug = 0;
  */
 /* string constant + strlen() + 1 */
 
-EvRvListen::EvRvListen( EvPoll &p ) noexcept
+EvRvListen::EvRvListen( EvPoll &p,  RvHostDB &d,  bool has_svc_pre ) noexcept
   : EvTcpListen( p, "rv_listen", "rv_sock" ), /*RvHost( *this ),*/
-    sub_route( p.sub_route ), dummy_host( 0 ), host_timer_id( 0 ),
-    ipport( 0 ), has_service_prefix( true )
+    sub_route( p.sub_route ), db( d ),
+    ipport( 0 ), has_service_prefix( has_svc_pre )
 {
   md_init_auto_unpack();
 }
 
-EvRvListen::EvRvListen( EvPoll &p,  RoutePublish &sr ) noexcept
+EvRvListen::EvRvListen( EvPoll &p,  RoutePublish &sr,  RvHostDB &d,
+                        bool has_svc_pre ) noexcept
   : EvTcpListen( p, "rv_listen", "rv_sock" ), /*RvHost( *this ),*/
-    sub_route( sr ), dummy_host( 0 ), host_timer_id( 0 ),
-    ipport( 0 ), has_service_prefix( true )
+    sub_route( sr ), db( d ),
+    ipport( 0 ), has_service_prefix( has_svc_pre )
 {
   md_init_auto_unpack();
 }
@@ -126,26 +127,11 @@ EvRvListen::accept( void ) noexcept
 }
 
 int
-EvRvListen::start_network( RvHost *&h, const char *net,  size_t net_len,
-                           const char *svc,  size_t svc_len ) noexcept
+EvRvListen::start_network( RvHost *&h, const RvHostNet &hn ) noexcept
 {
-  RvHost * host   = NULL;
-  int      status = HOST_OK;
-  size_t   i;
-
-  for ( i = 0; i < this->host_tab.count; i++ ) {
-    host = this->host_tab.ptr[ i ];
-    if ( host->service_len == svc_len &&
-         ::memcmp( host->service, svc, svc_len ) == 0 )
-      break;
-  }
-  if ( i == this->host_tab.count ) {
-    void * p = ::malloc( sizeof( RvHost ) );
-    host = new ( p ) RvHost( *this, this->sub_route, this->has_service_prefix );
-    this->host_tab[ i ] = host;
-  }
-  h = host;
-  status = this->start_host( *host, net, net_len, svc, svc_len );
+  int status = this->db.start_service( h, this->poll, this->sub_route, hn );
+  if ( status == 0 )
+    status = this->start_host( *h, hn );
   if ( status != 0 ) {
     if ( status < 0 )
       return ERR_START_HOST_FAILED;
@@ -172,13 +158,12 @@ EvRvListen::start_host2( RvHost &h,  uint32_t delay_secs ) noexcept
 }
 
 int
-EvRvListen::start_host( RvHost &h, const char *net,  size_t net_len,
-                        const char *svc,  size_t svc_len ) noexcept
+EvRvListen::start_host( RvHost &h, const RvHostNet &hn ) noexcept
 {
   int status = HOST_OK;
   if ( ! h.network_started ) {
     if ( ! h.start_in_progress ) {
-      status = h.check_network( net, net_len, svc, svc_len );
+      status = h.check_network( hn );
       if ( status == HOST_OK ) {
         h.start_in_progress = true;
         status = h.start_host();
@@ -186,8 +171,7 @@ EvRvListen::start_host( RvHost &h, const char *net,  size_t net_len,
       return status;
     }
   }
-  if ( h.mcast.host_ip == 0 ||
-       ! h.is_same_network( net, net_len, svc, svc_len ) )
+  if ( h.mcast.host_ip == 0 || ! h.is_same_network( hn ) )
     return ERR_SAME_SVC_TWO_NETS;
   return HOST_OK;
 }
@@ -430,9 +414,10 @@ EvRvService::respond_info( void ) noexcept
     ::strcpy( svc, "7500" );
     svc_len = 4;
   }
+  RvHostNet hn( svc, svc_len, net, net_len,
+                this->listener.ipport, this->listener.has_service_prefix );
   /* check that the network is valid and start it */
-  status = this->listener.start_network( this->host, net, net_len,
-                                                     svc, svc_len );
+  status = this->listener.start_network( this->host, hn );
   if ( this->host->network_started ) {
     if ( ! this->host_started ) {
       this->host_started = true;
@@ -702,42 +687,9 @@ EvRvService::add_sub( void ) noexcept
   /* if first ref & no listen starts on restricted subjects _RV. _INBOX. */
   sub = this->msg_in.sub;
   len = this->msg_in.sublen;
-  if ( refcnt != 0 && ! is_restricted_subject( sub, len ) ) {
-    static const char start[] = "_RV.INFO.SYSTEM.LISTEN.START."; /* 16+13=29 */
-    uint8_t * buf;
-    char    * listen;
-    size_t    listenlen = 29 + len, /* start strlen + subject len */
-              size      = 256 + len + listenlen + 10; /* session size max 64 */
-    char    * rep       = NULL;
-    size_t    replen    = 0;
-
-    size   = align<size_t>( size, 8 );
-    this->msg_in.mem.alloc( size, &buf );
-    size  -= align<size_t>( listenlen + 1, 8 );
-    listen = (char *) &buf[ size ];
-    RvMsgWriter msg( buf, size );
-
-    msg.append_string( SARG( "ADV_CLASS" ), SARG( "INFO" ) );
-    msg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
-    /* skip prefix: _RV.INFO.SYSTEM. */
-    ::memcpy( listen, start, 29 );
-    ::memcpy( &listen[ 29 ], sub, len );
-    listen[ listenlen ] = '\0';
-    /* ADV_NAME is LISTEN.START.subject */
-    msg.append_string( SARG( "ADV_NAME" ), &listen[ 16 ], 13 + len + 1 );
-    msg.append_string( SARG( "id" ), this->session, this->session_len + 1 );
-    msg.append_string( SARG( "sub" ), sub, len + 1 );
-    msg.append_uint( SARG( "refcnt" ), refcnt );
-    size = msg.update_hdr();
-
-    this->msg_in.make_pre_subject( sub, len, listen, listenlen );
-    if ( this->msg_in.replylen > 0 )
-      this->msg_in.make_pre_subject( rep, replen, this->msg_in.reply,
-                                     this->msg_in.replylen );
-    h = kv_crc_c( sub, len, 0 );
-    EvPublish pub( sub, len, rep, replen, buf, size, this->sub_route, this->fd,
-                   h, RVMSG_TYPE_ID, 'p');
-    this->sub_route.forward_msg( pub );
+  if ( refcnt != 0 ) {
+    this->host->send_listen_start( this, sub, len, this->msg_in.reply,
+                                   this->msg_in.replylen, refcnt );
   }
 }
 /* when a 'C' message is received from the client, remove the subject and
@@ -803,37 +755,8 @@ EvRvService::rem_sub( void ) noexcept
   /* if found ref, no listen stops on restricted subjects _RV. _INBOX. */
   sub = this->msg_in.sub;
   len = this->msg_in.sublen;
-  if ( refcnt != 0xffffffffU && ! is_restricted_subject( sub, len ) ) {
-    static const char stop[] = "_RV.INFO.SYSTEM.LISTEN.STOP."; /* 16+12=28 */
-    uint8_t * buf;
-    char    * listen;
-    size_t    listenlen = 28 + len, /* stop strlen + subject len */
-              size      = 256 + len + listenlen + 10; /* session size max 64 */
-
-    size   = align<size_t>( size, 8 );
-    this->msg_in.mem.alloc( size, &buf );
-    size  -= align<size_t>( listenlen + 1, 8 );
-    listen = (char *) &buf[ size ];
-    RvMsgWriter msg( buf, size );
-
-    msg.append_string( SARG( "ADV_CLASS" ), SARG( "INFO" ) );
-    msg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
-    /* skip prefix: _RV.INFO.SYSTEM. */
-    ::memcpy( listen, stop, 28 );
-    ::memcpy( &listen[ 28 ], sub, len );
-    listen[ listenlen ] = '\0';
-    /* ADV_NAME is LISTEN.START.subject */
-    msg.append_string( SARG( "ADV_NAME" ), &listen[ 16 ], 12 + len + 1 );
-    msg.append_string( SARG( "id" ), this->session, this->session_len + 1 );
-    msg.append_string( SARG( "sub" ), sub, len + 1 );
-    msg.append_uint( SARG( "refcnt" ), refcnt );
-    size = msg.update_hdr();
-
-    this->msg_in.make_pre_subject( sub, len, listen, listenlen );
-    h = kv_crc_c( sub, len, 0 );
-    EvPublish pub( sub, len, NULL, 0, buf, size, this->sub_route, this->fd,
-                   h, RVMSG_TYPE_ID, 'p' );
-    this->sub_route.forward_msg( pub );
+  if ( refcnt != 0xffffffffU ) {
+    this->host->send_listen_stop( this, sub, len, refcnt );
   }
 }
 /* when client disconnects, unsubscribe everything */
@@ -982,10 +905,12 @@ EvRvService::inbound_data_loss( const char *sub,  size_t sublen,
     el = this->loss_queue->tab.upsert( pub.subj_hash, sub, sublen, loc );
     if ( loc.is_new ) {
       el->msg_loss     = msg_loss;
+      el->pub_host     = pub.pub_host;
       el->pub_msg_loss = 0;
     }
     else {
       el->msg_loss += msg_loss;
+      el->pub_host  = pub.pub_host;
     }
 
     if ( this->pub_events == 1 )
@@ -1005,15 +930,19 @@ EvRvService::pub_inbound_data_loss( void ) noexcept
   size_t       sublen[ 9 ];
   uint32_t     msg_loss[ 9 ],
                sub_cnt      = 0,
-               extra_sublen = 0;
+               extra_sublen = 0,
+               pub_host     = 0;
   uint64_t     total_loss   = 0;
+  char         pub_host_ip[ 32 ];
+  size_t       pub_host_ip_len = 0;
 
   sub[ 0 ]      = NULL;
   sublen[ 0 ]   = 0;
   msg_loss[ 0 ] = 0;
   for ( el = this->loss_queue->tab.first( loc ); el != NULL;
         el = this->loss_queue->tab.next( loc ) ) {
-    if ( el->pub_msg_loss != el->msg_loss ) {
+    if ( el->pub_msg_loss != el->msg_loss &&
+         ( el->pub_host == pub_host || pub_host == 0 ) ) {
       uint32_t loss = el->msg_loss - el->pub_msg_loss;
       if ( sub_cnt < 9 ) {
         sub[ sub_cnt ]      = el->value;
@@ -1024,6 +953,7 @@ EvRvService::pub_inbound_data_loss( void ) noexcept
       sub_cnt++;
       total_loss += loss;
       el->pub_msg_loss = el->msg_loss;
+      pub_host = el->pub_host;
     }
   }
   if ( total_loss == 0 ) {
@@ -1031,6 +961,7 @@ EvRvService::pub_inbound_data_loss( void ) noexcept
     this->loss_queue = NULL;
     return false;
   }
+  pub_host_ip_len = RvMcast::ip4_string( pub_host, pub_host_ip );
 
   static const char   sys_sub[] = "_RV.ERROR.SYSTEM.DATALOSS.INBOUND.BCAST";
   static const size_t sys_sublen = sizeof( sys_sub ) - 1;
@@ -1057,6 +988,7 @@ EvRvService::pub_inbound_data_loss( void ) noexcept
   submsg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
   submsg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.INBOUND.BCAST" ) );
   submsg.append_string( SARG( "ADV_DESC" ), SARG( "lost msgs" ) );
+  submsg.append_string( SARG( "host" ), pub_host_ip, pub_host_ip_len + 1 );
   submsg.append_uint( SARG( "lost" ), (uint32_t) ( total_loss < 0x7fffffffU ?
     (uint32_t) total_loss : 0x7fffffffU ) );
   submsg.append_uint( SARG( "sub_cnt" ), sub_cnt );
@@ -1068,7 +1000,8 @@ EvRvService::pub_inbound_data_loss( void ) noexcept
     submsg.append_string( sub1[ i ], 5, sub[ i ], sublen[ i ] );
     submsg.append_uint( lost1[ i ], 6, msg_loss[ i ] );
   }
-  submsg.append_ipdata( SARG( "scid" ), this->listener.ipport );
+  if ( this->listener.ipport != 0 )
+    submsg.append_ipdata( SARG( "scid" ), this->listener.ipport );
   size = rvmsg.update_hdr( submsg );
 
   this->append( b, size );
@@ -1257,7 +1190,8 @@ EvRvService::convert_json( MDMsgMem &spc,  void *&msg,
   if ( ctx.parse( msg, 0, msg_len, NULL, &tmp_mem, false ) != 0 )
     return false;
   spc.reuse();
-  RvMsgWriter rvmsg( spc.reuse_make( msg_len * 16 ), msg_len * 16 );
+  size_t max_len = ( ( msg_len | 15 ) + 1 ) * 16;
+  RvMsgWriter rvmsg( spc.reuse_make( max_len ), max_len );
 
   if ( rvmsg.convert_msg( *ctx.msg ) != 0 )
     return false;
@@ -1305,8 +1239,8 @@ EvRvService::process_close( void ) noexcept
   if ( this->host_started ) {
     this->send_stop();
     this->host_started = false;
-    if ( --this->host->active_clients == 0 )
-      this->host->stop_network();
+    if ( this->host->stop_network() )
+      this->listener.stop_host( *this->host );
   }
   this->client_stats( this->sub_route.peer_stats );
   this->EvSocket::process_close();
@@ -1320,6 +1254,7 @@ EvRvService::release( void ) noexcept
   this->pat_tab.release();
   this->msg_in.release();
   this->EvConnection::release_buffers();
+  this->spc.reuse();
 }
 
 bool
@@ -1520,5 +1455,71 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
   if ( is_rv_debug )
     this->print( status, msgbuf, msglen );
   return status;
+}
+
+/* get session name */
+size_t
+EvRvService::get_userid( char userid[ MAX_USERID_LEN ] ) noexcept
+{
+  ::memcpy( userid, this->userid, this->userid_len );
+  userid[ this->userid_len ] = '\0';
+  return this->userid_len;
+}
+/* get session name */
+size_t
+EvRvService::get_session( const char *svc,  size_t svc_len,
+                          char session[ MAX_SESSION_LEN ] ) noexcept
+{
+  if ( svc_len == this->msg_in.prefix_len &&
+       ::memcmp( svc, this->msg_in.sub_buf - svc_len, svc_len ) == 0 ) {
+    ::memcpy( session, this->session, this->session_len );
+    session[ this->session_len ] = '\0';
+    return this->session_len;
+  }
+  session[ 0 ] = '\0';
+  return 0;
+}
+/* get session name */
+size_t
+EvRvService::get_subscriptions( SubRouteDB &subs,  SubRouteDB &pats,
+                                int &pattern_fmt ) noexcept
+{
+  RvSubRoutePos     pos;
+  RvPatternRoutePos ppos;
+  RouteLoc     loc;
+  const char * val;
+  size_t       len,
+               cnt    = 0,
+               prelen = this->msg_in.prefix_len;
+  uint32_t     h;
+
+  pattern_fmt = RV_PATTERN_FMT;
+  if ( this->sub_tab.first( pos ) ) {
+    do {
+      val = &pos.rt->value[ prelen ];
+      len = pos.rt->len - prelen;
+      if ( ! is_restricted_subject( val, len ) ) {
+        h   = kv_crc_c( val, len, 0 );
+        subs.upsert( h, val, len, loc );
+        if ( loc.is_new )
+          cnt++;
+      }
+    } while ( this->sub_tab.next( pos ) );
+  }
+  if ( this->pat_tab.first( ppos ) ) {
+    do {
+      for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
+        val = &m->value[ prelen ];
+        len = m->len - prelen;
+        if ( ! is_restricted_subject( val, len ) ) {
+          h = kv_crc_c( val, len, 0 );
+          pats.upsert( h, val, len, loc );
+          if ( loc.is_new )
+            cnt++;
+        }
+      }
+    } while ( this->pat_tab.next( ppos ) );
+  }
+  return cnt;
 }
 

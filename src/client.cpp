@@ -201,7 +201,11 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
     }
   }
   else { /* not inbox subject */
-    printf( "## %.*s:\n", (int) pub.subject_len, pub.subject );
+    if ( pub.reply_len != 0 )
+      printf( "## %.*s (reply: %.*s):\n", (int) pub.subject_len, pub.subject,
+              (int) pub.reply_len, (const char *) pub.reply );
+    else
+      printf( "## %.*s:\n", (int) pub.subject_len, pub.subject );
   }
   /* print message */
   if ( m != NULL ) {
