@@ -33,10 +33,10 @@ enum RvAdv {
   ADV_HOST_START  = ADV_HOSTADDR | ADV_SN | ADV_OS | ADV_VER | ADV_HTTPADDR |
                     ADV_HTTPPORT | ADV_TIME | ADV_UP | ADV_RLI | ADV_IPPORT |
                     ADV_SERVICE | ADV_NETWORK,
+  ADV_STATS       = ADV_MS | ADV_BS | ADV_MR | ADV_BR | ADV_PS | ADV_PR |
+                    ADV_RX | ADV_PM | ADV_IDL | ADV_ODL | ADV_IRRS | ADV_ORRS,
   ADV_HOST_STATUS = ADV_HOSTADDR | ADV_SN | ADV_OS | ADV_VER | ADV_HTTPADDR |
-                    ADV_HTTPPORT | ADV_TIME | ADV_UP | ADV_RLI | ADV_MS |
-                    ADV_BS | ADV_BR | ADV_MR | ADV_PS | ADV_PR | ADV_RX |
-                    ADV_PM | ADV_IDL | ADV_ODL | ADV_IRRS | ADV_ORRS |
+                    ADV_HTTPPORT | ADV_TIME | ADV_UP | ADV_RLI | ADV_STATS |
                     ADV_IPPORT | ADV_SERVICE | ADV_NETWORK,
   ADV_HOST_STOP   = ADV_HOSTADDR | ADV_TIME,
   ADV_SESSION     = ADV_HOSTADDR | ADV_ID | ADV_USERID,
@@ -177,52 +177,124 @@ struct RvHostDB {
 
   RvHostDB() : host_tab( 0 ), daemon_tab( 0 ) {}
   bool get_service( RvHost *&h,  const RvHostNet &hn ) noexcept;
+  bool get_service( RvHost *&h,  uint16_t svc ) noexcept;
   int start_service( RvHost *&h,  kv::EvPoll &poll,  kv::RoutePublish &sr,
                      const RvHostNet &hn ) noexcept;
+};
+
+struct RvDataLossElem {
+  uint32_t     hash,         /* hash of subject */
+               msg_loss,     /* number of messages lost */
+               pub_msg_loss, /* count lost published */
+               pub_host;     /* source of loss */
+  const char * pub_host_id;
+  uint16_t     len;          /* length of subject */
+  char         value[ 2 ];   /* the subject string */
+};
+
+struct RvDataLossQueue {
+  kv::RouteVec<RvDataLossElem> tab;
+
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  void operator delete( void *ptr ) { ::free( ptr ); }
+  RvDataLossQueue() {}
+  ~RvDataLossQueue() {
+    this->tab.release();
+  }
+};
+
+struct RvPubLoss {
+  kv::EvSocket    * sock;
+  RvDataLossQueue * loss_queue;
+  uint32_t          pub_status[ 4 ],
+                    pub_events;
+
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  void operator delete( void *ptr ) { ::free( ptr ); }
+  RvPubLoss(  kv::EvSocket *s ) {
+    ::memset( (void *) this, 0, sizeof( *this ) );
+    this->sock = s;
+  }
+  ~RvPubLoss() {
+    if ( this->loss_queue != NULL )
+      delete this->loss_queue;
+  }
+  void data_loss( RvHost &host,  kv::EvPublish &pub,
+                  const char *pub_host_id ) noexcept;
+};
+
+struct RvLossArray : public kv::ArrayCount<RvPubLoss *, 16> {
+  uint32_t pub_status[ 4 ],
+           pub_events, refs;
+  RvLossArray() : pub_events( 0 ), refs( 0 ) {
+    for ( int i = 0; i < 4; i++ ) this->pub_status[ i ] = 0;
+  }
+  void remove_loss_entry( RvHost &host,  uint32_t fd ) noexcept;
+  void print_events( RvHost &host ) noexcept;
+};
+
+struct RvHostStat {
+  uint64_t time_ns, /* time published */
+           ms, bs,  /* msgs sent, bytes sent */
+           mr, br,  /* msgs recv, bytes recv */
+           ps, pr,  /* pkts sent, pkts recv */
+           rx, pm,  /* retrans, pkts missed */
+           idl, odl;/* inbound dataloss, outbound dataloss */
+  void zero( void ) {
+    ::memset( (void *) this, 0, sizeof( *this ) );
+  }
+  void copy( const RvHostStat &cpy ) {
+    ::memcpy( (void *) this, &cpy, sizeof( RvHostStat ) );
+  }
 };
 
 struct RvHost : public kv::EvSocket {
   RvHostDB         & db;
   kv::RoutePublish & sub_route;
 
-  char         host[ 256 ],       /* gethostname */
-               session_ip[ 16 ],  /* address: 0A040416, sess_ip is quad fmt */
-               daemon_id[ 64 ],   /* hexip.DAEMON.gob */
-               network[ MAX_RV_NETWORK_LEN ], /* network string */
-               service[ MAX_RV_SERVICE_LEN ], /* service string */
-               sess_ip[ 4 * 4 ],  /* sess ip address (may be same as host_ip) */
-               host_id[ MAX_RV_HOST_ID_LEN ];
-  uint16_t     host_len,          /* len of above */
-               daemon_len,        /* len of this->daomon_id[] */
-               network_len,       /* len of this->network[] */
-               service_len,       /* len of this->service[] */
-               service_port,      /* service in network order */
-               sess_ip_len,       /* len of sess_ip[] */
-               host_id_len,       /* len of host_id[] */
-               http_port;         /* http listen port (network order) */
-  uint32_t     http_addr,         /* http tcp addr (network order) */
-               host_ip;
-  uint16_t     ipport,            /* daemon listen tcp port (network order) */
-               service_num;       /* service number */
-  bool         network_started,   /* if start_network() called and succeeded */
-               daemon_subscribed, /* if _INBOX.DAEMON.ABCDEF is subscribed */
-               start_in_progress, /* when network start is in progress */
-               has_service_prefix;/* if _7500. service prefix is used */
+  char          host[ 256 ],       /* gethostname */
+                session_ip[ 16 ],  /* address: 0A040416, sess_ip is quad fmt */
+                daemon_id[ 64 ],   /* hexip.DAEMON.gob */
+                network[ MAX_RV_NETWORK_LEN ], /* network string */
+                service[ MAX_RV_SERVICE_LEN ], /* service string */
+                sess_ip[ 4 * 4 ],  /* sess ip address (may be same as host_ip) */
+                host_id[ MAX_RV_HOST_ID_LEN ];
+  uint16_t      host_len,          /* len of above */
+                daemon_len,        /* len of this->daomon_id[] */
+                network_len,       /* len of this->network[] */
+                service_len,       /* len of this->service[] */
+                service_port,      /* service in network order */
+                sess_ip_len,       /* len of sess_ip[] */
+                host_id_len,       /* len of host_id[] */
+                http_port;         /* http listen port (network order) */
+  uint32_t      http_addr,         /* http tcp addr (network order) */
+                host_ip;
+  uint16_t      ipport;            /* daemon listen tcp port (network order) */
+  bool          network_started,   /* if start_network() called and succeeded */
+                daemon_subscribed, /* if _INBOX.DAEMON.ABCDEF is subscribed */
+                start_in_progress, /* when network start is in progress */
+                has_service_prefix;/* if _7500. service prefix is used */
   static const size_t session_ip_len = 8;
-  uint64_t     timer_id,
-               ms, bs,            /* msgs sent, bytes sent */
-               mr, br,            /* msgs recv, bytes recv */
-               ps, pr,            /* pkts sent, pkts recv */
-               rx, pm,            /* retrans, pkts missed */
-               idl, odl,          /* inbound dataloss, outbound dataloss */
-               host_status_count, /* count of host.stat msgs sent */
-               start_stamp,       /* when service started */
-               active_clients,    /* count of connections using this service */
-               host_status_timer,
-               host_delay_timer,
-               last_session_us;
-  RvDaemonRpc* rpc;
-  RvMcast      mcast;
+  RvHostStat    stat,
+                previous_stat[ 2 ];
+  uint64_t      host_status_count, /* count of host.stat msgs sent */
+                start_stamp,       /* when service started */
+                active_clients,    /* count of connections using this service */
+                last_session_us,
+                timer_id,
+                host_status_timer,
+                host_delay_timer,
+                host_loss_timer;
+  RvDaemonRpc * rpc;
+  RvMcast       mcast;
+  RvLossArray   loss_array;
+  const char  * dataloss_outbound_sub,
+              * dataloss_inbound_sub;
+  size_t        dataloss_outbound_len,
+                dataloss_inbound_len;
+  uint32_t      dataloss_outbound_hash,
+                dataloss_inbound_hash;
+
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   RvHost( RvHostDB &d,  kv::EvPoll &poll,  kv::RoutePublish &sr,  
@@ -237,13 +309,7 @@ struct RvHost : public kv::EvSocket {
     ::memcpy( this->network, hn.network, this->network_len = hn.network_len );
     this->service[ this->service_len ] = '\0';
     this->network[ this->network_len ] = '\0';
-    this->init_service_num();
     return true;
-  }
-  void init_service_num( void ) {
-    this->service_num = 0;
-    for ( uint16_t i = 0; i < this->service_len; i++ )
-      this->service_num = this->service_num * 10 + ( this->service[ i ] - '0' );
   }
   int init_host( void ) noexcept;
   bool is_same_network( const RvHostNet &hn ) const {
@@ -252,34 +318,47 @@ struct RvHost : public kv::EvSocket {
              ::memcmp( this->network, hn.network, hn.network_len ) == 0 &&
              ::memcmp( this->service, hn.service, hn.service_len ) == 0 );
   }
+  uint16_t get_service( void ) {
+    return (uint16_t) kv::string_to_uint64( this->service, this->service_len );
+  }
   void zero_stats( uint64_t now ) {
-    ::memset( &this->ms, 0, (char *) (void *) &this->start_stamp -
-                            (char *) (void *) &this->ms );
-    this->start_stamp = now;
+    this->stat.zero();
+    this->previous_stat[ 0 ].zero();
+    this->previous_stat[ 1 ].zero();
+    this->stat.time_ns = now;
+    this->start_stamp  = now;
   }
   int check_network( const RvHostNet &hn ) noexcept;
   void start_daemon( void ) noexcept;
   int start_network( const RvMcast &mc,  const RvHostNet &hn ) noexcept;
+  int copy_network( const RvMcast &mc,  const RvHostNet &hn ) noexcept;
   void send_host_start( EvRvService *svc ) noexcept;
-  void send_session_start( EvRvService *svc ) noexcept;
+  void send_session_start( EvRvService &svc ) noexcept;
+  void send_session_start( kv::EvSocket &sock ) noexcept;
   void send_session_start( const char *user,  size_t user_len,
                            const char *session,  size_t session_len ) noexcept;
   void send_host_stop( EvRvService *svc ) noexcept;
-  void send_session_stop( EvRvService *svc ) noexcept;
+  void send_session_stop( EvRvService &svc ) noexcept;
+  void send_session_stop( kv::EvSocket &sock ) noexcept;
   void send_session_stop( const char *user,  size_t user_len,
                           const char *session,  size_t session_len ) noexcept;
-  void send_listen_start( EvRvService *svc,  const char *sub,  size_t sublen,
+  void send_listen_start( EvRvService &svc,  const char *sub,  size_t sublen,
                           const char *rep,  size_t replen,
                           uint32_t refcnt ) noexcept;
   void send_listen_start( const char *session,  size_t session_len,
                           const char *sub,  size_t sublen,
                           const char *rep,  size_t replen,
                           uint32_t refcnt ) noexcept;
-  void send_listen_stop( EvRvService *svc,  const char *sub,  size_t sublen,
+  void send_listen_stop( EvRvService &svc,  const char *sub,  size_t sublen,
                          uint32_t refcnt ) noexcept;
   void send_listen_stop( const char *session,  size_t session_len,
                          const char *sub,  size_t sublen,
                          uint32_t refcnt ) noexcept;
+  void inbound_data_loss( kv::EvSocket &dest,  kv::EvPublish &pub,
+                          const char *pub_host_id ) noexcept;
+  void clear_loss_entry( kv::EvSocket &dest ) noexcept;
+  bool pub_inbound_data_loss( void ) noexcept;
+  bool send_inbound_data_loss( RvPubLoss &loss ) noexcept;
   bool stop_network( void ) noexcept;
   static inline size_t time_to_str( uint64_t ns,  char *str ) {
     return utime_to_str( ns / 1000, str );
@@ -288,6 +367,8 @@ struct RvHost : public kv::EvSocket {
   size_t make_session( uint64_t ns,  char session[ MAX_SESSION_LEN ] ) noexcept;
 
   void send_host_status( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.STATUS */
+  void send_outbound_data_loss( uint32_t msg_loss,  uint32_t pub_host,
+                                const char *pub_host_id ) noexcept;
   void data_loss_error( uint64_t bytes_lost,  const char *err,
                         size_t errlen ) noexcept;
   /* start / stop network */

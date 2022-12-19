@@ -29,13 +29,42 @@ RvHost::RvHost( RvHostDB &d,  EvPoll &poll,  RoutePublish &sr,
       : EvSocket( poll, poll.register_type( "rv_host" ) ),
         db( d ), sub_route( sr )
 {
+  const char   outbound_sub[] = "_RV.ERROR.SYSTEM.DATALOSS.OUTBOUND.BCAST",
+               inbound_sub[]  = "_RV.ERROR.SYSTEM.DATALOSS.INBOUND.BCAST";
+  const char * osub = outbound_sub,
+             * isub = inbound_sub;
+  size_t       olen = sizeof( outbound_sub ) - 1,
+               ilen = sizeof( inbound_sub ) - 1;
+
   this->sock_opts = OPT_NO_POLL;
   ::memset( this->host, 0, (char *) (void *) &this[ 1 ] - this->host );
   ::memcpy( this->service, svc, svc_len );
   this->service_len = svc_len;
   this->ipport      = port;
   this->has_service_prefix = has_svc_pre;
-  this->init_service_num();
+
+  if ( has_svc_pre ) {
+    char * o = (char *) ::malloc( olen + svc_len + 2 + 1 );
+    char * i = (char *) ::malloc( olen + svc_len + 2 + 1 );
+    olen = 0; ilen = 0;
+    o[ olen++ ] = '_'; i[ ilen++ ] = '_';
+    ::memcpy( &o[ olen ], this->service, this->service_len );
+    ::memcpy( &i[ ilen ], this->service, this->service_len );
+    olen += this->service_len; ilen += this->service_len;
+    o[ olen++ ] = '.'; i[ ilen++ ] = '.';
+    ::memcpy( &o[ olen ], outbound_sub, sizeof( outbound_sub ) );
+    ::memcpy( &i[ ilen ], inbound_sub, sizeof( inbound_sub ) );
+    olen += sizeof( outbound_sub ) - 1;
+    ilen += sizeof( inbound_sub ) - 1;
+    osub  = o;
+    isub  = i;
+  }
+  this->dataloss_outbound_sub  = osub;
+  this->dataloss_inbound_sub   = isub;
+  this->dataloss_outbound_len  = olen;
+  this->dataloss_inbound_len   = ilen;
+  this->dataloss_outbound_hash = kv_crc_c( osub, olen, 0 );
+  this->dataloss_inbound_hash  = kv_crc_c( isub, ilen, 0 );
 }
 
 int
@@ -56,6 +85,26 @@ RvHostDB::get_service( RvHost *&h,  const RvHostNet &hn ) noexcept
       RvHost * host = this->host_tab->ptr[ i ];
       if ( host->service_len == hn.service_len &&
            ::memcmp( host->service, hn.service, hn.service_len ) == 0 ) {
+        h = host;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool
+RvHostDB::get_service( RvHost *&h,  uint16_t svc ) noexcept
+{
+  h = NULL;
+  if ( this->host_tab != NULL ) {
+    uint16_t digits = uint16_digits( svc );
+    char name[ 8 ];
+    uint16_to_string( svc, name, digits );
+    for ( size_t i = 0; i < this->host_tab->count; i++ ) {
+      RvHost * host = this->host_tab->ptr[ i ];
+      if ( host->service_len == digits &&
+           ::memcmp( host->service, name, digits ) == 0 ) {
         h = host;
         return true;
       }
@@ -105,13 +154,18 @@ RvHost::start_daemon( void ) noexcept
 }
 
 bool
-RvHost::timer_expire( uint64_t,  uint64_t eid ) noexcept
+RvHost::timer_expire( uint64_t tid,  uint64_t ) noexcept
 {
   /* stop timer when host stops */
-  if ( eid != (uint64_t) this->host_status_timer ) {
-    if ( eid == (uint64_t) this->host_delay_timer ) {
+  if ( tid != this->host_status_timer ) {
+    if ( tid == this->host_delay_timer ) {
       /*printf( "delay start %s expire\n", this->service );*/
       this->start_host2( 0 );
+    }
+    else if ( tid == (uint64_t) this->host_loss_timer ) {
+      if ( this->pub_inbound_data_loss() )
+        return true;
+      this->host_loss_timer = 0;
     }
     return false;
   }
@@ -122,16 +176,14 @@ RvHost::timer_expire( uint64_t,  uint64_t eid ) noexcept
 int
 RvHost::start_host2( uint32_t delay_secs ) noexcept
 {
-  static uint64_t host_timer_id;
-
   if ( ! this->in_list( IN_ACTIVE_LIST ) )
     this->init_host();
 
   if ( delay_secs != 0 ) {
     if ( this->host_delay_timer == 0 )
-      this->host_delay_timer = ++host_timer_id;
-    this->poll.timer.add_timer_seconds( this->fd, delay_secs, 0,
-                                        this->host_delay_timer );
+      this->host_delay_timer = ++this->timer_id;
+    this->poll.timer.add_timer_seconds( this->fd, delay_secs,
+                                        this->host_delay_timer, 0 );
     return 0;
   }
   /* subscribe _INBOX.DAEMON.iphex */
@@ -140,10 +192,10 @@ RvHost::start_host2( uint32_t delay_secs ) noexcept
     this->daemon_subscribed = true;
   }
   if ( this->host_status_timer == 0 ) {
-    this->host_status_timer = ++host_timer_id;
+    this->host_status_timer = ++this->timer_id;
     /* start timer to send the status every 90 seconds */
-    this->poll.timer.add_timer_seconds( this->fd, RV_STATUS_IVAL, 0,
-                                        this->host_status_timer );
+    this->poll.timer.add_timer_seconds( this->fd, RV_STATUS_IVAL,
+                                        this->host_status_timer, 0 );
   }
   PeerMatchArgs ka( "rv", 2 );
   PeerMatchIter iter( *this, ka );
@@ -182,6 +234,7 @@ RvHost::stop_host( void ) noexcept
     /* stop the timer, the timer_expire() function tests this */
     this->host_status_timer = 0;
     this->host_delay_timer  = 0;
+    this->host_loss_timer   = 0;
     /* unsubscribe _INBOX.DAEMON.iphex */
     /*this->unsubscribe_daemon_inbox();*/
     if ( this->rpc != NULL && this->daemon_subscribed ) {
@@ -197,8 +250,8 @@ void
 RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
                          size_t errlen ) noexcept
 {
-  static const char   subj[] = "_RV.ERROR.SYSTEM.DATALOSS.OUTBOUND.BCAST";
-  static const size_t sublen = sizeof( subj ) - 1;
+  const char * subj   = this->dataloss_outbound_sub;
+  const size_t sublen = this->dataloss_outbound_len;
   uint8_t     buf[ 8192 ];
   char        str[ 256 ];
   size_t      size;
@@ -219,10 +272,12 @@ RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
   }
   msg.append_string( SARG( "ADV_DESC" ), str, errlen + 1 );
   msg.append_uint( SARG( "lost" ), bytes_lost );
-  /*msg.append_ipdata( SARG( "scid" ), this->listener.ipport );*/
+  if ( this->ipport != 0 )
+    msg.append_ipdata( SARG( "scid" ), this->ipport );
   size = msg.update_hdr();
+
   EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, this->fd,
-                 kv_crc_c( subj, sublen, 0 ), RVMSG_TYPE_ID, 'p' );
+                 this->dataloss_outbound_hash, RVMSG_TYPE_ID, 'p' );
 
   PeerMatchArgs ka( "rv", 2 );
   PeerMatchIter iter( *this, ka );
@@ -231,6 +286,257 @@ RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
     if ( svc->host == this )
       svc->fwd_msg( pub );
   }
+}
+
+void
+RvHost::send_outbound_data_loss( uint32_t msg_loss,  uint32_t pub_host,
+                                 const char *pub_host_id ) noexcept
+{
+  const char * subj   = this->dataloss_outbound_sub;
+  const size_t sublen = this->dataloss_outbound_len;
+  uint8_t      buf[ 8192 ];
+  char         pub_host_ip[ 32 ];
+  size_t       pub_host_ip_len = 0;
+  size_t       pub_host_id_len = 0;
+  RvMsgWriter  rvmsg( buf, sizeof( buf ) );
+
+  if ( msg_loss <= EV_MAX_LOSS )
+    this->stat.odl += msg_loss;
+
+  pub_host_id_len = ( pub_host_id == NULL ? 0 : ::strlen( pub_host_id ) );
+  pub_host_ip_len = RvMcast::ip4_string( pub_host, pub_host_ip );
+
+  rvmsg.append_string( SARG( "ADV_CLASS" ), SARG( "ERROR" ) );
+  rvmsg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
+  rvmsg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.OUTBOUND.BCAST" ) );
+  rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost msgs" ) );
+  rvmsg.append_uint( SARG( "lost" ), msg_loss );
+  rvmsg.append_string( SARG( "host" ), pub_host_ip, pub_host_ip_len + 1 );
+  if ( pub_host_id_len != 0 )
+    rvmsg.append_string( SARG( "hostid" ), pub_host_id, pub_host_id_len + 1 );
+  if ( this->ipport != 0 )
+    rvmsg.append_ipdata( SARG( "scid" ), this->ipport );
+  size_t size = rvmsg.update_hdr();
+
+  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, this->fd,
+                 this->dataloss_outbound_hash, RVMSG_TYPE_ID, 'p' );
+
+  PeerMatchArgs ka( "tcp", 3 );
+  PeerMatchIter iter( *this, ka );
+  size_t        prelen = this->rpc->ibx.svc_len;
+  const char  * prefix = this->rpc->ibx.buf;
+  for ( EvSocket *p = iter.first(); p != NULL; p = iter.next() ) {
+    char sess[ MAX_SESSION_LEN ];
+    if ( p->get_session( prefix, prelen, sess ) > 0 )
+      this->sub_route.forward_to( pub, p->fd );
+  }
+}
+
+void
+RvHost::inbound_data_loss( kv::EvSocket &dest,  EvPublish &pub,
+                           const char *pub_host_id ) noexcept
+{
+  RvPubLoss * loss = this->loss_array[ dest.fd ];
+  if ( loss == NULL ) {
+    loss = new ( ::malloc( sizeof( RvPubLoss ) ) ) RvPubLoss( &dest );
+    this->loss_array[ dest.fd ] = loss;
+    this->loss_array.refs++;
+  }
+  loss->data_loss( *this, pub, pub_host_id );
+  if ( this->host_loss_timer == 0 ) {
+    this->host_loss_timer = ++this->timer_id;
+    this->poll.timer.add_timer_seconds( this->fd, 1, this->host_loss_timer, 0 );
+  }
+}
+
+void
+RvLossArray::remove_loss_entry( RvHost &host,  uint32_t fd ) noexcept
+{
+  if ( fd < this->count ) {
+    RvPubLoss * loss = this->ptr[ fd ];
+    if ( loss != NULL ) {
+      this->ptr[ fd ] = NULL;
+      delete loss;
+      if ( --this->refs == 0 ) {
+        this->print_events( host );
+        this->clear();
+      }
+    }
+  }
+}
+
+void
+RvLossArray::print_events( RvHost &host ) noexcept
+{
+  if ( this->pub_events != 0 ) {
+    static const char *event[ 4 ] =
+      { "pub_start", "pub_cycle", "pub_restart", "msg_loss" };
+    fprintf( stderr, "rv svc %s loss events: %u\n", host.service,
+             this->pub_events );
+    for ( int i = 0; i < 4; i++ ) {
+      if ( this->pub_status[ i ] != 0 ) {
+        fprintf( stderr, " event %s: %u\n", event[ i ], this->pub_status[ i ] );
+        this->pub_status[ i ] = 0;
+      }
+    }
+    this->pub_events = 0;
+  }
+}
+
+void
+RvPubLoss::data_loss( RvHost &host,  EvPublish &pub,
+                      const char *pub_host_id ) noexcept
+{
+  if ( pub.pub_status <= EV_MAX_LOSS ) /* if message loss */
+    host.loss_array.pub_status[ 3 ] += pub.pub_status;
+  else
+    host.loss_array.pub_status[ pub.pub_status & EV_MAX_LOSS ]++; /* other ev */
+
+  uint32_t msg_loss = pub.pub_status;
+  if ( msg_loss == EV_PUB_RESTART )
+    msg_loss = 1; /* not sure how many lost */
+  if ( msg_loss <= EV_MAX_LOSS ) { /* if message loss */
+    host.stat.idl += msg_loss;
+
+    if ( this->loss_queue == NULL )
+      this->loss_queue =
+        new ( ::malloc( sizeof( RvDataLossQueue ) ) ) RvDataLossQueue();
+
+    const char * sub;
+    size_t       sublen;
+    RouteLoc     loc;
+    RvDataLossElem * el;
+
+    sub    = pub.subject;
+    sublen = pub.subject_len;
+
+    if ( host.has_service_prefix ) {
+      sublen -= host.service_len + 2;
+      sub    += host.service_len + 2;
+    }
+    el = this->loss_queue->tab.upsert( pub.subj_hash, sub, sublen, loc );
+    if ( loc.is_new ) {
+      el->msg_loss     = msg_loss;
+      el->pub_host     = pub.pub_host;
+      el->pub_host_id  = pub_host_id;
+      el->pub_msg_loss = 0;
+    }
+    else {
+      el->msg_loss   += msg_loss;
+      el->pub_host    = pub.pub_host;
+      el->pub_host_id = pub_host_id;
+    }
+
+    if ( host.loss_array.pub_events++ == 0 )
+      host.send_inbound_data_loss( *this );
+  }
+}
+
+bool
+RvHost::pub_inbound_data_loss( void ) noexcept
+{
+  bool one = false;
+  for ( size_t i = 0; i < this->loss_array.count; i++ ) {
+    RvPubLoss * loss = this->loss_array.ptr[ i ];
+    if ( loss != NULL ) {
+      if ( this->send_inbound_data_loss( *loss ) )
+        one = true;
+      else
+        this->loss_array.remove_loss_entry( *this, i );
+    }
+  }
+  return one;
+}
+
+bool
+RvHost::send_inbound_data_loss( RvPubLoss &loss ) noexcept
+{
+  RvDataLossElem * el;
+  RouteLoc loc;
+  if ( loss.loss_queue == NULL )
+    return false;
+
+  const char * sub[ 9 ];
+  size_t       sublen[ 9 ];
+  uint32_t     msg_loss[ 9 ],
+               sub_cnt      = 0,
+               extra_sublen = 0,
+               pub_host     = 0;
+  uint64_t     total_loss   = 0;
+  char         pub_host_ip[ 32 ];
+  size_t       pub_host_ip_len = 0;
+  const char * pub_host_id  = NULL;
+  size_t       pub_host_id_len = 0;
+
+  sub[ 0 ]      = NULL;
+  sublen[ 0 ]   = 0;
+  msg_loss[ 0 ] = 0;
+  for ( el = loss.loss_queue->tab.first( loc ); el != NULL;
+        el = loss.loss_queue->tab.next( loc ) ) {
+    if ( el->pub_msg_loss != el->msg_loss &&
+         ( el->pub_host == pub_host || pub_host == 0 ) ) {
+      uint32_t loss = el->msg_loss - el->pub_msg_loss;
+      if ( sub_cnt < 9 ) {
+        sub[ sub_cnt ]      = el->value;
+        sublen[ sub_cnt ]   = el->len;
+        msg_loss[ sub_cnt ] = loss;
+        extra_sublen       += el->len;
+      }
+      sub_cnt++;
+      total_loss += loss;
+      el->pub_msg_loss = el->msg_loss;
+      pub_host = el->pub_host;
+      pub_host_id = el->pub_host_id;
+      pub_host_id_len = ( pub_host_id == NULL ? 0 : ::strlen( pub_host_id ) );
+    }
+  }
+  if ( total_loss == 0 ) {
+    delete loss.loss_queue;
+    loss.loss_queue = NULL;
+    return false;
+  }
+  pub_host_ip_len = RvMcast::ip4_string( pub_host, pub_host_ip );
+
+  const char * sys_sub    = this->dataloss_inbound_sub;
+  const size_t sys_sublen = this->dataloss_inbound_len;
+  MDMsgMem  mem;
+  uint8_t * b;
+  size_t    size,
+            blen;
+  uint32_t  extra_sub = ( sub_cnt < 9 ? sub_cnt : 9 );
+
+  blen = extra_sublen + extra_sub * 32 + pub_host_id_len + 512;
+  b    = (uint8_t *) mem.make( blen );
+
+  RvMsgWriter rvmsg( b, blen );
+
+  rvmsg.append_string( SARG( "ADV_CLASS" ), SARG( "ERROR" ) );
+  rvmsg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
+  rvmsg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.INBOUND.BCAST" ) );
+  rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost msgs" ) );
+  rvmsg.append_string( SARG( "host" ), pub_host_ip, pub_host_ip_len + 1 );
+  if ( pub_host_id_len != 0 )
+    rvmsg.append_string( SARG( "hostid" ), pub_host_id, pub_host_id_len + 1 );
+  rvmsg.append_uint( SARG( "lost" ), (uint32_t) ( total_loss < 0x7fffffffU ?
+    (uint32_t) total_loss : 0x7fffffffU ) );
+  rvmsg.append_uint( SARG( "sub_cnt" ), sub_cnt );
+  for ( uint32_t i = 0; i < extra_sub; i++ ) {
+    static const char *sub1[ 9 ] = { "sub1", "sub2", "sub3", "sub4",
+                                     "sub5", "sub6", "sub7", "sub8", "sub9" };
+    static const char *lost1[ 9 ] = { "lost1", "lost2", "lost3", "lost4",
+                                  "lost5", "lost6", "lost7", "lost8", "lost9" };
+    rvmsg.append_string( sub1[ i ], 5, sub[ i ], sublen[ i ] );
+    rvmsg.append_uint( lost1[ i ], 6, msg_loss[ i ] );
+  }
+  if ( this->ipport != 0 )
+    rvmsg.append_ipdata( SARG( "scid" ), this->ipport );
+  size = rvmsg.update_hdr();
+
+  EvPublish pub( sys_sub, sys_sublen, NULL, 0, rvmsg.buf, size,
+                 this->sub_route, this->fd, this->dataloss_inbound_hash,
+                 RVMSG_TYPE_ID, 'p' );
+  this->sub_route.forward_to( pub, loss.sock->fd );
+  return true;
 }
 
 void
@@ -354,6 +660,13 @@ RvHost::start_network( const RvMcast &mc,  const RvHostNet &hn ) noexcept
       return HOST_OK;
     return ERR_SAME_SVC_TWO_NETS;
   }
+  this->zero_stats( kv_current_realtime_ns() );
+  return this->copy_network( mc, hn );
+}
+
+int
+RvHost::copy_network( const RvMcast &mc,  const RvHostNet &hn ) noexcept
+{
   if ( ! this->copy( hn ) )
     return ERR_BAD_PARAMETERS;
   if ( rv_debug )
@@ -371,7 +684,6 @@ RvHost::start_network( const RvMcast &mc,  const RvHostNet &hn ) noexcept
     this->host_ip = mc.fake_ip;
     q = (const uint8_t *) (const void *) &mc.fake_ip;
   }
-  this->zero_stats( kv_current_realtime_ns() );
   this->mcast.copy( mc );
   for ( int k = 0; k < 8; k += 2 ) {
     this->session_ip[ k ] = hexchar2( ( q[ k/2 ] >> 4 ) & 0xf );
@@ -574,26 +886,31 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
       uint64_t s = ( now - host.start_stamp ) / 1000000000;
       msg.append_uint( SARG( "up" ), (uint32_t) s );
     }
-    if ( ( flags & ADV_MS ) != 0 )
-      msg.append_uint( SARG( "ms" ), (uint64_t) host.ms );
-    if ( ( flags & ADV_BS ) != 0 )
-      msg.append_uint( SARG( "bs" ), (uint64_t) host.bs );
-    if ( ( flags & ADV_MR ) != 0 )
-      msg.append_uint( SARG( "mr" ), (uint64_t) host.mr );
-    if ( ( flags & ADV_BR ) != 0 )
-      msg.append_uint( SARG( "br" ), (uint64_t) host.br );
-    if ( ( flags & ADV_PS ) != 0 )
-      msg.append_uint( SARG( "ps" ), (uint64_t) host.ps );
-    if ( ( flags & ADV_PR ) != 0 )
-      msg.append_uint( SARG( "pr" ), (uint64_t) host.pr );
-    if ( ( flags & ADV_RX ) != 0 )
-      msg.append_uint( SARG( "rx" ), (uint64_t) host.rx );
-    if ( ( flags & ADV_PM ) != 0 )
-      msg.append_uint( SARG( "pm" ), (uint64_t) host.pm );
-    if ( ( flags & ADV_IDL ) != 0 )
-      msg.append_uint( SARG( "idl" ), (uint64_t) host.idl );
-    if ( ( flags & ADV_ODL ) != 0 )
-      msg.append_uint( SARG( "odl" ), (uint64_t) host.odl );
+    if ( ( flags & ADV_STATS ) != 0 ) {
+      host.stat.time_ns = now;
+      host.previous_stat[ 1 ].copy( host.previous_stat[ 0 ] );
+      host.previous_stat[ 0 ].copy( host.stat );
+      if ( ( flags & ADV_MS ) != 0 )
+        msg.append_uint( SARG( "ms" ), host.stat.ms );
+      if ( ( flags & ADV_BS ) != 0 )
+        msg.append_uint( SARG( "bs" ), host.stat.bs );
+      if ( ( flags & ADV_MR ) != 0 )
+        msg.append_uint( SARG( "mr" ), host.stat.mr );
+      if ( ( flags & ADV_BR ) != 0 )
+        msg.append_uint( SARG( "br" ), host.stat.br );
+      if ( ( flags & ADV_PS ) != 0 )
+        msg.append_uint( SARG( "ps" ), host.stat.ps );
+      if ( ( flags & ADV_PR ) != 0 )
+        msg.append_uint( SARG( "pr" ), host.stat.pr );
+      if ( ( flags & ADV_RX ) != 0 )
+        msg.append_uint( SARG( "rx" ), host.stat.rx );
+      if ( ( flags & ADV_PM ) != 0 )
+        msg.append_uint( SARG( "pm" ), host.stat.pm );
+      if ( ( flags & ADV_IDL ) != 0 )
+        msg.append_uint( SARG( "idl" ), host.stat.idl );
+      if ( ( flags & ADV_ODL ) != 0 )
+        msg.append_uint( SARG( "odl" ), host.stat.odl );
+    }
     if ( ( flags & ADV_IPPORT ) != 0 && host.ipport != 0 )
       msg.append_ipdata( SARG( "ipport" ), host.ipport );
     if ( ( flags & ADV_SERVICE ) != 0 )
@@ -634,11 +951,21 @@ RvHost::send_host_start( EvRvService *svc ) noexcept
 }
 
 void
-RvHost::send_session_start( EvRvService *svc ) noexcept
+RvHost::send_session_start( EvRvService &svc ) noexcept
 {
-  this->send_session_start( svc->userid, svc->userid_len,
-                            svc->session, svc->session_len );
-  svc->svc_state |= EvRvService::SENT_SESSION_START;
+  this->send_session_start( svc.userid, svc.userid_len,
+                            svc.session, svc.session_len );
+  svc.svc_state |= EvRvService::SENT_SESSION_START;
+}
+
+void
+RvHost::send_session_start( EvSocket &sock ) noexcept
+{
+  char   userid[ MAX_USERID_LEN ],
+         session[ MAX_SESSION_LEN ];
+  size_t userid_len  = sock.get_userid( userid ),
+         session_len = sock.get_session( NULL, 0, session );
+  this->send_session_start( userid, userid_len, session, session_len );
 }
 
 void
@@ -660,11 +987,23 @@ RvHost::send_host_stop( EvRvService *svc ) noexcept
 }
 
 void
-RvHost::send_session_stop( EvRvService *svc ) noexcept
+RvHost::send_session_stop( EvRvService &svc ) noexcept
 {
-  this->send_session_stop( svc->userid, svc->userid_len,
-                           svc->session, svc->session_len );
-  svc->svc_state |= EvRvService::SENT_SESSION_STOP;
+  this->send_session_stop( svc.userid, svc.userid_len,
+                           svc.session, svc.session_len );
+  svc.svc_state |= EvRvService::SENT_SESSION_STOP;
+  this->loss_array.remove_loss_entry( *this, svc.fd );
+}
+
+void
+RvHost::send_session_stop( EvSocket &sock ) noexcept
+{
+  char   userid[ MAX_USERID_LEN ],
+         session[ MAX_SESSION_LEN ];
+  size_t userid_len  = sock.get_userid( userid ),
+         session_len = sock.get_session( NULL, 0, session );
+  this->send_session_stop( userid, userid_len, session, session_len );
+  this->loss_array.remove_loss_entry( *this, sock.fd );
 }
 
 void
@@ -678,11 +1017,11 @@ RvHost::send_session_stop( const char *user,  size_t user_len,
 }
 
 void
-RvHost::send_listen_start( EvRvService *svc,  const char *sub,  size_t sublen,
+RvHost::send_listen_start( EvRvService &svc,  const char *sub,  size_t sublen,
                            const char *rep,  size_t replen,
                            uint32_t refcnt ) noexcept
 {
-  this->send_listen_start( svc->session, svc->session_len, sub, sublen,
+  this->send_listen_start( svc.session, svc.session_len, sub, sublen,
                            rep, replen, refcnt );
 }
 
@@ -701,10 +1040,10 @@ RvHost::send_listen_start( const char *session,  size_t session_len,
 }
 
 void
-RvHost::send_listen_stop( EvRvService *svc,  const char *sub,  size_t sublen,
+RvHost::send_listen_stop( EvRvService &svc,  const char *sub,  size_t sublen,
                            uint32_t refcnt ) noexcept
 {
-  this->send_listen_stop( svc->session, svc->session_len, sub, sublen,
+  this->send_listen_stop( svc.session, svc.session_len, sub, sublen,
                           refcnt );
 }
 
