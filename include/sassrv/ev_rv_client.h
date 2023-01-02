@@ -96,13 +96,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
     if ( off >= sub_len || sub[ off ] < '0' || sub[ off ] > '9' ||
          ::memcmp( sub, this->control, off ) != 0 )
       return 0;
-    uint64_t which = sub[ off ] - '0';
-    while ( ++off < sub_len ) {
-      if ( sub[ off ] < '0' || sub[ off ] > '9' )
-        return 0;
-      which = which * 10 + ( sub[ off ] - '0' );
-    }
-    return which;
+    return kv::string_to_uint64( &sub[ off ], sub_len - off );
   }
   static void trace_msg( char dir,  void *msg, size_t msglen ) noexcept;
   void send_vers( void ) noexcept;

@@ -310,12 +310,13 @@ struct RvPatternMap {
 static const uint32_t RV_STATUS_IVAL = 90; /* HOST.STATUS interval */
 
 enum RvStatus {
-  RV_OK        = 0,
-  ERR_RV_MSG   = 1, /* bad msg format */
-  ERR_RV_REF   = 2, /* bad data reference */
-  ERR_RV_MTYPE = 3, /* bad msg mtype field */
-  ERR_RV_SUB   = 4, /* bad msg sub field */
-  ERR_RV_DATA  = 5  /* bad msg data field */
+  RV_OK            = 0,
+  ERR_RV_MSG       = 1, /* bad msg format */
+  ERR_RV_REF       = 2, /* bad data reference */
+  ERR_RV_MTYPE     = 3, /* bad msg mtype field */
+  ERR_RV_SUB       = 4, /* bad msg sub field */
+  ERR_RV_DATA      = 5, /* bad msg data field */
+  ERR_BACKPRESSURE = 6
 };
 #define RV_STATUS_STRINGS { "ok", "bad msg format", "bad rv reference", \
                             "bad rv mtype", "bad rv subject", "bad rv data" }
@@ -372,16 +373,6 @@ struct RvMsgIn {
     sz += suflen; str[ sz ] = '\0';
     return sz;
   }
-  void make_pre_subject( char *&str,  size_t &sz,  char *suf, size_t suflen ) {
-    if ( this->prefix_len > 0 ) {
-      str = (char *) this->mem.make( suflen + this->prefix_len + 1 );
-      sz  = this->cat_pre_subject( str, suf, suflen );
-    }
-    else {
-      str = suf;
-      sz  = suflen;
-    }
-  }
   bool subject_to_string( const uint8_t *buf,  size_t buflen ) noexcept;
   int unpack( void *msgbuf,  size_t msglen ) noexcept;
   void print( int status,  void *m,  size_t len ) noexcept;
@@ -407,7 +398,7 @@ struct RvIDLQueue {
   }
 };
 
-struct EvRvService : public kv::EvConnection {
+struct EvRvService : public kv::EvConnection, public kv::BPData {
   void * operator new( size_t, void *ptr ) { return ptr; }
   enum RvState {
     VERS_RECV          = 0, /* handshake version */
@@ -417,7 +408,9 @@ struct EvRvService : public kv::EvConnection {
     IS_RV_SESSION      = 8, /* each session is distinct, based on the conn */
     SENT_HOST_START    = 16, /* sent a host start message */
     SENT_SESSION_START = 32, /* sent a session start message */
-    SENT_SESSION_STOP  = 64  /* sent a session stop message */
+    SENT_SESSION_STOP  = 64, /* sent a session stop message */
+    FWD_BACKPRESSURE   = 128,/* backpressure on forward msg */
+    TIMER_ACTIVE       = 256 /* backpressure on forward msg */
   };
   static const size_t MAX_CONTROL_LEN = 64,
                       MAX_GOB_LEN     = 16;
@@ -445,8 +438,6 @@ struct EvRvService : public kv::EvConnection {
                sent_rvdconn;
   RvIDLQueue * loss_queue;
   uint64_t     timer_id;       /* timerid unique for this service */
-  uint32_t     pub_events,
-               pub_status[ 4 ]; /* loss, start, cycle, restart */
   md::MDMsgMem spc;
 
   EvRvService( kv::EvPoll &p,  const uint8_t t,  EvRvListen &l )
@@ -475,9 +466,6 @@ struct EvRvService : public kv::EvConnection {
       delete this->loss_queue;
       this->loss_queue = NULL;
     }
-    this->pub_events = 0;
-    for ( int i = 0; i < 4; i++ )
-      this->pub_status[ i ] = 0;
   }
   void send_info( bool agree ) noexcept; /* info rec during connection start */
   int dispatch_msg( void *msg,  size_t msg_len ) noexcept; /* route msgs */
@@ -487,7 +475,8 @@ struct EvRvService : public kv::EvConnection {
   void add_sub( void ) noexcept;     /* add subscription ('L') */
   void rem_sub( void ) noexcept;     /* unsubscribe subject ('C') */
   void rem_all_sub( void ) noexcept; /* when client disconnects, this clears */
-  bool fwd_pub( void ) noexcept;     /* fwd a message from client to network */
+  enum { RV_FLOW_GOOD = 0, RV_FLOW_BACKPRESSURE = 1, RV_FLOW_STALLED = 2 };
+  int fwd_pub( void ) noexcept;     /* fwd a message from client to network */
   /* forward a message from network to client */
   bool fwd_msg( kv::EvPublish &pub ) noexcept;
   static bool convert_json( md::MDMsgMem &spc,  void *&msg,
@@ -512,6 +501,7 @@ struct EvRvService : public kv::EvConnection {
                               char session[ MAX_SESSION_LEN ] ) noexcept;
   virtual size_t get_subscriptions( kv::SubRouteDB &subs, kv::SubRouteDB &pats,
                                     int &pattern_fmt ) noexcept;
+  virtual void on_write_ready( void ) noexcept;
 };
 
 #define is_rv_debug kv_unlikely( rv_debug != 0 )

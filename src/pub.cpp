@@ -8,6 +8,10 @@
 #include <raimd/cfile.h>
 #include <raimd/app_a.h>
 #include <raimd/enum_def.h>
+#include <raimd/tib_msg.h>
+#include <raimd/tib_sass_msg.h>
+#include <raimd/json_msg.h>
+#include <raimd/rv_msg.h>
 #include <raikv/ev_publish.h>
 
 using namespace rai;
@@ -21,41 +25,50 @@ static const int      DICT_SUBJ_LEN   = sizeof( DICT_SUBJ ) - 1;
 static const uint64_t DICT_INBOX_ID   = 2, /* _INBOX.<session>.2   = dictionary*/
                       SUB_INBOX_BASE  = 3; /* _INBOX.<session>.3++ = sub[] */
 static const uint32_t DICT_TIMER_SECS = 3,
-                      RATE_TIMER_SECS = 1;
+                      PUB_TIMER_USECS = 1;
 static const uint64_t FIRST_TIMER_ID  = 1, /* first dict request */
                       SECOND_TIMER_ID = 2, /* second dict request */
-                      RATE_TIMER_ID   = 3; /* rate timer */
+                      PUB_TIMER_ID    = 3;
 
 /* rv client callback closure */
 struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
-                        public EvTimerCallback {
+                        public EvTimerCallback, public BPData {
   EvPoll      & poll;            /* poll loop data */
   EvRvClient  & client;          /* connection to rv */
   MDDict      * dict;            /* dictinary to use for decoding msgs */
   const char ** sub;             /* subject strings */
-  size_t        sub_count;       /* count of sub[] */
-  uint64_t      msg_count,
-                last_count,
-                last_time;
+  char        * sub_buf;
+  size_t        sub_n,
+                sub_count,       /* count of sub[] */
+                pub_count,
+                current_pub,
+                total_pub,
+                i, j, k,
+                max_len;
   bool          no_dictionary,   /* don't request dictionary */
-                is_subscribed,   /* sub[] are subscribed */
                 have_dictionary, /* set when dict request succeeded */
-                dump_hex,        /* print hex of message data */
-                show_rate;       /* show rate of messages recvd */
+                use_json,
+                use_rv,
+                use_tibmsg,
+                dump_hex;
 
-  RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t cnt,
-                  bool nodict,  bool hex,  bool rate )
-    : poll( p ), client( c ), dict( 0 ), sub( s ), sub_count( cnt ),
-      msg_count( 0 ), last_count( 0 ), last_time( 0 ),
-      no_dictionary( nodict ), is_subscribed( false ), have_dictionary( false ),
-      dump_hex( hex ), show_rate( rate ) {}
+  RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t n,
+                  size_t cnt,  size_t pcnt,  bool nd,  bool uj,  bool ur,
+                  bool ut,  bool hex )
+    : poll( p ), client( c ), dict( 0 ), sub( s ), sub_buf( 0 ), sub_n( n ),
+      sub_count( cnt ), pub_count( pcnt ), current_pub( 0 ),
+      total_pub( n * cnt * pcnt ), i( 0 ), j( 0 ), k( 0 ), max_len( 0 ),
+      no_dictionary( nd ), have_dictionary( false ),
+      use_json( uj ), use_rv( ur ), use_tibmsg( ut ), dump_hex( hex ) {
+    this->init_subjects();
+    this->bp_flags  = BP_FORWARD | BP_NOTIFY;
+  }
 
+  void init_subjects( void ) noexcept;
   /* after CONNECTED message */
   virtual void on_connect( EvSocket &conn ) noexcept;
   /* start sub[] with inbox reply */
-  void start_subscriptions( void ) noexcept;
-  /* when signalled, unsubscribe */
-  void on_unsubscribe( void ) noexcept;
+  void run_publishers( void ) noexcept;
   /* when disconnected */
   virtual void on_shutdown( EvSocket &conn,  const char *err,
                             size_t err_len ) noexcept;
@@ -66,7 +79,29 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
   /* message from network */
   virtual bool on_msg( EvPublish &pub ) noexcept;
+  /* flush send, ready to send more */
+  virtual void on_write_ready( void ) noexcept;
 };
+
+void
+RvDataCallback::init_subjects( void ) noexcept
+{
+  size_t len = 0;
+  for ( size_t i = 0; i < this->sub_n; i++ ) {
+    const char *s = this->sub[ i ];
+    if ( ::strstr( s, "%d" ) == NULL && this->sub_count > 1 ) {
+      size_t x   = ::strlen( s );
+      char * tmp = (char *) ::malloc( x + 4 );
+      ::memcpy( tmp, s, x );
+      ::memcpy( &tmp[ x ], ".%d", 4 );
+      s = tmp;
+      this->sub[ i ] = s;
+    }
+    len = max_int<size_t>( ::strlen( s ), len );
+  }
+  this->sub_buf = (char *) ::malloc( len + 24 );
+  this->max_len = len + 24;
+}
 
 /* called after daemon responds with CONNECTED message */
 void
@@ -84,45 +119,123 @@ RvDataCallback::on_connect( EvSocket &conn ) noexcept
       return;
     }
   }
-  this->start_subscriptions();
+  this->run_publishers();
+}
+
+template< class Writer >
+size_t
+write_msg( Writer &writer,  const char *sub,  size_t sublen,
+           size_t seqno ) noexcept
+{
+  static char msg_type[]   = "MSG_TYPE",
+              seq_no[]     = "SEQ_NO",
+              rec_status[] = "REC_STATUS",
+              symbol[]     = "SYMBOL",
+              bid_size[]   = "BIDSIZE",
+              ask_size[]   = "ASKSIZE",
+              bid[]        = "BID",
+              ask[]        = "ASK",
+              timact[]     = "TIMACT",
+              trade_date[] = "TRADE_DATE";
+  MDDecimal dec;
+  MDTime time;
+  MDDate date;
+
+  short type = ( seqno == 0 ? 8 : 1 );
+  writer.append_int( msg_type, sizeof( msg_type ),  type );
+  writer.append_int( seq_no, sizeof( seq_no ),  seqno );
+  writer.append_int( rec_status, sizeof( rec_status ), (short) 0 );
+  writer.append_string( symbol, sizeof( symbol ), sub, sublen + 1 );
+  writer.append_real( bid_size, sizeof( bid_size ), 10.0 );
+  writer.append_real( ask_size, sizeof( ask_size ), 20.0 );
+
+  dec.ival = 17500;
+  dec.hint = MD_DEC_LOGn10_3; /* / 1000 */
+  writer.append_decimal( bid, sizeof( bid ), dec );
+
+  dec.ival = 17750;
+  dec.hint = MD_DEC_LOGn10_3; /* / 1000 */
+  writer.append_decimal( ask, sizeof( ask ), dec );
+
+  time.hour       = 13;
+  time.minute     = 15;
+  time.sec        = 0;
+  time.resolution = MD_RES_MINUTES;
+  time.fraction   = 0;
+  writer.append_time( timact, sizeof( timact ), time );
+
+  date.year = 2019;
+  date.mon  = 4;
+  date.day  = 9;
+  writer.append_date( trade_date, sizeof( trade_date ), date );
+
+  return writer.update_hdr();
 }
 
 /* start subscriptions from command line, inbox number indexes the sub[] */
 void
-RvDataCallback::start_subscriptions( void ) noexcept
+RvDataCallback::run_publishers( void ) noexcept
 {
-  if ( this->is_subscribed ) /* subscribing multiple times is allowed, */
-    return;                  /* but must unsub multiple times as well */
-  for ( size_t i = 0; i < this->sub_count; i++ ) {
-    char     inbox[ MAX_RV_INBOX_LEN ]; /* _INBOX.<session>.3 + <sub> */
-    uint16_t inbox_len = this->client.make_inbox( inbox, i + SUB_INBOX_BASE );
-    size_t   sub_len   = ::strlen( this->sub[ i ] );
-    printf( "Subscribe \"%.*s\", reply \"%.*s\"\n",
-            (int) sub_len, this->sub[ i ], (int) inbox_len, inbox );
-    /* subscribe with inbox reply */
-    this->client.subscribe( this->sub[ i ], sub_len, inbox, inbox_len );
+  char     msg[ 1024 ];
+  size_t   msg_len;
+  uint32_t msg_enc = 0;
+  char   * s;
+  size_t   slen;
+
+  if ( this->poll.quit != 0 )
+    return;
+  while ( this->current_pub++ < this->total_pub && this->poll.quit == 0 ) {
+    s    = this->sub_buf;
+    slen = ::snprintf( s, this->max_len, this->sub[ this->i ], (int) this->j );
+
+    if ( this->use_json ) {
+      JsonMsgWriter jsonmsg( msg, sizeof( msg ) );
+      msg_len = write_msg<JsonMsgWriter>( jsonmsg, s, slen, this->k );
+      msg_enc = JSON_TYPE_ID;
+    }
+    else if ( this->use_rv ) {
+      RvMsgWriter rvmsg( msg, sizeof( msg ) );
+      msg_len = write_msg<RvMsgWriter>( rvmsg, s, slen, this->k );
+      msg_enc = RVMSG_TYPE_ID;
+    }
+    else if ( this->use_tibmsg || ! this->have_dictionary ) {
+      TibMsgWriter tibmsg( msg, sizeof( msg ) );
+      msg_len = write_msg<TibMsgWriter>( tibmsg, s, slen, this->k );
+      msg_enc = TIBMSG_TYPE_ID;
+    }
+    else {
+      TibSassMsgWriter tibmsg( this->dict, msg, sizeof( msg ) );
+      msg_len = write_msg<TibSassMsgWriter>( tibmsg, s, slen, this->k );
+      msg_enc = TIB_SASS_TYPE_ID;
+    }
+    if ( this->dump_hex ) {
+      MDOutput mout;
+      mout.print_hex( msg, msg_len );
+    }
+    if ( ++this->i == this->sub_n ) {
+      this->i = 0;
+      if ( ++this->j == this->sub_count ) {
+        this->j = 0;
+        this->k++;
+      }
+    }
+    EvPublish pub( s, slen, NULL, 0, msg, msg_len,
+                   this->client.sub_route, 0, 0, msg_enc, 'p' );
+    if ( ! this->client.publish( pub ) ) {
+      /* wait for ready */
+      if ( this->has_back_pressure( this->poll, this->client.fd ) )
+        return;
+    }
   }
-  if ( this->show_rate ) {
-    this->last_time = this->poll.current_coarse_ns();
-    this->poll.timer.add_timer_seconds( *this, RATE_TIMER_SECS,
-                                        RATE_TIMER_ID, 0 );
-  }
-  this->is_subscribed = true;
+  if ( this->poll.quit == 0 )
+    this->poll.quit = 1;
+  return;
 }
 
-/* if ctrl-c, program signalled, unsubscribe the subs */
 void
-RvDataCallback::on_unsubscribe( void ) noexcept
+RvDataCallback::on_write_ready( void ) noexcept
 {
-  if ( ! this->is_subscribed )
-    return;
-  this->is_subscribed = false;
-  for ( size_t i = 0; i < this->sub_count; i++ ) {
-    size_t sub_len = ::strlen( this->sub[ i ] );
-    printf( "Unsubscribe \"%.*s\"\n", (int) sub_len, this->sub[ i ] );
-    /* unsubscribe sub */
-    this->client.unsubscribe( this->sub[ i ], sub_len );
-  }
+  this->run_publishers();
 }
 
 /* when dict message is replied */
@@ -160,16 +273,6 @@ RvDataCallback::send_dict_request( void ) noexcept
 bool
 RvDataCallback::timer_cb( uint64_t timer_id,  uint64_t ) noexcept
 {
-  if ( timer_id == RATE_TIMER_ID ) {
-    uint64_t ival_ns = this->poll.now_ns - this->last_time,
-             count   = this->msg_count - this->last_count;
-    if ( this->last_count < this->msg_count ) {
-      printf( "%.2f\n", (double) count * 1000000000.0 / (double) ival_ns );
-    }
-    this->last_time += ival_ns;
-    this->last_count += count;
-    return true;
-  }
   if ( this->have_dictionary )
     return false;
   if ( timer_id == FIRST_TIMER_ID ) {
@@ -179,8 +282,11 @@ RvDataCallback::timer_cb( uint64_t timer_id,  uint64_t ) noexcept
                                         SECOND_TIMER_ID, 0 );
   }
   else if ( timer_id == SECOND_TIMER_ID ) {
-    printf( "Dict request timeout again, starting subs\n" );
-    this->start_subscriptions();
+    printf( "Dict request timeout again, starting publisher\n" );
+    this->run_publishers();
+  }
+  else { /* timer_id == PUB_TIMER_ID */
+    this->run_publishers();
   }
   return false; /* return false to disable recurrent timer */
 }
@@ -209,17 +315,13 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
   if ( which != 0 ) {
     size_t idx = which - SUB_INBOX_BASE;
     if ( which >= SUB_INBOX_BASE && idx < this->sub_count ) {
-      if ( this->show_rate ) {
-        this->msg_count++;
-        return true;
-      }
       printf( "## %s: (inbox: %.*s)\n", this->sub[ idx ],
                (int) pub.subject_len, pub.subject );
     }
     else if ( which == DICT_INBOX_ID ) {
       printf( "Received dictionary message\n" );
       this->on_dict( m );
-      this->start_subscriptions();
+      this->run_publishers();
       return true;
     }
     else {
@@ -227,10 +329,6 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
     }
   }
   else { /* not inbox subject */
-    if ( this->show_rate ) {
-      this->msg_count++;
-      return true;
-    }
     if ( pub.reply_len != 0 )
       printf( "## %.*s (reply: %.*s):\n", (int) pub.subject_len, pub.subject,
               (int) pub.reply_len, (const char *) pub.reply );
@@ -268,27 +366,35 @@ main( int argc, const char *argv[] )
 {
   SignalHandler sighndl;
   int x = 1;
-  const char * daemon  = get_arg( x, argc, argv, 1, "-d", "-daemon", "tcp:7500" ),
-             * network = get_arg( x, argc, argv, 1, "-n", "-network", ""),
-             * service = get_arg( x, argc, argv, 1, "-s", "-service", "7500" ),
-             * path    = get_arg( x, argc, argv, 1, "-c", "-cfile", NULL ),
-             * nodict  = get_arg( x, argc, argv, 0, "-x", "-nodict", NULL ),
-             * dump    = get_arg( x, argc, argv, 0, "-e", "-hex", NULL ),
-             * rate    = get_arg( x, argc, argv, 0, "-r", "-rate", NULL ),
-             * help    = get_arg( x, argc, argv, 0, "-h", "-help", 0 );
+  const char * daemon     = get_arg( x, argc, argv, 1, "-d", "-daemon", "tcp:7500" ),
+             * network    = get_arg( x, argc, argv, 1, "-n", "-network", ""),
+             * service    = get_arg( x, argc, argv, 1, "-s", "-service", "7500" ),
+             * path       = get_arg( x, argc, argv, 1, "-c", "-cfile", NULL ),
+             * pub_count  = get_arg( x, argc, argv, 1, "-p", "-pub", "1" ),
+             * sub_count  = get_arg( x, argc, argv, 1, "-u", "-sub", "1" ),
+             * nodict     = get_arg( x, argc, argv, 0, "-x", "-nodict", NULL ),
+             * dump       = get_arg( x, argc, argv, 0, "-e", "-hex", NULL ),
+             * use_json   = get_arg( x, argc, argv, 0, "-j", "-json", NULL ),
+             * use_rv     = get_arg( x, argc, argv, 0, "-r", "-rv", NULL ),
+             * use_tibmsg = get_arg( x, argc, argv, 0, "-m", "-tibmsg", NULL ),
+             * help       = get_arg( x, argc, argv, 0, "-h", "-help", 0 );
   int first_sub = x, idle_count = 0;
 
   if ( help != NULL ) {
   help:;
     fprintf( stderr,
  "%s [-d daemon] [-n network] [-s service] [-c cfile_path] [-x] [-e] subject ...\n"
-             "  -d daemon  = daemon port to connect\n"
+             "  -d daemon  = daemon port to connect (tcp:7500)\n"
              "  -n network = network\n"
-             "  -s service = service\n"
+             "  -s service = service (7500)\n"
              "  -c cfile   = if loading dictionary from files\n"
+             "  -p count   = number of times to publish a record (1)\n"
+             "  -u count   = number of subjects to publish (1)\n"
              "  -x         = don't load a dictionary\n"
              "  -e         = show hex dump of messages\n"
-             "  -r         = show rate of messages\n"
+             "  -j         = publish json format\n"
+             "  -r         = publish rvmsg format\n"
+             "  -m         = publish tibmsg format\n"
              "  subject    = subject to subscribe\n", argv[ 0 ] );
     return 1;
   }
@@ -300,10 +406,20 @@ main( int argc, const char *argv[] )
   EvPoll poll;
   poll.init( 5, false );
 
+  bool nd = ( nodict     != NULL ),
+       uj = ( use_json   != NULL ),
+       ur = ( use_rv     != NULL ),
+       ut = ( use_tibmsg != NULL ),
+       du = ( dump       != NULL );
+  size_t sub_cnt = string_to_uint64( sub_count, ::strlen( sub_count ) ),
+         pub_cnt = string_to_uint64( pub_count, ::strlen( pub_count ) ),
+         n       = (size_t) ( argc - first_sub );
+
   EvRvClientParameters parm( daemon, network, service, 0 );
   EvRvClient           conn( poll );
-  RvDataCallback       data( poll, conn, &argv[ first_sub ], argc - first_sub,
-                             nodict != NULL, dump != NULL, rate != NULL );
+  RvDataCallback       data( poll, conn, &argv[ first_sub ], n,
+                             sub_cnt, pub_cnt,
+                             nd || uj || ur || ut, uj, ur, ut, du );
   /* load dictionary if present */
   if ( ! data.no_dictionary ) {
     if ( path != NULL || (path = ::getenv( "cfile_path" )) != NULL ) {
@@ -345,8 +461,6 @@ main( int argc, const char *argv[] )
     /* wait for network events */
     poll.wait( idle_count > 255 ? 100 : 0 );
     if ( sighndl.signaled ) {
-      if ( poll.quit == 0 )
-        data.on_unsubscribe();
       poll.quit++;
     }
   }

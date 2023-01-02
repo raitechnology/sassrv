@@ -144,9 +144,11 @@ void
 EvRvService::read( void ) noexcept
 {
   /* if host not started, wait for that event before reading pub/sub data */
-  if ( this->host_started || this->svc_state <= DATA_RECV ) {
-    this->EvConnection::read();
-    return;
+  if ( ! this->bp_in_list() ) {
+    if ( this->host_started || this->svc_state <= DATA_RECV ) {
+      this->EvConnection::read();
+      return;
+    }
   }
   this->pop3( EV_READ, EV_READ_HI, EV_READ_LO );
 }
@@ -203,24 +205,40 @@ void
 EvRvService::process( void ) noexcept
 {
   uint32_t buflen, msglen;
-  int      status = 0;
+  int      status = -1;
 
   /* state trasition from VERS_RECV -> INFO_RECV -> DATA_RECV */
   if ( this->svc_state >= DATA_RECV ) { /* main state */
   data_recv_loop:;
-    do {
+    for (;;) {
       buflen = this->len - this->off;
       if ( buflen < 8 )
         goto break_loop;
       msglen = get_u32<MD_BIG>( &this->recv[ this->off ] );
-      if ( buflen < msglen )
+      if ( buflen < msglen ) {
+        this->recv_need( msglen );
         goto break_loop;
+      }
       status = this->dispatch_msg( &this->recv[ this->off ], msglen );
-      this->off      += msglen;
-      this->msgs_recv++;
-      this->host->stat.br += msglen;
-      this->host->stat.mr++;
-    } while ( status == 0 );
+
+      if ( status == 0 ) {
+        this->off += msglen;
+        this->msgs_recv++;
+        this->host->stat.br += msglen;
+        this->host->stat.mr++;
+      }
+      else {
+        if ( status != ERR_BACKPRESSURE )
+          goto break_loop;
+        this->pop( EV_PROCESS );
+        this->pop3( EV_READ, EV_READ_LO, EV_READ_HI );
+      }
+      if ( ( this->svc_state & FWD_BACKPRESSURE ) != 0 ) {
+        if ( ! this->push_write_high() )
+          this->StreamBuf::reset();
+        return;
+      }
+    }
   }
   else { /* initial connection states */
     for (;;) {
@@ -246,10 +264,19 @@ EvRvService::process( void ) noexcept
   }
 break_loop:;
   this->pop( EV_PROCESS );
-  this->push_write();
-  if ( status != 0 )
+  if ( ! this->push_write() )
+    this->StreamBuf::reset();
+
+  if ( status > 0 )
     this->push( EV_CLOSE );
 }
+#if 0
+      if ( ( this->svc_state & TIMER_ACTIVE ) == 0 ) {
+        this->poll.timer.add_timer_micros( this->fd, 100, this->timer_id, 0 );
+        this->svc_state |= TIMER_ACTIVE;
+      }
+#endif
+
 #if 0
 #include <unistd.h>
 #include <fcntl.h>
@@ -287,7 +314,13 @@ EvRvService::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
     ::write( xfd[ this->fd ], &this->msgs_recv, 8 );
     ::write( xfd[ this->fd ], msgbuf, msglen );
 #endif
-    this->fwd_pub();
+    int flow = this->fwd_pub();
+    if ( flow == RV_FLOW_GOOD )
+      this->svc_state &= ~FWD_BACKPRESSURE;
+    else
+      this->svc_state |= FWD_BACKPRESSURE;
+    if ( flow == RV_FLOW_STALLED ) /* no progress yet, hold msg */
+      return ERR_BACKPRESSURE;
     return 0;
   }
   switch ( this->msg_in.mtype ) { /* publish */
@@ -304,6 +337,67 @@ EvRvService::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
     default:
       return -1;
   }
+}
+/* when a 'D' message is received from client, forward the message data,
+ * this also decapsulates the opaque data field and forwards the message
+ * with the correct message type attribute:
+ * old style { sub: FD.SEC.INST.EX, mtype: 'D', data: <message> }
+ * new style { sub: FD.SEC.INST.EX, mtype: 'D', data: { _data_ : <message> } }*/
+int
+EvRvService::fwd_pub( void ) noexcept
+{
+  void   * msg     = this->msg_in.data.fptr;
+  size_t   msg_len = this->msg_in.data.fsize;
+  uint32_t ftype   = this->msg_in.data.ftype;
+  char     reply_buf[ 256 ];
+
+/*  printf( "fwd %.*s\n", (int) sublen, sub );*/
+  if ( ftype == MD_MESSAGE || ftype == RVMSG_TYPE_ID ) {
+    ftype = RVMSG_TYPE_ID;
+    MDMsg * m = RvMsg::opaque_extract( (uint8_t *) msg, 8, msg_len, NULL,
+                                       &this->msg_in.mem );
+    if ( m != NULL ) {
+      ftype   = m->get_type_id();
+      msg     = &((uint8_t *) m->msg_buf)[ m->msg_off ];
+      msg_len = m->msg_end - m->msg_off;
+    }
+  }
+  else if ( ftype == MD_OPAQUE ) {
+    uint32_t ft = MDMsg::is_msg_type( msg, 0, msg_len, 0 );
+    if ( ft != 0 )
+      ftype = ft;
+  }
+  char   * sub,
+         * rep    = NULL;
+  size_t   sublen,
+           replen = 0;
+  uint32_t h;
+  this->msg_in.pre_subject( sub, sublen );
+  h = kv_crc_c( sub, sublen, 0 );
+  if ( this->msg_in.replylen > 0 ) {
+    size_t prelen = this->msg_in.prefix_len;
+    char * buf    = reply_buf;
+    rep    = this->msg_in.reply;
+    replen = this->msg_in.replylen;
+    if ( prelen > 0 ) {
+      if ( prelen + replen >= sizeof( reply_buf ) )
+        buf = this->msg_in.mem.str_make( prelen + replen + 1 );
+      replen = this->msg_in.cat_pre_subject( buf, rep, replen );
+      rep    = buf;
+    }
+  }
+  EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
+                 this->sub_route, this->fd, h, ftype, 'p' );
+  BPData * data = NULL;
+  if ( ( this->svc_state & FWD_BACKPRESSURE ) != 0 ) {
+    data = this;
+    this->bp_flags = ( this->bp_flags & ~BP_FORWARD ) | BP_NOTIFY;
+  }
+  if ( this->sub_route.forward_msg( pub, data ) )
+    return RV_FLOW_GOOD;
+  if ( ! this->bp_in_list() )
+    return RV_FLOW_BACKPRESSURE;
+  return RV_FLOW_STALLED;
 }
 /* match a field string in a message */
 static bool
@@ -522,9 +616,21 @@ EvRvService::send_stop( void ) noexcept
 }
 
 bool
-EvRvService::timer_expire( uint64_t,  uint64_t ) noexcept
+EvRvService::timer_expire( uint64_t tid,  uint64_t ) noexcept
 {
+  if ( tid == this->timer_id ) {
+    this->svc_state &= ~TIMER_ACTIVE;
+    this->push( EV_PROCESS );
+    this->idle_push( EV_READ_LO );
+  }
   return false;
+}
+
+void
+EvRvService::on_write_ready( void ) noexcept
+{
+  this->push( EV_PROCESS );
+  this->idle_push( EV_READ_LO );
 }
 
 uint8_t
@@ -759,48 +865,6 @@ EvRvService::rem_all_sub( void ) noexcept
     } while ( this->pat_tab.next( ppos ) );
   }
 }
-/* when a 'D' message is received from client, forward the message data,
- * this also decapsulates the opaque data field and forwards the message
- * with the correct message type attribute:
- * old style { sub: FD.SEC.INST.EX, mtype: 'D', data: <message> }
- * new style { sub: FD.SEC.INST.EX, mtype: 'D', data: { _data_ : <message> } }*/
-bool
-EvRvService::fwd_pub( void ) noexcept
-{
-  void   * msg     = this->msg_in.data.fptr;
-  size_t   msg_len = this->msg_in.data.fsize;
-  uint32_t ftype   = this->msg_in.data.ftype;
-
-/*  printf( "fwd %.*s\n", (int) sublen, sub );*/
-  if ( ftype == MD_MESSAGE || ftype == RVMSG_TYPE_ID ) {
-    ftype = RVMSG_TYPE_ID;
-    MDMsg * m = RvMsg::opaque_extract( (uint8_t *) msg, 8, msg_len, NULL,
-                                       &this->msg_in.mem );
-    if ( m != NULL ) {
-      ftype   = m->get_type_id();
-      msg     = &((uint8_t *) m->msg_buf)[ m->msg_off ];
-      msg_len = m->msg_end - m->msg_off;
-    }
-  }
-  else if ( ftype == MD_OPAQUE ) {
-    uint32_t ft = MDMsg::is_msg_type( msg, 0, msg_len, 0 );
-    if ( ft != 0 )
-      ftype = ft;
-  }
-  char   * sub,
-         * rep    = NULL;
-  size_t   sublen,
-           replen = 0;
-  uint32_t h;
-  this->msg_in.pre_subject( sub, sublen );
-  h = kv_crc_c( sub, sublen, 0 );
-  if ( this->msg_in.replylen > 0 )
-    this->msg_in.make_pre_subject( rep, replen, this->msg_in.reply,
-                                   this->msg_in.replylen );
-  EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
-                 this->sub_route, this->fd, h, ftype, 'p' );
-  return this->sub_route.forward_msg( pub );
-}
 /* a message from the network, forward if matched by a subscription only once
  * as it may match multiple wild subscriptions as well as a normal sub
  * each sub is looked up in order to increment the msg count */
@@ -865,25 +929,25 @@ EvRvService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
 bool
 EvRvService::fwd_msg( EvPublish &pub ) noexcept
 {
-  const char * sub     = pub.subject,
-             * reply   = (const char *) pub.reply;
-  size_t       sublen  = pub.subject_len,
-               replen  = pub.reply_len,
-               preflen = this->msg_in.prefix_len;
+  const char * sub    = pub.subject,
+             * reply  = (const char *) pub.reply;
+  size_t       sublen = pub.subject_len,
+               replen = pub.reply_len,
+               prelen = this->msg_in.prefix_len;
 
   uint8_t buf[ 2 * 1024 ], * b = buf;
   size_t  buf_len = sizeof( buf );
 
-  if ( sublen < preflen ) {
+  if ( sublen < prelen ) {
     fprintf( stderr, "sub %.*s is less than prefix (%u)\n", (int) sublen, sub,
-             (int) preflen );
+             (int) prelen );
     return true;
   }
-  sub = &sub[ preflen ];
-  sublen -= preflen;
-  if ( replen > preflen ) {
-    reply   = &reply[ preflen ];
-    replen -= preflen;
+  sub = &sub[ prelen ];
+  sublen -= prelen;
+  if ( replen > prelen ) {
+    reply   = &reply[ prelen ];
+    replen -= prelen;
   }
 
   if ( pub.pub_status != EV_PUB_NORMAL ) {
@@ -1098,14 +1162,19 @@ EvRvService::process_close( void ) noexcept
 void
 EvRvService::release( void ) noexcept
 {
+  if ( ( this->svc_state & TIMER_ACTIVE ) != 0 )
+    this->poll.timer.remove_timer( this->fd, this->timer_id, 0 );
+  if ( this->bp_in_list() )
+    this->bp_retire( *this );
   this->rem_all_sub();
   this->sub_tab.release();
   this->pat_tab.release();
   this->msg_in.release();
-  this->EvConnection::release_buffers();
-  this->spc.reuse();
   if ( this->notify != NULL )
     this->notify->on_shutdown( *this, NULL, 0 );
+  this->EvConnection::release_buffers();
+  this->spc.reuse();
+  this->timer_id = 0;
 }
 
 bool
@@ -1177,10 +1246,20 @@ bad_subject:;
   return false;
 }
 
+struct RestrictOut : public MDOutput {
+  RestrictOut( int hints = 0 ) : MDOutput( hints ) {}
+  virtual int puts( const char *s ) noexcept {
+    size_t len = ::strlen( s );
+    if ( len > 80 )
+      return this->printf( "%.76s...", s );
+    return this->MDOutput::puts( s );
+  }
+};
+
 void
 EvRvService::print( void *m,  size_t len ) noexcept
 {
-  MDOutput mout;
+  RestrictOut mout;
   MDMsgMem mem;
   MDMsg *msg = MDMsg::unpack( m, 0, len, 0, NULL, &mem );
   printf( "---->\n" );
@@ -1195,7 +1274,7 @@ EvRvService::print( void *m,  size_t len ) noexcept
 void
 RvMsgIn::print( int status,  void *m,  size_t len ) noexcept
 {
-  MDOutput mout;
+  RestrictOut mout;
   printf( "<----\n" );
   if ( status != 0 ) {
     if ( len == 8 )

@@ -226,6 +226,18 @@ $(bind)/rv_client: $(rv_client_objs) $(rv_client_libs) $(lnk_dep)
 all_exes    += $(bind)/rv_client
 all_depends += $(rv_client_deps)
 
+rv_pub_files := pub
+rv_pub_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv_pub_files)))
+rv_pub_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_pub_files)))
+rv_pub_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_pub_files)))
+rv_pub_libs  := $(sassrv_lib)
+rv_pub_lnk   := $(sassrv_lib) $(lnk_lib)
+
+$(bind)/rv_pub: $(rv_pub_objs) $(rv_pub_libs) $(lnk_dep)
+
+all_exes    += $(bind)/rv_pub
+all_depends += $(rv_pub_deps)
+
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
 # the default targets
@@ -311,6 +323,7 @@ CMakeLists.txt: .copr/Makefile
 	add_definitions(-DSASSRV_VER=$(ver_build))
 	add_executable (rv_server $(rv_server_cfile))
 	add_executable (rv_client $(rv_client_cfile))
+	add_executable (rv_client $(rv_pub_cfile))
 	EOF
 
 .PHONY: dnf_depend
@@ -383,6 +396,7 @@ install: dist_bins
 	done
 	install -m 755 $(bind)/rv_server $(install_prefix)/bin
 	install -m 755 $(bind)/rv_client $(install_prefix)/bin
+	install -m 755 $(bind)/rv_pub $(install_prefix)/bin
 	install -m 644 include/sassrv/*.h $(install_prefix)/include/sassrv
 
 $(objd)/%.o: src/%.cpp

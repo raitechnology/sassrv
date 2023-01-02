@@ -67,7 +67,7 @@ EvRvClient::connect( EvRvClientParameters &p,
     buf[ len ] = '\0';
     daemon = buf;
   }
-  if ( port == 0 && daemon != NULL ) {
+  if ( daemon != NULL ) {
     char * pt;
     if ( (pt = ::strrchr( daemon, ':' )) != NULL ) {
       port = atoi( pt + 1 );
