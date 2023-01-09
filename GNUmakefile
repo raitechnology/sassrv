@@ -323,7 +323,7 @@ CMakeLists.txt: .copr/Makefile
 	add_definitions(-DSASSRV_VER=$(ver_build))
 	add_executable (rv_server $(rv_server_cfile))
 	add_executable (rv_client $(rv_client_cfile))
-	add_executable (rv_client $(rv_pub_cfile))
+	add_executable (rv_pub $(rv_pub_cfile))
 	EOF
 
 .PHONY: dnf_depend

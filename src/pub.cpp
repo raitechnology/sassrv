@@ -371,7 +371,7 @@ main( int argc, const char *argv[] )
              * service    = get_arg( x, argc, argv, 1, "-s", "-service", "7500" ),
              * path       = get_arg( x, argc, argv, 1, "-c", "-cfile", NULL ),
              * pub_count  = get_arg( x, argc, argv, 1, "-p", "-pub", "1" ),
-             * sub_count  = get_arg( x, argc, argv, 1, "-u", "-sub", "1" ),
+             * sub_count  = get_arg( x, argc, argv, 1, "-k", "-sub", "1" ),
              * nodict     = get_arg( x, argc, argv, 0, "-x", "-nodict", NULL ),
              * dump       = get_arg( x, argc, argv, 0, "-e", "-hex", NULL ),
              * use_json   = get_arg( x, argc, argv, 0, "-j", "-json", NULL ),
@@ -389,7 +389,7 @@ main( int argc, const char *argv[] )
              "  -s service = service (7500)\n"
              "  -c cfile   = if loading dictionary from files\n"
              "  -p count   = number of times to publish a record (1)\n"
-             "  -u count   = number of subjects to publish (1)\n"
+             "  -k count   = number of subjects to publish (1)\n"
              "  -x         = don't load a dictionary\n"
              "  -e         = show hex dump of messages\n"
              "  -j         = publish json format\n"
