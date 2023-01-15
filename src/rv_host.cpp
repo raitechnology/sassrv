@@ -652,6 +652,18 @@ RvMcast::ip4_string( uint32_t ip,  char *buf ) noexcept
   return (uint16_t) sz;
 }
 
+uint16_t
+RvMcast::ip4_hex_string( uint32_t ip,  char *buf ) noexcept
+{
+  const uint8_t * q = (const uint8_t *) &ip;
+  for ( int k = 0; k < 8; k += 2 ) {
+    buf[ k ] = hexchar2( ( q[ k/2 ] >> 4 ) & 0xf );
+    buf[ k+1 ] = hexchar2( q[ k/2 ] & 0xf );
+  }
+  buf[ 8 ] = '\0';
+  return 8;
+}
+
 int
 RvHost::start_network( const RvMcast &mc,  const RvHostNet &hn ) noexcept
 {
@@ -678,18 +690,11 @@ RvHost::copy_network( const RvMcast &mc,  const RvHostNet &hn ) noexcept
     return ERR_BAD_SERVICE_NUM;
   this->service_port = htons( n );
 
-  const uint8_t * q = (const uint8_t *) (const void *) &mc.host_ip;
   this->host_ip = mc.host_ip;
-  if ( mc.fake_ip != 0 ) {
+  if ( mc.fake_ip != 0 )
     this->host_ip = mc.fake_ip;
-    q = (const uint8_t *) (const void *) &mc.fake_ip;
-  }
   this->mcast.copy( mc );
-  for ( int k = 0; k < 8; k += 2 ) {
-    this->session_ip[ k ] = hexchar2( ( q[ k/2 ] >> 4 ) & 0xf );
-    this->session_ip[ k+1 ] = hexchar2( q[ k/2 ] & 0xf );
-  }
-  this->session_ip[ this->session_ip_len ] = '\0';
+  RvMcast::ip4_hex_string( this->host_ip, this->session_ip );
   this->sess_ip_len = RvMcast::ip4_string( this->host_ip, this->sess_ip );
   /*this->sess_ip_len = ::snprintf( this->sess_ip, sizeof( this->sess_ip ),
                               "%u.%u.%u.%u", q[ 0 ], q[ 1 ], q[ 2 ], q[ 3 ] );*/

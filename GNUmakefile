@@ -184,6 +184,8 @@ all_depends :=
 gen_files   :=
 
 ev_rv_defines  := -DSASSRV_VER=$(ver_build)
+$(objd)/ev_rv.o : .copr/Makefile
+$(objd)/ev_rv.fpic.o : .copr/Makefile
 libsassrv_files := ev_rv rv_host ev_rv_client
 libsassrv_cfile := $(addprefix src/, $(addsuffix .cpp, $(libsassrv_files)))
 libsassrv_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libsassrv_files)))
@@ -202,6 +204,8 @@ all_dlls    += $(libd)/libsassrv.so
 all_depends += $(libsassrv_deps)
 
 server_defines := -DSASSRV_VER=$(ver_build)
+$(objd)/server.o : .copr/Makefile
+$(objd)/server.fpic.o : .copr/Makefile
 rv_server_files := server
 rv_server_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv_server_files)))
 rv_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_server_files)))

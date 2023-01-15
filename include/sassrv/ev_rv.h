@@ -410,7 +410,8 @@ struct EvRvService : public kv::EvConnection, public kv::BPData {
     SENT_SESSION_START = 32, /* sent a session start message */
     SENT_SESSION_STOP  = 64, /* sent a session stop message */
     FWD_BACKPRESSURE   = 128,/* backpressure on forward msg */
-    TIMER_ACTIVE       = 256 /* backpressure on forward msg */
+    FWD_BUFFERSIZE     = 256,/* using lots of bufferspace */
+    TIMER_ACTIVE       = 512 /* timer is running */
   };
   static const size_t MAX_CONTROL_LEN = 64,
                       MAX_GOB_LEN     = 16;
@@ -457,6 +458,7 @@ struct EvRvService : public kv::EvConnection, public kv::BPData {
     this->sent_initresp = false;
     this->sent_rvdconn  = false;
     this->timer_id      = id;
+    this->bp_flags      = kv::BP_NOTIFY;
     this->msg_in.init();
     ::memset( this->session, 0, (char *) (void *) &this->timer_id - 
                                 &this->session[ 0 ] );

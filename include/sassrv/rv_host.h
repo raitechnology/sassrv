@@ -123,6 +123,7 @@ struct RvMcast {
   static uint32_t lookup_dev_ip4( const char *dev,
                                   uint32_t &netmask ) noexcept;
   static uint16_t ip4_string( uint32_t ip,  char *buf ) noexcept;
+  static uint16_t ip4_hex_string( uint32_t ip,  char *buf ) noexcept;
   void print( void ) noexcept;
 };
 

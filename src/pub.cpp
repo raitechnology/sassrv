@@ -37,14 +37,18 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   EvRvClient  & client;          /* connection to rv */
   MDDict      * dict;            /* dictinary to use for decoding msgs */
   const char ** sub;             /* subject strings */
-  char        * sub_buf;
+  char        * sub_buf,
+              * payload,
+              * msg_buf;
   size_t        sub_n,
                 sub_count,       /* count of sub[] */
                 pub_count,
                 current_pub,
                 total_pub,
                 i, j, k,
-                max_len;
+                max_len,
+                payload_bytes,
+                msg_buf_len;
   bool          no_dictionary,   /* don't request dictionary */
                 have_dictionary, /* set when dict request succeeded */
                 use_json,
@@ -53,12 +57,13 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
                 dump_hex;
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t n,
-                  size_t cnt,  size_t pcnt,  bool nd,  bool uj,  bool ur,
-                  bool ut,  bool hex )
-    : poll( p ), client( c ), dict( 0 ), sub( s ), sub_buf( 0 ), sub_n( n ),
-      sub_count( cnt ), pub_count( pcnt ), current_pub( 0 ),
-      total_pub( n * cnt * pcnt ), i( 0 ), j( 0 ), k( 0 ), max_len( 0 ),
-      no_dictionary( nd ), have_dictionary( false ),
+                  size_t cnt,  size_t pcnt,  size_t sz,  bool nd,  bool uj,
+                  bool ur,  bool ut,  bool hex )
+    : poll( p ), client( c ), dict( 0 ), sub( s ), sub_buf( 0 ), payload( 0 ),
+      msg_buf( 0 ), sub_n( n ), sub_count( cnt ), pub_count( pcnt ),
+      current_pub( 0 ), total_pub( n * cnt * pcnt ),
+      i( 0 ), j( 0 ), k( 0 ), max_len( 0 ), payload_bytes( sz ),
+      msg_buf_len( 0 ), no_dictionary( nd ), have_dictionary( false ),
       use_json( uj ), use_rv( ur ), use_tibmsg( ut ), dump_hex( hex ) {
     this->init_subjects();
     this->bp_flags  = BP_FORWARD | BP_NOTIFY;
@@ -101,6 +106,14 @@ RvDataCallback::init_subjects( void ) noexcept
   }
   this->sub_buf = (char *) ::malloc( len + 24 );
   this->max_len = len + 24;
+  this->msg_buf_len = 1024;
+  if ( this->payload_bytes > 0 ) {
+    this->msg_buf_len += this->payload_bytes;
+    this->payload = (char *) ::malloc( this->payload_bytes );
+    ::memset( this->payload, 'A', this->payload_bytes - 1 );
+    this->payload[ this->payload_bytes - 1 ] = '\0';
+  }
+  this->msg_buf = (char *) ::malloc( this->msg_buf_len );
 }
 
 /* called after daemon responds with CONNECTED message */
@@ -125,18 +138,19 @@ RvDataCallback::on_connect( EvSocket &conn ) noexcept
 template< class Writer >
 size_t
 write_msg( Writer &writer,  const char *sub,  size_t sublen,
-           size_t seqno ) noexcept
+           size_t seqno,  const char *payload,  size_t payload_bytes ) noexcept
 {
-  static char msg_type[]   = "MSG_TYPE",
-              seq_no[]     = "SEQ_NO",
-              rec_status[] = "REC_STATUS",
-              symbol[]     = "SYMBOL",
-              bid_size[]   = "BIDSIZE",
-              ask_size[]   = "ASKSIZE",
-              bid[]        = "BID",
-              ask[]        = "ASK",
-              timact[]     = "TIMACT",
-              trade_date[] = "TRADE_DATE";
+  static char msg_type[]    = "MSG_TYPE",
+              seq_no[]      = "SEQ_NO",
+              rec_status[]  = "REC_STATUS",
+              symbol[]      = "SYMBOL",
+              bid_size[]    = "BIDSIZE",
+              ask_size[]    = "ASKSIZE",
+              bid[]         = "BID",
+              ask[]         = "ASK",
+              timact[]      = "TIMACT",
+              trade_date[]  = "TRADE_DATE",
+              buffer_data[] = "BUFFER_DATA";
   MDDecimal dec;
   MDTime time;
   MDDate date;
@@ -169,6 +183,11 @@ write_msg( Writer &writer,  const char *sub,  size_t sublen,
   date.day  = 9;
   writer.append_date( trade_date, sizeof( trade_date ), date );
 
+  if ( payload_bytes > 0 ) {
+    writer.append_string( buffer_data, sizeof( buffer_data ),
+                          payload, payload_bytes );
+  }
+
   return writer.update_hdr();
 }
 
@@ -176,7 +195,6 @@ write_msg( Writer &writer,  const char *sub,  size_t sublen,
 void
 RvDataCallback::run_publishers( void ) noexcept
 {
-  char     msg[ 1024 ];
   size_t   msg_len;
   uint32_t msg_enc = 0;
   char   * s;
@@ -189,28 +207,32 @@ RvDataCallback::run_publishers( void ) noexcept
     slen = ::snprintf( s, this->max_len, this->sub[ this->i ], (int) this->j );
 
     if ( this->use_json ) {
-      JsonMsgWriter jsonmsg( msg, sizeof( msg ) );
-      msg_len = write_msg<JsonMsgWriter>( jsonmsg, s, slen, this->k );
+      JsonMsgWriter jsonmsg( this->msg_buf, this->msg_buf_len );
+      msg_len = write_msg<JsonMsgWriter>( jsonmsg, s, slen, this->k,
+                                          this->payload, this->payload_bytes );
       msg_enc = JSON_TYPE_ID;
     }
     else if ( this->use_rv ) {
-      RvMsgWriter rvmsg( msg, sizeof( msg ) );
-      msg_len = write_msg<RvMsgWriter>( rvmsg, s, slen, this->k );
+      RvMsgWriter rvmsg( this->msg_buf, this->msg_buf_len );
+      msg_len = write_msg<RvMsgWriter>( rvmsg, s, slen, this->k,
+                                        this->payload, this->payload_bytes );
       msg_enc = RVMSG_TYPE_ID;
     }
     else if ( this->use_tibmsg || ! this->have_dictionary ) {
-      TibMsgWriter tibmsg( msg, sizeof( msg ) );
-      msg_len = write_msg<TibMsgWriter>( tibmsg, s, slen, this->k );
+      TibMsgWriter tibmsg( this->msg_buf, this->msg_buf_len );
+      msg_len = write_msg<TibMsgWriter>( tibmsg, s, slen, this->k,
+                                         this->payload, this->payload_bytes );
       msg_enc = TIBMSG_TYPE_ID;
     }
     else {
-      TibSassMsgWriter tibmsg( this->dict, msg, sizeof( msg ) );
-      msg_len = write_msg<TibSassMsgWriter>( tibmsg, s, slen, this->k );
+      TibSassMsgWriter tibmsg( this->dict, this->msg_buf, this->msg_buf_len );
+      msg_len = write_msg<TibSassMsgWriter>( tibmsg, s, slen, this->k,
+                                           this->payload, this->payload_bytes );
       msg_enc = TIB_SASS_TYPE_ID;
     }
     if ( this->dump_hex ) {
       MDOutput mout;
-      mout.print_hex( msg, msg_len );
+      mout.print_hex( this->msg_buf, msg_len );
     }
     if ( ++this->i == this->sub_n ) {
       this->i = 0;
@@ -219,7 +241,7 @@ RvDataCallback::run_publishers( void ) noexcept
         this->k++;
       }
     }
-    EvPublish pub( s, slen, NULL, 0, msg, msg_len,
+    EvPublish pub( s, slen, NULL, 0, this->msg_buf, msg_len,
                    this->client.sub_route, 0, 0, msg_enc, 'p' );
     if ( ! this->client.publish( pub ) ) {
       /* wait for ready */
@@ -372,6 +394,7 @@ main( int argc, const char *argv[] )
              * path       = get_arg( x, argc, argv, 1, "-c", "-cfile", NULL ),
              * pub_count  = get_arg( x, argc, argv, 1, "-p", "-pub", "1" ),
              * sub_count  = get_arg( x, argc, argv, 1, "-k", "-sub", "1" ),
+             * payload    = get_arg( x, argc, argv, 1, "-z", "-payload", "0" ),
              * nodict     = get_arg( x, argc, argv, 0, "-x", "-nodict", NULL ),
              * dump       = get_arg( x, argc, argv, 0, "-e", "-hex", NULL ),
              * use_json   = get_arg( x, argc, argv, 0, "-j", "-json", NULL ),
@@ -390,19 +413,25 @@ main( int argc, const char *argv[] )
              "  -c cfile   = if loading dictionary from files\n"
              "  -p count   = number of times to publish a record (1)\n"
              "  -k count   = number of subjects to publish (1)\n"
+             "  -z size    = payload bytes added to message (0)\n"
              "  -x         = don't load a dictionary\n"
              "  -e         = show hex dump of messages\n"
              "  -j         = publish json format\n"
              "  -r         = publish rvmsg format\n"
              "  -m         = publish tibmsg format\n"
-             "  subject    = subject to subscribe\n", argv[ 0 ] );
+             "  subject    = subject to publish\n", argv[ 0 ] );
     return 1;
   }
   if ( first_sub >= argc ) {
     fprintf( stderr, "No subjects subscribed\n" );
     goto help;
   }
-
+  if ( ! valid_uint64( sub_count, ::strlen( sub_count ) ) ||
+       ! valid_uint64( pub_count, ::strlen( pub_count ) ) ||
+       ! valid_uint64( payload, ::strlen( payload ) ) ) {
+    fprintf( stderr, "Invalid -p/-k/-z,-sub/-pub/-payload\n" );
+    goto help;
+  }
   EvPoll poll;
   poll.init( 5, false );
 
@@ -413,12 +442,13 @@ main( int argc, const char *argv[] )
        du = ( dump       != NULL );
   size_t sub_cnt = string_to_uint64( sub_count, ::strlen( sub_count ) ),
          pub_cnt = string_to_uint64( pub_count, ::strlen( pub_count ) ),
+         pay_siz = string_to_uint64( payload, ::strlen( payload ) ),
          n       = (size_t) ( argc - first_sub );
 
   EvRvClientParameters parm( daemon, network, service, 0 );
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, &argv[ first_sub ], n,
-                             sub_cnt, pub_cnt,
+                             sub_cnt, pub_cnt, pay_siz,
                              nd || uj || ur || ut, uj, ur, ut, du );
   /* load dictionary if present */
   if ( ! data.no_dictionary ) {

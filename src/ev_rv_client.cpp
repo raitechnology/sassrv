@@ -115,8 +115,10 @@ EvRvClient::process( void ) noexcept
       if ( buflen < 8 )
         goto break_loop;
       msglen = get_u32<MD_BIG>( &this->recv[ this->off ] );
-      if ( buflen < msglen )
+      if ( buflen < msglen ) {
+        this->recv_need( msglen );
         goto break_loop;
+      }
       if ( rv_client_msg_verbose )
         this->trace_msg( '<', &this->recv[ this->off ], msglen );
       status = this->dispatch_msg( &this->recv[ this->off ], msglen );
@@ -158,7 +160,8 @@ EvRvClient::process( void ) noexcept
   }
 break_loop:;
   this->pop( EV_PROCESS );
-  this->push_write();
+  if ( ! this->push_write() )
+    this->clear_write_buffers();
   if ( status != 0 ) {
     this->rv_state = ERR_CLOSE;
     this->push( EV_CLOSE );

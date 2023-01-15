@@ -36,7 +36,9 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   size_t        sub_count;       /* count of sub[] */
   uint64_t      msg_count,
                 last_count,
-                last_time;
+                last_time,
+                msg_bytes,
+                last_bytes;
   bool          no_dictionary,   /* don't request dictionary */
                 is_subscribed,   /* sub[] are subscribed */
                 have_dictionary, /* set when dict request succeeded */
@@ -46,9 +48,9 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t cnt,
                   bool nodict,  bool hex,  bool rate )
     : poll( p ), client( c ), dict( 0 ), sub( s ), sub_count( cnt ),
-      msg_count( 0 ), last_count( 0 ), last_time( 0 ),
-      no_dictionary( nodict ), is_subscribed( false ), have_dictionary( false ),
-      dump_hex( hex ), show_rate( rate ) {}
+      msg_count( 0 ), last_count( 0 ), last_time( 0 ), msg_bytes( 0 ),
+      last_bytes( 0 ), no_dictionary( nodict ), is_subscribed( false ),
+      have_dictionary( false ), dump_hex( hex ), show_rate( rate ) {}
 
   /* after CONNECTED message */
   virtual void on_connect( EvSocket &conn ) noexcept;
@@ -162,12 +164,16 @@ RvDataCallback::timer_cb( uint64_t timer_id,  uint64_t ) noexcept
 {
   if ( timer_id == RATE_TIMER_ID ) {
     uint64_t ival_ns = this->poll.now_ns - this->last_time,
-             count   = this->msg_count - this->last_count;
+             count   = this->msg_count - this->last_count,
+             bytes   = this->msg_bytes - this->last_bytes;
     if ( this->last_count < this->msg_count ) {
-      printf( "%.2f\n", (double) count * 1000000000.0 / (double) ival_ns );
+      printf( "%.2f m/s %.2f mbit/s\n",
+              (double) count * 1000000000.0 / (double) ival_ns,
+              (double) bytes * 8.0 * 1000.0 / ival_ns );
     }
-    this->last_time += ival_ns;
+    this->last_time  += ival_ns;
     this->last_count += count;
+    this->last_bytes += bytes;
     return true;
   }
   if ( this->have_dictionary )
@@ -202,8 +208,7 @@ bool
 RvDataCallback::on_msg( EvPublish &pub ) noexcept
 {
   MDMsgMem mem;
-  MDMsg  * m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict,
-                              &mem );
+  MDMsg  * m;
   /* check if published to _INBOX.<session>. */
   uint64_t which = this->client.is_inbox( pub.subject, pub.subject_len );
   if ( which != 0 ) {
@@ -218,6 +223,8 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
     }
     else if ( which == DICT_INBOX_ID ) {
       printf( "Received dictionary message\n" );
+      m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict,
+                         &mem );
       this->on_dict( m );
       this->start_subscriptions();
       return true;
@@ -229,6 +236,7 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
   else { /* not inbox subject */
     if ( this->show_rate ) {
       this->msg_count++;
+      this->msg_bytes += pub.msg_len + pub.subject_len;
       return true;
     }
     if ( pub.reply_len != 0 )
@@ -237,6 +245,7 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
     else
       printf( "## %.*s:\n", (int) pub.subject_len, pub.subject );
   }
+  m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, &mem );
   /* print message */
   if ( m != NULL ) {
     printf( "## format: %s, length %u\n", m->get_proto_string(), pub.msg_len );
@@ -245,6 +254,8 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
     if ( this->dump_hex )
       mout.print_hex( m );
   }
+  else if ( pub.msg_len == 0 )
+    printf( "## No message data\n" );
   else
     fprintf( stderr, "Message unpack error\n" );
   return true;

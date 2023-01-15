@@ -210,8 +210,12 @@ EvRvService::process( void ) noexcept
   /* state trasition from VERS_RECV -> INFO_RECV -> DATA_RECV */
   if ( this->svc_state >= DATA_RECV ) { /* main state */
   data_recv_loop:;
+    buflen = this->len - this->off;
+    if ( buflen > this->recv_highwater )
+      this->svc_state |= FWD_BUFFERSIZE;
+    else
+      this->svc_state &= ~FWD_BUFFERSIZE;
     for (;;) {
-      buflen = this->len - this->off;
       if ( buflen < 8 )
         goto break_loop;
       msglen = get_u32<MD_BIG>( &this->recv[ this->off ] );
@@ -221,24 +225,21 @@ EvRvService::process( void ) noexcept
       }
       status = this->dispatch_msg( &this->recv[ this->off ], msglen );
 
-      if ( status == 0 ) {
-        this->off += msglen;
-        this->msgs_recv++;
-        this->host->stat.br += msglen;
-        this->host->stat.mr++;
-      }
-      else {
-        if ( status != ERR_BACKPRESSURE )
-          goto break_loop;
-        this->pop( EV_PROCESS );
-        this->pop3( EV_READ, EV_READ_LO, EV_READ_HI );
-      }
-      if ( ( this->svc_state & FWD_BACKPRESSURE ) != 0 ) {
-        if ( ! this->push_write_high() )
-          this->StreamBuf::reset();
-        return;
-      }
+      if ( status != 0 )
+        break;
+      this->off += msglen;
+      this->msgs_recv++;
+      this->host->stat.br += msglen;
+      this->host->stat.mr++;
+      buflen = this->len - this->off;
     }
+    if ( status != ERR_BACKPRESSURE )
+      goto break_loop;
+    this->pop( EV_PROCESS );
+    this->pop3( EV_READ, EV_READ_LO, EV_READ_HI );
+    if ( ! this->push_write_high() )
+      this->clear_write_buffers();
+    return;
   }
   else { /* initial connection states */
     for (;;) {
@@ -265,17 +266,11 @@ EvRvService::process( void ) noexcept
 break_loop:;
   this->pop( EV_PROCESS );
   if ( ! this->push_write() )
-    this->StreamBuf::reset();
+    this->clear_write_buffers();
 
   if ( status > 0 )
     this->push( EV_CLOSE );
 }
-#if 0
-      if ( ( this->svc_state & TIMER_ACTIVE ) == 0 ) {
-        this->poll.timer.add_timer_micros( this->fd, 100, this->timer_id, 0 );
-        this->svc_state |= TIMER_ACTIVE;
-      }
-#endif
 
 #if 0
 #include <unistd.h>
@@ -389,10 +384,8 @@ EvRvService::fwd_pub( void ) noexcept
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
                  this->sub_route, this->fd, h, ftype, 'p' );
   BPData * data = NULL;
-  if ( ( this->svc_state & FWD_BACKPRESSURE ) != 0 ) {
+  if ( ( this->svc_state & ( FWD_BACKPRESSURE | FWD_BUFFERSIZE ) ) != 0 )
     data = this;
-    this->bp_flags = ( this->bp_flags & ~BP_FORWARD ) | BP_NOTIFY;
-  }
   if ( this->sub_route.forward_msg( pub, data ) )
     return RV_FLOW_GOOD;
   if ( ! this->bp_in_list() )
@@ -630,6 +623,7 @@ void
 EvRvService::on_write_ready( void ) noexcept
 {
   this->push( EV_PROCESS );
+  this->pop2( EV_READ, EV_READ_HI );
   this->idle_push( EV_READ_LO );
 }
 
@@ -1075,9 +1069,16 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
         break;
     }
     if ( off > 0 ) {
-      char *m = this->append2( buf, off, msg, msg_len );
-      if ( is_rv_debug ) {
-        this->print( m, off + msg_len );
+      uint32_t idx = 0;
+      if ( msg_len > this->recv_highwater ) {
+        idx = this->poll.zero_copy_ref( pub.src_route, msg, msg_len );
+        if ( idx != 0 )
+          this->append_ref_iov( buf, off, msg, msg_len, idx );
+      }
+      if ( idx == 0 ) {
+        char *m = this->append2( buf, off, msg, msg_len );
+        if ( is_rv_debug )
+          this->print( m, off + msg_len );
       }
       this->host->stat.bs += off + msg_len;
       this->msgs_sent++;
