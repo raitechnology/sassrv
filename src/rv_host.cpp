@@ -931,7 +931,7 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
   if ( is_rv_debug )
     printf( "fwd %.*s\n", (int) sublen, subj );
   EvPublish pub( subj, sublen, rsubj, rsublen, msg.buf, msg_size,
-                 host.sub_route, host.fd, h, RVMSG_TYPE_ID, 'p' );
+                 host.sub_route, host.fd, h, RVMSG_TYPE_ID, 'h' );
   if ( is_rv_debug )
     EvRvService::print( msg.buf, msg_size );
   host.sub_route.forward_msg( pub );
