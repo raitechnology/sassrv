@@ -368,10 +368,11 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server $(bind)/rv_client
+dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server $(bind)/rv_client $(bind)/rv_pub
 	chrpath -d $(libd)/libsassrv.so
 	chrpath -d $(bind)/rv_server
 	chrpath -d $(bind)/rv_client
+	chrpath -d $(bind)/rv_pub
 
 .PHONY: dist_rpm
 dist_rpm: srpm
