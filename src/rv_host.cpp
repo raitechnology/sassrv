@@ -42,6 +42,7 @@ RvHost::RvHost( RvHostDB &d,  EvPoll &poll,  RoutePublish &sr,
   this->service_len = svc_len;
   this->ipport      = port;
   this->has_service_prefix = has_svc_pre;
+  this->service_num = atoi( this->service );
 
   if ( has_svc_pre ) {
     char * o = (char *) ::malloc( olen + svc_len + 2 + 1 );
@@ -323,11 +324,9 @@ RvHost::send_outbound_data_loss( uint32_t msg_loss,  uint32_t pub_host,
 
   PeerMatchArgs ka( "tcp", 3 );
   PeerMatchIter iter( *this, ka );
-  size_t        prelen = this->rpc->ibx.svc_len;
-  const char  * prefix = this->rpc->ibx.buf;
   for ( EvSocket *p = iter.first(); p != NULL; p = iter.next() ) {
     char sess[ MAX_SESSION_LEN ];
-    if ( p->get_session( prefix, prelen, sess ) > 0 )
+    if ( p->get_session( this->service_num, sess ) > 0 )
       this->sub_route.forward_to( pub, p->fd );
   }
 }
@@ -688,6 +687,7 @@ RvHost::copy_network( const RvMcast &mc,  const RvHostNet &hn ) noexcept
   int n = atoi( this->service );
   if ( n <= 0 || n > 0xffff )
     return ERR_BAD_SERVICE_NUM;
+  this->service_num  = n;
   this->service_port = htons( n );
 
   this->host_ip = mc.host_ip;
@@ -969,7 +969,7 @@ RvHost::send_session_start( EvSocket &sock ) noexcept
   char   userid[ MAX_USERID_LEN ],
          session[ MAX_SESSION_LEN ];
   size_t userid_len  = sock.get_userid( userid ),
-         session_len = sock.get_session( NULL, 0, session );
+         session_len = sock.get_session( this->service_num, session );
   this->send_session_start( userid, userid_len, session, session_len );
 }
 
@@ -1006,7 +1006,7 @@ RvHost::send_session_stop( EvSocket &sock ) noexcept
   char   userid[ MAX_USERID_LEN ],
          session[ MAX_SESSION_LEN ];
   size_t userid_len  = sock.get_userid( userid ),
-         session_len = sock.get_session( NULL, 0, session );
+         session_len = sock.get_session( this->service_num, session );
   this->send_session_stop( userid, userid_len, session, session_len );
   this->loss_array.remove_loss_entry( *this, sock.fd );
 }
@@ -1318,7 +1318,7 @@ RvMcast::print( void ) noexcept
 RvDaemonRpc::RvDaemonRpc( RvHost &h ) noexcept
       : EvSocket( h.poll, h.poll.register_type( "rv_daemon_rpc" ) ),
         sub_route( h.sub_route ),
-        ibx( h ), host_refs( 0 )
+        ibx( h ), host_refs( 0 ), svc( h.service_num )
 {
   this->sock_opts = OPT_NO_POLL;
 }
@@ -1393,7 +1393,7 @@ void
 RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
 {
   SubRouteDB    sess_db;
-  PeerMatchArgs ka( "tcp", 3 );
+  PeerMatchArgs ka;
   PeerMatchIter iter( *this, ka );
   EvSocket    * p;
   MDMsgMem      mem;
@@ -1401,10 +1401,11 @@ RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
   uint8_t     * buf = NULL;
   RouteLoc      loc;
 
+  ka.skipme = true;
   for ( p = iter.first(); p != NULL; p = iter.next() ) {
     char sess[ MAX_SESSION_LEN ];
     size_t n;
-    if ( (n = p->get_session( this->ibx.buf, this->ibx.svc_len, sess )) > 0 ) {
+    if ( (n = p->get_session( this->svc, sess )) > 0 ) {
       uint32_t h = kv_crc_c( sess, n + 1, 0 );
       sess_db.upsert( h, sess, n + 1, loc );
       if ( loc.is_new )
@@ -1431,31 +1432,29 @@ void
 RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
                                  const void *reply,  size_t reply_len ) noexcept
 {
-  PeerMatchArgs     ka( "tcp", 3 );
-  PeerMatchIter     iter( *this, ka );
-  MDMsgMem          mem;
-  SubRouteDB        subs, pats;
-  char              user[ MAX_USERID_LEN ];
-  void            * buf     = NULL;
-  size_t            buflen  = 0,
-                    subcnt  = 0,
-                    userlen = 0,
-                    prelen  = this->ibx.svc_len;
-  RouteSub        * s;
-  RouteLoc          loc;
-  int               fmt = RV_PATTERN_FMT;
+  PeerMatchArgs ka;
+  PeerMatchIter iter( *this, ka );
+  MDMsgMem      mem;
+  SubRouteDB    subs, pats;
+  char          user[ MAX_USERID_LEN ];
+  void        * buf     = NULL;
+  size_t        buflen  = 0,
+                subcnt  = 0,
+                patcnt  = 0,
+                userlen = 0;
+  RouteSub    * s;
+  RouteLoc      loc;
 
+  ka.skipme = true;
   for ( EvSocket *p = iter.first(); p != NULL; p = iter.next() ) {
     char sess[ MAX_SESSION_LEN ];
     size_t n;
-    if ( (n = p->get_session( this->ibx.buf, prelen, sess )) > 0 ) {
+    if ( (n = p->get_session( this->svc, sess )) > 0 ) {
       if ( n + 1 == session_len && ::memcmp( sess, session, n ) == 0 ) {
-        size_t cnt = p->get_subscriptions( subs, pats, fmt );
-        if ( cnt > 0 ) {
-          subcnt += cnt;
-          if ( userlen == 0 )
-            userlen = p->get_userid( user );
-        }
+        subcnt  = p->get_subscriptions( this->svc, subs ),
+        patcnt  = p->get_patterns( this->svc, RV_PATTERN_FMT, pats );
+        userlen = p->get_userid( user );
+        break;
       }
     }
   }
@@ -1467,11 +1466,11 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
       if ( ! is_restricted_subject( s->value, s->len ) )
         buflen += (size_t) s->len + 8 + count_segments( s->value, s->len ) * 2;
     }
-    if ( fmt == RV_PATTERN_FMT ) {
-      for ( s = pats.first( loc ); s != NULL; s = pats.next( loc ) ) {
-        if ( ! is_restricted_subject( s->value, s->len ) )
-          buflen += (size_t) s->len + 8 + count_segments( s->value, s->len ) * 2;
-      }
+  }
+  if ( patcnt > 0 ) {
+    for ( s = pats.first( loc ); s != NULL; s = pats.next( loc ) ) {
+      if ( ! is_restricted_subject( s->value, s->len ) )
+        buflen += (size_t) s->len + 8 + count_segments( s->value, s->len ) * 2;
     }
   }
   /* create the message with unique subjects */
@@ -1488,11 +1487,11 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
       if ( ! is_restricted_subject( s->value, s->len ) )
         msg.append_subject( NULL, 0, s->value, s->len );
     }
-    if ( fmt == RV_PATTERN_FMT ) {
-      for ( s = pats.first( loc ); s != NULL; s = pats.next( loc ) ) {
-        if ( ! is_restricted_subject( s->value, s->len ) )
-          msg.append_subject( NULL, 0, s->value, s->len );
-      }
+  }
+  if ( patcnt > 0 ) {
+    for ( s = pats.first( loc ); s != NULL; s = pats.next( loc ) ) {
+      if ( ! is_restricted_subject( s->value, s->len ) )
+        msg.append_subject( NULL, 0, s->value, s->len );
     }
   }
   msg.append_int<int32_t>( SARG( "end" ), 1 );

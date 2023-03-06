@@ -1388,6 +1388,26 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
   return status;
 }
 
+bool
+EvRvService::get_service( void *host,  uint16_t &svc ) noexcept
+{
+  if ( host != NULL )
+    *(void **) host = &this->host;
+  if ( this->host != NULL ) {
+    svc = this->host->service_num;
+    return true;
+  }
+  svc = 0;
+  return false;
+}
+
+bool
+EvRvService::set_session( const char session[ MAX_SESSION_LEN ] ) noexcept
+{
+  (void) session;
+  return false;
+}
+
 /* get session name */
 size_t
 EvRvService::get_userid( char userid[ MAX_USERID_LEN ] ) noexcept
@@ -1398,11 +1418,10 @@ EvRvService::get_userid( char userid[ MAX_USERID_LEN ] ) noexcept
 }
 /* get session name */
 size_t
-EvRvService::get_session( const char *svc,  size_t svc_len,
+EvRvService::get_session( uint16_t svc,
                           char session[ MAX_SESSION_LEN ] ) noexcept
 {
-  if ( svc_len == this->msg_in.prefix_len &&
-       ::memcmp( svc, this->msg_in.sub_buf - svc_len, svc_len ) == 0 ) {
+  if ( this->host != NULL && this->host->service_num == svc ) {
     ::memcpy( session, this->session, this->session_len );
     session[ this->session_len ] = '\0';
     return this->session_len;
@@ -1412,41 +1431,57 @@ EvRvService::get_session( const char *svc,  size_t svc_len,
 }
 /* get session name */
 size_t
-EvRvService::get_subscriptions( SubRouteDB &subs,  SubRouteDB &pats,
-                                int &pattern_fmt ) noexcept
+EvRvService::get_subscriptions( uint16_t svc,  SubRouteDB &subs ) noexcept
 {
-  RvSubRoutePos     pos;
-  RvPatternRoutePos ppos;
-  RouteLoc     loc;
-  const char * val;
-  size_t       len,
-               cnt    = 0,
-               prelen = this->msg_in.prefix_len;
-  uint32_t     h;
+  RvSubRoutePos pos;
+  RouteLoc      loc;
+  size_t        cnt    = 0,
+                prelen = this->msg_in.prefix_len;
 
-  pattern_fmt = RV_PATTERN_FMT;
+  if ( this->host == NULL || this->host->service_num != svc )
+    return 0;
   if ( this->sub_tab.first( pos ) ) {
     do {
-      val = &pos.rt->value[ prelen ];
-      len = pos.rt->len - prelen;
-      if ( ! is_restricted_subject( val, len ) ) {
-        h   = kv_crc_c( val, len, 0 );
-        subs.upsert( h, val, len, loc );
-        if ( loc.is_new )
-          cnt++;
+      if ( pos.rt->len > prelen ) {
+        const char * val = &pos.rt->value[ prelen ];
+        size_t       len = pos.rt->len - prelen;
+        if ( ! is_restricted_subject( val, len ) ) {
+          uint32_t h = kv_crc_c( val, len, 0 );
+          subs.upsert( h, val, len, loc );
+          if ( loc.is_new )
+            cnt++;
+        }
       }
     } while ( this->sub_tab.next( pos ) );
   }
+  return cnt;
+}
+
+size_t
+EvRvService::get_patterns( uint16_t svc,  int pat_fmt,
+                           SubRouteDB &pats ) noexcept
+{
+  RvPatternRoutePos ppos;
+  RouteLoc          loc;
+  size_t            cnt    = 0,
+                    prelen = this->msg_in.prefix_len;
+
+  if ( this->host == NULL || this->host->service_num != svc )
+    return 0;
+  if ( pat_fmt != RV_PATTERN_FMT )
+    return 0;
   if ( this->pat_tab.first( ppos ) ) {
     do {
       for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
-        val = &m->value[ prelen ];
-        len = m->len - prelen;
-        if ( ! is_restricted_subject( val, len ) ) {
-          h = kv_crc_c( val, len, 0 );
-          pats.upsert( h, val, len, loc );
-          if ( loc.is_new )
-            cnt++;
+        if ( m->len > prelen ) {
+          const char * val = &m->value[ prelen ];
+          size_t       len = m->len - prelen;
+          if ( ! is_restricted_subject( val, len ) ) {
+            uint32_t h = kv_crc_c( val, len, 0 );
+            pats.upsert( h, val, len, loc );
+            if ( loc.is_new )
+              cnt++;
+          }
         }
       }
     } while ( this->pat_tab.next( ppos ) );

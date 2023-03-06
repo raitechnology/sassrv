@@ -265,6 +265,7 @@ struct RvHost : public kv::EvSocket {
                 network_len,       /* len of this->network[] */
                 service_len,       /* len of this->service[] */
                 service_port,      /* service in network order */
+                service_num,       /* service in host order */
                 sess_ip_len,       /* len of sess_ip[] */
                 host_id_len,       /* len of host_id[] */
                 http_port;         /* http listen port (network order) */
@@ -416,6 +417,7 @@ struct RvDaemonRpc : public kv::EvSocket {
   kv::RoutePublish & sub_route;
   DaemonInbox ibx;
   uint32_t host_refs;
+  uint16_t svc;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   RvDaemonRpc( RvHost &h ) noexcept;
