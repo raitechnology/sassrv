@@ -680,12 +680,13 @@ EvRvService::add_sub( void ) noexcept
 {
   char   * sub;
   size_t   len;
-  uint32_t refcnt = 0, h;
+  uint32_t refcnt = 0, h, sub_h = 0;
   bool     coll   = false;
 
   this->msg_in.pre_subject( sub, len );
   if ( ! this->msg_in.is_wild ) {
     h = kv_crc_c( sub, len, 0 );
+    sub_h = h;
     if ( this->sub_tab.put( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
       NotifySub nsub( sub, len, this->msg_in.reply, this->msg_in.replylen,
                       h, this->fd, coll, 'V', this->host );
@@ -756,10 +757,12 @@ EvRvService::add_sub( void ) noexcept
       }
     }
   }
+  if ( refcnt != 0 && ( this->svc_state & IS_RV_DAEMON ) != 0 )
+    refcnt = this->host->add_ref( sub, len, sub_h );
   /* if first ref & no listen starts on restricted subjects _RV. _INBOX. */
-  sub = this->msg_in.sub;
-  len = this->msg_in.sublen;
   if ( refcnt != 0 ) {
+    sub = this->msg_in.sub;
+    len = this->msg_in.sublen;
     this->host->send_listen_start( *this, sub, len, this->msg_in.reply,
                                    this->msg_in.replylen, refcnt );
   }
@@ -771,12 +774,13 @@ EvRvService::rem_sub( void ) noexcept
 {
   char   * sub;
   size_t   len;
-  uint32_t refcnt = 0xffffffffU, h;
+  uint32_t refcnt = 0xffffffffU, h, sub_h = 0;
   bool     coll   = false;
 
   this->msg_in.pre_subject( sub, len );
   if ( ! this->msg_in.is_wild ) {
     h = kv_crc_c( sub, len, 0 );
+    sub_h = h;
     if ( this->sub_tab.rem( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
       if ( refcnt == 0 ) {
         NotifySub nsub( sub, len, h, this->fd, coll, 'V', this->host );
@@ -824,10 +828,12 @@ EvRvService::rem_sub( void ) noexcept
       }
     }
   }
+  if ( refcnt != 0xffffffffU  && ( this->svc_state & IS_RV_DAEMON ) != 0 )
+    refcnt = this->host->rem_ref( sub, len, sub_h, 1 );
   /* if found ref, no listen stops on restricted subjects _RV. _INBOX. */
-  sub = this->msg_in.sub;
-  len = this->msg_in.sublen;
   if ( refcnt == 0 ) {
+    sub = this->msg_in.sub;
+    len = this->msg_in.sublen;
     this->host->send_listen_stop( *this, sub, len, refcnt );
   }
 }
@@ -838,19 +844,60 @@ EvRvService::rem_all_sub( void ) noexcept
   RvSubRoutePos     pos;
   RvPatternRoutePos ppos;
   size_t            prelen = this->msg_in.prefix_len;
-  bool              do_stop = ! this->poll.quit && this->host != NULL;
+  bool              do_listen_stop = ! this->poll.quit && this->host != NULL;
 
+  if ( do_listen_stop ) {
+    if ( this->sub_tab.first( pos ) ) {
+      do {
+        if ( pos.rt->len > prelen ) {
+          uint32_t     refcnt = pos.rt->refcnt;
+          const char * sub;
+          size_t       len;
+          if ( ( this->svc_state & IS_RV_DAEMON ) != 0 ) {
+            sub = pos.rt->value;
+            len = pos.rt->len;
+            refcnt = this->host->rem_ref( sub, len, pos.rt->hash, refcnt );
+          }
+          else
+            refcnt = 0;
+          if ( refcnt == 0 ) {
+            sub = &pos.rt->value[ prelen ];
+            len = pos.rt->len - prelen;
+            this->host->send_listen_stop( *this, sub, len, 0 );
+          }
+        }
+      } while ( this->sub_tab.next( pos ) );
+    }
+    if ( this->pat_tab.first( ppos ) ) {
+      do {
+        for ( RvWildMatch *m = ppos.rt->list.hd; m != NULL; m = m->next ) {
+          if ( m->len > prelen ) {
+            uint32_t     refcnt = m->refcnt;
+            const char * sub;
+            size_t       len;
+            if ( ( this->svc_state & IS_RV_DAEMON ) != 0 ) {
+              sub = m->value;
+              len = m->len;
+              refcnt = this->host->rem_ref( sub, len, 0, refcnt );
+            }
+            else
+              refcnt = 0;
+            if ( refcnt == 0 ) {
+              sub = &m->value[ prelen ];
+              len = m->len - prelen;
+              this->host->send_listen_stop( *this, sub, len, 0 );
+            }
+          }
+        }
+      } while ( this->pat_tab.next( ppos ) );
+    }
+  }
   if ( this->sub_tab.first( pos ) ) {
     do {
       bool coll = this->sub_tab.rem_collision( pos.rt );
       NotifySub nsub( pos.rt->value, pos.rt->len, pos.rt->hash,
                       this->fd, coll, 'V', this->host );
       this->sub_route.del_sub( nsub );
-      if ( do_stop && pos.rt->len > prelen ) {
-        const char * sub = &pos.rt->value[ prelen ];
-        size_t       len = pos.rt->len - prelen;
-        this->host->send_listen_stop( *this, sub, len, 0 );
-      }
     } while ( this->sub_tab.next( pos ) );
   }
   if ( this->pat_tab.first( ppos ) ) {
@@ -862,11 +909,6 @@ EvRvService::rem_all_sub( void ) noexcept
           NotifyPattern npat( cvt, m->value, m->len, ppos.rt->hash,
                               this->fd, coll, 'V', this->host );
           this->sub_route.del_pat( npat );
-          if ( do_stop && m->len > prelen ) {
-            const char * sub = &m->value[ prelen ];
-            size_t       len = m->len - prelen;
-            this->host->send_listen_stop( *this, sub, len, 0 );
-          }
         }
       }
     } while ( this->pat_tab.next( ppos ) );

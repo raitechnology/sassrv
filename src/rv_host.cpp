@@ -1544,6 +1544,38 @@ RvDaemonRpc::on_msg( EvPublish &pub ) noexcept
   return true;
 }
 
+uint32_t
+RvHost::add_ref( const char *sub,  size_t sublen,  uint32_t h ) noexcept
+{
+  if ( h == 0 )
+    h = kv_crc_c( sub, sublen, 0 );
+  RouteLoc      loc;
+  RvDaemonSub * rt = this->sub_map.upsert( h, sub, sublen, loc );
+  if ( loc.is_new )
+    rt->refcnt = 0;
+  return ++rt->refcnt;
+}
+
+uint32_t
+RvHost::rem_ref( const char *sub,  size_t sublen,  uint32_t h,
+                 uint32_t cnt ) noexcept
+{
+  if ( h == 0 )
+    h = kv_crc_c( sub, sublen, 0 );
+  RouteLoc      loc;
+  RvDaemonSub * rt = this->sub_map.find( h, sub, sublen, loc );
+  if ( rt == NULL )
+    return 0;
+  if ( rt->refcnt <= cnt ) {
+    this->sub_map.remove( loc );
+    if ( this->sub_map.is_empty() )
+      this->sub_map.release();
+    return 0;
+  }
+  rt->refcnt -= cnt;
+  return rt->refcnt;
+}
+
 void RvHost::write( void ) noexcept {}
 void RvHost::read( void ) noexcept {}
 void RvHost::process( void ) noexcept {}

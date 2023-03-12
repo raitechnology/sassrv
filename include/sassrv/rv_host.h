@@ -249,6 +249,14 @@ struct RvHostStat {
   }
 };
 
+struct RvDaemonSub {
+  uint32_t hash,       /* hash of subject */
+           refcnt;     /* daemon ref cnt */
+  uint16_t len;        /* length of subject */
+  char     value[ 2 ]; /* the subject string */
+};
+typedef kv::RouteVec<RvDaemonSub> RvDaemonMap;
+
 struct RvHost : public kv::EvSocket {
   RvHostDB         & db;
   kv::RoutePublish & sub_route;
@@ -296,7 +304,7 @@ struct RvHost : public kv::EvSocket {
                 dataloss_inbound_len;
   uint32_t      dataloss_outbound_hash,
                 dataloss_inbound_hash;
-
+  RvDaemonMap   sub_map;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   RvHost( RvHostDB &d,  kv::EvPoll &poll,  kv::RoutePublish &sr,  
@@ -383,6 +391,9 @@ struct RvHost : public kv::EvSocket {
   virtual void read( void ) noexcept;
   virtual void release( void ) noexcept;
   void reassert_subs( void ) noexcept;
+  uint32_t add_ref( const char *sub,  size_t sublen,  uint32_t h ) noexcept;
+  uint32_t rem_ref( const char *sub,  size_t sublen,  uint32_t h,
+                    uint32_t cnt ) noexcept;
 };
 
 struct DaemonInbox {
