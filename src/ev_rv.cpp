@@ -601,6 +601,7 @@ EvRvService::send_start( void ) noexcept
 void
 EvRvService::send_stop( void ) noexcept
 {
+  this->rem_all_sub();
   if ( ( this->svc_state & IS_RV_SESSION ) != 0 ) {
     if ( ( this->svc_state & SENT_SESSION_START ) != 0 &&
          ( this->svc_state & SENT_SESSION_STOP ) == 0 )
@@ -826,7 +827,7 @@ EvRvService::rem_sub( void ) noexcept
   /* if found ref, no listen stops on restricted subjects _RV. _INBOX. */
   sub = this->msg_in.sub;
   len = this->msg_in.sublen;
-  if ( refcnt != 0xffffffffU ) {
+  if ( refcnt == 0 ) {
     this->host->send_listen_stop( *this, sub, len, refcnt );
   }
 }
@@ -836,6 +837,8 @@ EvRvService::rem_all_sub( void ) noexcept
 {
   RvSubRoutePos     pos;
   RvPatternRoutePos ppos;
+  size_t            prelen = this->msg_in.prefix_len;
+  bool              do_stop = ! this->poll.quit && this->host != NULL;
 
   if ( this->sub_tab.first( pos ) ) {
     do {
@@ -843,6 +846,11 @@ EvRvService::rem_all_sub( void ) noexcept
       NotifySub nsub( pos.rt->value, pos.rt->len, pos.rt->hash,
                       this->fd, coll, 'V', this->host );
       this->sub_route.del_sub( nsub );
+      if ( do_stop && pos.rt->len > prelen ) {
+        const char * sub = &pos.rt->value[ prelen ];
+        size_t       len = pos.rt->len - prelen;
+        this->host->send_listen_stop( *this, sub, len, 0 );
+      }
     } while ( this->sub_tab.next( pos ) );
   }
   if ( this->pat_tab.first( ppos ) ) {
@@ -854,6 +862,11 @@ EvRvService::rem_all_sub( void ) noexcept
           NotifyPattern npat( cvt, m->value, m->len, ppos.rt->hash,
                               this->fd, coll, 'V', this->host );
           this->sub_route.del_pat( npat );
+          if ( do_stop && m->len > prelen ) {
+            const char * sub = &m->value[ prelen ];
+            size_t       len = m->len - prelen;
+            this->host->send_listen_stop( *this, sub, len, 0 );
+          }
         }
       }
     } while ( this->pat_tab.next( ppos ) );
@@ -1167,7 +1180,6 @@ EvRvService::release( void ) noexcept
     this->poll.timer.remove_timer( this->fd, this->timer_id, 0 );
   if ( this->bp_in_list() )
     this->bp_retire( *this );
-  this->rem_all_sub();
   this->sub_tab.release();
   this->pat_tab.release();
   this->msg_in.release();

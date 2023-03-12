@@ -1451,7 +1451,7 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
     size_t n;
     if ( (n = p->get_session( this->svc, sess )) > 0 ) {
       if ( n + 1 == session_len && ::memcmp( sess, session, n ) == 0 ) {
-        subcnt  = p->get_subscriptions( this->svc, subs ),
+        subcnt  = p->get_subscriptions( this->svc, subs );
         patcnt  = p->get_patterns( this->svc, RV_PATTERN_FMT, pats );
         userlen = p->get_userid( user );
         break;
