@@ -260,6 +260,7 @@ typedef kv::RouteVec<RvDaemonSub> RvDaemonMap;
 struct RvHost : public kv::EvSocket {
   RvHostDB         & db;
   kv::RoutePublish & sub_route;
+  RvDaemonMap        sub_map;
 
   char          host[ 256 ],       /* gethostname */
                 session_ip[ 16 ],  /* address: 0A040416, sess_ip is quad fmt */
@@ -304,7 +305,6 @@ struct RvHost : public kv::EvSocket {
                 dataloss_inbound_len;
   uint32_t      dataloss_outbound_hash,
                 dataloss_inbound_hash;
-  RvDaemonMap   sub_map;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   RvHost( RvHostDB &d,  kv::EvPoll &poll,  kv::RoutePublish &sr,  
