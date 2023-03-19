@@ -1499,7 +1499,8 @@ EvRvService::get_subscriptions( uint16_t svc,  SubRouteDB &subs ) noexcept
       if ( pos.rt->len > prelen ) {
         const char * val = &pos.rt->value[ prelen ];
         size_t       len = pos.rt->len - prelen;
-        if ( ! is_restricted_subject( val, len ) ) {
+        /* rv host will filter these */
+        /*if ( ! is_restricted_subject( val, len ) )*/ {
           uint32_t h = kv_crc_c( val, len, 0 );
           subs.upsert( h, val, len, loc );
           if ( loc.is_new )
@@ -1530,7 +1531,7 @@ EvRvService::get_patterns( uint16_t svc,  int pat_fmt,
         if ( m->len > prelen ) {
           const char * val = &m->value[ prelen ];
           size_t       len = m->len - prelen;
-          if ( ! is_restricted_subject( val, len ) ) {
+          /*if ( ! is_restricted_subject( val, len ) )*/ {
             uint32_t h = kv_crc_c( val, len, 0 );
             pats.upsert( h, val, len, loc );
             if ( loc.is_new )

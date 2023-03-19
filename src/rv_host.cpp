@@ -942,6 +942,27 @@ RvHost::send_host_status( void ) noexcept
 {
   static const char   status[]   = "_RV.INFO.SYSTEM.HOST.STATUS.";
   static const size_t status_len = sizeof( status ) - 1;
+
+  PeerMatchArgs ka( "tcp", 3 );
+  PeerMatchIter iter( *this, ka );
+  PeerStats     cur;
+  for ( EvSocket *p = iter.first(); p != NULL; p = iter.next() ) {
+    char sess[ MAX_SESSION_LEN ];
+    if ( ::strcmp( p->kind, "rv" ) == 0 )
+      continue;
+    if ( p->get_session( this->service_num, sess ) > 0 )
+      p->client_stats( cur );
+  }
+  PeerStats & last = this->other_stat;
+  if ( last.bytes_recv < cur.bytes_recv )
+    this->stat.br += cur.bytes_recv - last.bytes_recv;
+  if ( last.bytes_sent < cur.bytes_sent )
+    this->stat.bs += cur.bytes_sent - last.bytes_sent;
+  if ( last.msgs_recv < cur.msgs_recv )
+    this->stat.mr += cur.msgs_recv - last.msgs_recv;
+  if ( last.msgs_sent < cur.msgs_sent )
+    this->stat.ms += cur.msgs_sent - last.msgs_sent;
+  last = cur;
   RvFwdAdv fwd( *this, NULL, status, status_len, ADV_HOST_STATUS );
 }
 

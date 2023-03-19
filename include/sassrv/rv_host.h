@@ -288,6 +288,7 @@ struct RvHost : public kv::EvSocket {
   static const size_t session_ip_len = 8;
   RvHostStat    stat,
                 previous_stat[ 2 ];
+  kv::PeerStats other_stat;
   uint64_t      host_status_count, /* count of host.stat msgs sent */
                 start_stamp,       /* when service started */
                 active_clients,    /* count of connections using this service */
