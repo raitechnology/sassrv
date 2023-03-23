@@ -678,19 +678,25 @@ EvRvService::is_psubscribed( const NotifyPattern &pat ) noexcept
 void
 EvRvService::add_sub( void ) noexcept
 {
-  char   * sub;
-  size_t   len;
-  uint32_t refcnt = 0, h, sub_h = 0;
-  bool     coll   = false;
+  char      * sub;
+  size_t      len;
+  uint32_t    refcnt = 0, h, sub_h = 0;
+  RvSubStatus status;
+  bool        coll   = false;
 
   this->msg_in.pre_subject( sub, len );
   if ( ! this->msg_in.is_wild ) {
     h = kv_crc_c( sub, len, 0 );
     sub_h = h;
-    if ( this->sub_tab.put( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
-      NotifySub nsub( sub, len, this->msg_in.reply, this->msg_in.replylen,
-                      h, this->fd, coll, 'V', this->host );
+    status = this->sub_tab.put( h, sub, len, refcnt, coll );
+    NotifySub nsub( sub, len, this->msg_in.reply, this->msg_in.replylen,
+                    h, this->fd, coll, 'V', this );
+    if ( status == RV_SUB_OK ) {
       this->sub_route.add_sub( nsub );
+    }
+    else if ( status == RV_SUB_EXISTS ) {
+      nsub.sub_count = refcnt;
+      this->sub_route.notify_sub( nsub );
     }
   }
   else {
@@ -701,7 +707,7 @@ EvRvService::add_sub( void ) noexcept
       h = kv_crc_c( sub, cvt.prefixlen,
                     this->sub_route.prefix_seed( cvt.prefixlen ) );
       if ( this->pat_tab.put( h, sub, cvt.prefixlen, rt,
-                              coll ) != RV_SUB_NOT_FOUND ){
+                              coll ) != RV_SUB_NOT_FOUND ) {
         RvWildMatch * m;
         for ( m = rt->list.hd; m != NULL; m = m->next ) {
           if ( m->len == len && ::memcmp( sub, m->value, len ) == 0 ) {
@@ -709,6 +715,9 @@ EvRvService::add_sub( void ) noexcept
             break;
           }
         }
+        NotifyPattern npat( cvt, sub, len,
+                            this->msg_in.reply, this->msg_in.replylen,
+                            h, this->fd, coll, 'V', this );
         if ( m == NULL ) {
           pcre2_real_code_8       * re = NULL;
           pcre2_real_match_data_8 * md = NULL;
@@ -737,11 +746,8 @@ EvRvService::add_sub( void ) noexcept
                (m = RvWildMatch::create( len, sub, re, md )) != NULL ) {
             rt->list.push_hd( m );
             if ( rt->count++ > 0 )
-              coll = true;
+              npat.hash_collision = true;
             this->pat_tab.sub_count++;
-            NotifyPattern npat( cvt, sub, len,
-                                this->msg_in.reply, this->msg_in.replylen,
-                                h, this->fd, coll, 'V', this->host );
             this->sub_route.add_pat( npat );
           }
           else {
@@ -753,6 +759,10 @@ EvRvService::add_sub( void ) noexcept
             if ( re != NULL )
               pcre2_code_free( re );
           }
+        }
+        else {
+          npat.sub_count = refcnt;
+          this->sub_route.notify_pat( npat );
         }
       }
     }
@@ -782,9 +792,13 @@ EvRvService::rem_sub( void ) noexcept
     h = kv_crc_c( sub, len, 0 );
     sub_h = h;
     if ( this->sub_tab.rem( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
+      NotifySub nsub( sub, len, h, this->fd, coll, 'V', this );
       if ( refcnt == 0 ) {
-        NotifySub nsub( sub, len, h, this->fd, coll, 'V', this->host );
         this->sub_route.del_sub( nsub );
+      }
+      else {
+        nsub.sub_count = refcnt;
+        this->sub_route.notify_unsub( nsub );
       }
     }
   }
@@ -800,6 +814,7 @@ EvRvService::rem_sub( void ) noexcept
                                coll ) == RV_SUB_OK ) {
         for ( RvWildMatch *m = rt->list.hd; m != NULL; m = m->next ) {
           if ( m->len == len && ::memcmp( m->value, sub, len ) == 0 ) {
+            NotifyPattern npat( cvt, sub, len, h, this->fd, coll, 'V', this );
             refcnt = --m->refcnt;
             if ( refcnt == 0 ) {
               if ( m->md != NULL ) {
@@ -812,15 +827,16 @@ EvRvService::rem_sub( void ) noexcept
               }
               rt->list.pop( m );
               if ( --rt->count > 0 )
-                coll = true;
+                npat.hash_collision = true;
               delete m;
               this->pat_tab.sub_count--;
               if ( rt->count == 0 )
                 this->pat_tab.tab.remove( loc );
-
-              NotifyPattern npat( cvt, sub, len, h, this->fd, coll, 'V',
-                                  this->host );
               this->sub_route.del_pat( npat );
+            }
+            else {
+              npat.sub_count = refcnt;
+              this->sub_route.notify_unpat( npat );
             }
             break;
           }
@@ -896,7 +912,7 @@ EvRvService::rem_all_sub( void ) noexcept
     do {
       bool coll = this->sub_tab.rem_collision( pos.rt );
       NotifySub nsub( pos.rt->value, pos.rt->len, pos.rt->hash,
-                      this->fd, coll, 'V', this->host );
+                      this->fd, coll, 'V', this );
       this->sub_route.del_sub( nsub );
     } while ( this->sub_tab.next( pos ) );
   }
@@ -907,7 +923,7 @@ EvRvService::rem_all_sub( void ) noexcept
         if ( cvt.convert_rv( m->value, m->len ) == 0 ) {
           bool coll = this->pat_tab.rem_collision( ppos.rt, m );
           NotifyPattern npat( cvt, m->value, m->len, ppos.rt->hash,
-                              this->fd, coll, 'V', this->host );
+                              this->fd, coll, 'V', this );
           this->sub_route.del_pat( npat );
         }
       }
