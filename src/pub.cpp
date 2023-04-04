@@ -242,7 +242,7 @@ RvDataCallback::run_publishers( void ) noexcept
       }
     }
     EvPublish pub( s, slen, NULL, 0, this->msg_buf, msg_len,
-                   this->client.sub_route, 0, 0, msg_enc, 'p' );
+                   this->client.sub_route, this->client, 0, msg_enc, 'p' );
     if ( ! this->client.publish( pub ) ) {
       /* wait for ready */
       if ( this->has_back_pressure( this->poll, this->client.fd ) )
@@ -287,7 +287,7 @@ RvDataCallback::send_dict_request( void ) noexcept
   uint16_t inbox_len = this->client.make_inbox( inbox, DICT_INBOX_ID );
   /* request dictionar */
   EvPublish pub( DICT_SUBJ, DICT_SUBJ_LEN, inbox, inbox_len,
-                 NULL, 0, this->client.sub_route, 0, 0, 0, 0 );
+                 NULL, 0, this->client.sub_route, this->client, 0, 0, 0 );
   this->client.publish( pub );
 }
 

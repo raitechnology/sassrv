@@ -436,7 +436,7 @@ EvRvClient::fwd_pub( void ) noexcept
       ftype = ft;
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
-                 this->sub_route, this->fd, h, ftype, 'p' );
+                 this->sub_route, *this, h, ftype, 'p' );
   if ( this->cb != NULL )
     return this->cb->on_msg( pub );
   return this->sub_route.forward_msg( pub );
@@ -448,7 +448,7 @@ EvRvClient::fwd_pub( void ) noexcept
 bool
 EvRvClient::on_msg( EvPublish &pub ) noexcept
 {
-  if ( pub.src_route == (uint32_t) this->fd )
+  if ( this->equals( pub.src_route ) )
     return true;
 
   return this->publish( pub );

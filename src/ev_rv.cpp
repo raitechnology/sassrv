@@ -382,7 +382,7 @@ EvRvService::fwd_pub( void ) noexcept
     }
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
-                 this->sub_route, this->fd, h, ftype, 'p' );
+                 this->sub_route, *this, h, ftype, 'p' );
   BPData * data = NULL;
   if ( ( this->svc_state & ( FWD_BACKPRESSURE | FWD_BUFFERSIZE ) ) != 0 )
     data = this;
@@ -690,7 +690,7 @@ EvRvService::add_sub( void ) noexcept
     sub_h = h;
     status = this->sub_tab.put( h, sub, len, refcnt, coll );
     NotifySub nsub( sub, len, this->msg_in.reply, this->msg_in.replylen,
-                    h, this->fd, coll, 'V', this );
+                    h, coll, 'V', *this );
     if ( status == RV_SUB_OK ) {
       this->sub_route.add_sub( nsub );
     }
@@ -717,7 +717,7 @@ EvRvService::add_sub( void ) noexcept
         }
         NotifyPattern npat( cvt, sub, len,
                             this->msg_in.reply, this->msg_in.replylen,
-                            h, this->fd, coll, 'V', this );
+                            h, coll, 'V', *this );
         if ( m == NULL ) {
           pcre2_real_code_8       * re = NULL;
           pcre2_real_match_data_8 * md = NULL;
@@ -792,7 +792,7 @@ EvRvService::rem_sub( void ) noexcept
     h = kv_crc_c( sub, len, 0 );
     sub_h = h;
     if ( this->sub_tab.rem( h, sub, len, refcnt, coll ) == RV_SUB_OK ) {
-      NotifySub nsub( sub, len, h, this->fd, coll, 'V', this );
+      NotifySub nsub( sub, len, h, coll, 'V', *this );
       if ( refcnt == 0 ) {
         this->sub_route.del_sub( nsub );
       }
@@ -814,7 +814,7 @@ EvRvService::rem_sub( void ) noexcept
                                coll ) == RV_SUB_OK ) {
         for ( RvWildMatch *m = rt->list.hd; m != NULL; m = m->next ) {
           if ( m->len == len && ::memcmp( m->value, sub, len ) == 0 ) {
-            NotifyPattern npat( cvt, sub, len, h, this->fd, coll, 'V', this );
+            NotifyPattern npat( cvt, sub, len, h, coll, 'V', *this );
             refcnt = --m->refcnt;
             if ( refcnt == 0 ) {
               if ( m->md != NULL ) {
@@ -912,7 +912,7 @@ EvRvService::rem_all_sub( void ) noexcept
     do {
       bool coll = this->sub_tab.rem_collision( pos.rt );
       NotifySub nsub( pos.rt->value, pos.rt->len, pos.rt->hash,
-                      this->fd, coll, 'V', this );
+                      coll, 'V', *this );
       this->sub_route.del_sub( nsub );
     } while ( this->sub_tab.next( pos ) );
   }
@@ -923,7 +923,7 @@ EvRvService::rem_all_sub( void ) noexcept
         if ( cvt.convert_rv( m->value, m->len ) == 0 ) {
           bool coll = this->pat_tab.rem_collision( ppos.rt, m );
           NotifyPattern npat( cvt, m->value, m->len, ppos.rt->hash,
-                              this->fd, coll, 'V', this );
+                              coll, 'V', *this );
           this->sub_route.del_pat( npat );
         }
       }
@@ -1142,7 +1142,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
     if ( off > 0 ) {
       uint32_t idx = 0;
       if ( msg_len > this->recv_highwater ) {
-        idx = this->poll.zero_copy_ref( pub.src_route, msg, msg_len );
+        idx = this->poll.zero_copy_ref( pub.src_route.fd, msg, msg_len );
         if ( idx != 0 )
           this->append_ref_iov( buf, off, msg, msg_len, idx );
       }
@@ -1459,10 +1459,10 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
 }
 
 bool
-EvRvService::get_service( void *host,  uint16_t &svc ) noexcept
+EvRvService::get_service( void *host,  uint16_t &svc ) const noexcept
 {
   if ( host != NULL )
-    *(void **) host = &this->host;
+    *(void **) host = (void *) &this->host;
   if ( this->host != NULL ) {
     svc = this->host->service_num;
     return true;
@@ -1480,7 +1480,7 @@ EvRvService::set_session( const char session[ MAX_SESSION_LEN ] ) noexcept
 
 /* get session name */
 size_t
-EvRvService::get_userid( char userid[ MAX_USERID_LEN ] ) noexcept
+EvRvService::get_userid( char userid[ MAX_USERID_LEN ] ) const noexcept
 {
   ::memcpy( userid, this->userid, this->userid_len );
   userid[ this->userid_len ] = '\0';
@@ -1489,7 +1489,7 @@ EvRvService::get_userid( char userid[ MAX_USERID_LEN ] ) noexcept
 /* get session name */
 size_t
 EvRvService::get_session( uint16_t svc,
-                          char session[ MAX_SESSION_LEN ] ) noexcept
+                          char session[ MAX_SESSION_LEN ] ) const noexcept
 {
   if ( this->host != NULL && this->host->service_num == svc ) {
     ::memcpy( session, this->session, this->session_len );

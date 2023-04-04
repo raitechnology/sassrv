@@ -71,9 +71,8 @@ RvHost::RvHost( RvHostDB &d,  EvPoll &poll,  RoutePublish &sr,
 int
 RvHost::init_host( void ) noexcept
 {
-  int pfd = this->poll.get_null_fd();
-  this->PeerData::init_peer( pfd, this->sub_route.route_id, NULL,
-                             "rv_host" );
+  this->PeerData::init_peer( this->poll.get_next_id(), this->poll.get_null_fd(),
+                             this->sub_route.route_id, NULL, "rv_host" );
   return this->poll.add_sock( this );
 }
 
@@ -277,7 +276,7 @@ RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
     msg.append_ipdata( SARG( "scid" ), this->ipport );
   size = msg.update_hdr();
 
-  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, this->fd,
+  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, *this,
                  this->dataloss_outbound_hash, RVMSG_TYPE_ID, 'p' );
 
   PeerMatchArgs ka( "rv", 2 );
@@ -319,7 +318,7 @@ RvHost::send_outbound_data_loss( uint32_t msg_loss,  uint32_t pub_host,
     rvmsg.append_ipdata( SARG( "scid" ), this->ipport );
   size_t size = rvmsg.update_hdr();
 
-  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, this->fd,
+  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, *this,
                  this->dataloss_outbound_hash, RVMSG_TYPE_ID, 'p' );
 
   PeerMatchArgs ka( "tcp", 3 );
@@ -532,7 +531,7 @@ RvHost::send_inbound_data_loss( RvPubLoss &loss ) noexcept
   size = rvmsg.update_hdr();
 
   EvPublish pub( sys_sub, sys_sublen, NULL, 0, rvmsg.buf, size,
-                 this->sub_route, this->fd, this->dataloss_inbound_hash,
+                 this->sub_route, *this, this->dataloss_inbound_hash,
                  RVMSG_TYPE_ID, 'p' );
   this->sub_route.forward_to( pub, loss.sock->fd );
   return true;
@@ -931,7 +930,7 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
   if ( is_rv_debug )
     printf( "fwd %.*s\n", (int) sublen, subj );
   EvPublish pub( subj, sublen, rsubj, rsublen, msg.buf, msg_size,
-                 host.sub_route, host.fd, h, RVMSG_TYPE_ID, 'h' );
+                 host.sub_route, host, h, RVMSG_TYPE_ID, 'h' );
   if ( is_rv_debug )
     EvRvService::print( msg.buf, msg_size );
   host.sub_route.forward_msg( pub );
@@ -1347,9 +1346,8 @@ RvDaemonRpc::RvDaemonRpc( RvHost &h ) noexcept
 int
 RvDaemonRpc::init_rpc( void ) noexcept
 {
-  int pfd = this->poll.get_null_fd();
-  this->PeerData::init_peer( pfd, this->sub_route.route_id, NULL,
-                             "rv_daemon_rpc" );
+  this->PeerData::init_peer( this->poll.get_next_id(), this->poll.get_null_fd(),
+                             this->sub_route.route_id, NULL, "rv_daemon_rpc" );
   return this->poll.add_sock( this );
 }
 
@@ -1362,7 +1360,7 @@ RvDaemonRpc::subscribe_daemon_inbox( void ) noexcept
     if ( is_rv_debug )
       printf( "subscribe daemon %.*s\n", (int) this->ibx.len, this->ibx.buf );
     NotifySub nsub( this->ibx.buf, this->ibx.len, this->ibx.h,
-                    this->fd, false, 'V' );
+                    false, 'V', *this );
     this->sub_route.add_sub( nsub );
   }
 }
@@ -1374,7 +1372,7 @@ RvDaemonRpc::unsubscribe_daemon_inbox( void ) noexcept
     if ( is_rv_debug )
       printf( "unsubscribe daemon %.*s\n", (int) this->ibx.len, this->ibx.buf );
     NotifySub nsub( this->ibx.buf, this->ibx.len, this->ibx.h,
-                    this->fd, false, 'V' );
+                    false, 'V', *this );
     this->sub_route.del_sub( nsub );
   }
 }
@@ -1444,7 +1442,7 @@ RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
   if ( is_rv_debug )
     printf( "pub sessions reply %.*s\n", (int) reply_len, (char *) reply );
   EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
-                 this->sub_route, this->fd, kv_crc_c( reply, reply_len, 0 ),
+                 this->sub_route, *this, kv_crc_c( reply, reply_len, 0 ),
                  RVMSG_TYPE_ID, 'p' );
   this->sub_route.forward_msg( pub );
 }
@@ -1520,7 +1518,7 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
   if ( is_rv_debug )
     printf( "pub subs reply %.*s\n", (int) reply_len, (char *) reply );
   EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
-                 this->sub_route, this->fd, kv_crc_c( reply, reply_len, 0 ),
+                 this->sub_route, *this, kv_crc_c( reply, reply_len, 0 ),
                  RVMSG_TYPE_ID, 'p' );
   this->sub_route.forward_msg( pub );
 }
