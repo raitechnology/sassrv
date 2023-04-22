@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <time.h>
-#ifndef _MSC_VER
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -1129,7 +1129,7 @@ RvMcast::lookup_host_ip4( const char *host,  uint32_t &netmask ) noexcept
   if ( (ipaddr = lookup_host_ip4( host )) == 0 )
     return 0;
 
-#ifndef _MSC_VER
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
   ifconf conf;
   ifreq  ifbuf[ 256 ],
        * ifp, ifa, ifm;
@@ -1212,7 +1212,7 @@ RvMcast::lookup_dev_ip4( const char *dev,  uint32_t &netmask ) noexcept
 {
   uint32_t ipaddr = 0;
   netmask = 0;
-#ifndef _MSC_VER
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
   ifreq    ifa, ifm;
   int      s  = ::socket( PF_INET, SOCK_DGRAM, IPPROTO_UDP );
   if ( ::strlen( dev ) < sizeof( ifa.ifr_name ) ) {
@@ -1226,6 +1226,8 @@ RvMcast::lookup_dev_ip4( const char *dev,  uint32_t &netmask ) noexcept
     }
   }
   ::close( s );
+#else
+  (void) dev; (void) netmask;
 #endif
   return ipaddr;
 }

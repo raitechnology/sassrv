@@ -347,7 +347,7 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
       return true;
     }
     else {
-      printf( "## Unknown inbox message (%lu)\n", idx );
+      printf( "## Unknown inbox message (%u)\n", (uint32_t) idx );
     }
   }
   else { /* not inbox subject */

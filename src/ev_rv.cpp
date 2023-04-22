@@ -2,10 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#ifndef _MSC_VER
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
 #include <arpa/inet.h>
 #else
-#include <winsock.h>
+#include <raikv/win.h>
 #endif
 #include <sassrv/ev_rv.h>
 #include <raikv/key_hash.h>
