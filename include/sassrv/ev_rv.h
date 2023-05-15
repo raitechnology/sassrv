@@ -478,6 +478,7 @@ struct EvRvService : public kv::EvConnection, public kv::BPData {
   void rem_sub( void ) noexcept;     /* unsubscribe subject ('C') */
   void rem_all_sub( void ) noexcept; /* when client disconnects, this clears */
   enum { RV_FLOW_GOOD = 0, RV_FLOW_BACKPRESSURE = 1, RV_FLOW_STALLED = 2 };
+  void print_rv_msg_err( void *msgbuf,  size_t msglen,  int status ) noexcept;
   int fwd_pub( void ) noexcept;     /* fwd a message from client to network */
   /* forward a message from network to client */
   bool fwd_msg( kv::EvPublish &pub ) noexcept;

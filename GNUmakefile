@@ -26,6 +26,8 @@ libd      := $(build_dir)/lib64
 objd      := $(build_dir)/obj
 dependd   := $(build_dir)/dep
 
+have_rpm  := $(shell if [ -x /bin/rpmquery ] ; then echo true; fi)
+have_dpkg := $(shell if [ -x /bin/dpkg-buildflags ] ; then echo true; fi)
 default_cflags := -ggdb -O3
 # use 'make port_extra=-g' for debug build
 ifeq (-g,$(findstring -g,$(port_extra)))
@@ -40,8 +42,12 @@ ifeq (-mingw,$(findstring -mingw,$(port_extra)))
   mingw := true
 endif
 ifeq (,$(port_extra))
-  build_cflags := $(shell if [ -x /bin/rpm ]; then /bin/rpm --eval '%{optflags}' ; \
-                          elif [ -x /bin/dpkg-buildflags ] ; then /bin/dpkg-buildflags --get CFLAGS ; fi)
+  ifeq (true,$(have_rpm))
+    build_cflags = $(shell /bin/rpm --eval '%{optflags}')
+  endif
+  ifeq (true,$(have_dpkg))
+    build_cflags = $(shell /bin/dpkg-buildflags --get CFLAGS)
+  endif
 endif
 # msys2 using ucrt64
 ifeq (MSYS2,$(lsb_dist))
@@ -99,8 +105,7 @@ cppflags  := -std=c++11
 cpplink   := $(CXX)
 endif
 
-rpath     := -Wl,-rpath,$(pwd)/$(libd)
-math_lib  := -lm
+math_lib    := -lm
 
 # test submodules exist (they don't exist for dist_rpm, dist_dpkg targets)
 test_makefile = $(shell if [ -f ./$(1)/GNUmakefile ] ; then echo ./$(1) ; \
@@ -114,7 +119,7 @@ ifeq (,$(dec_home))
 dec_home    := $(call test_makefile,$(md_home)/libdecnumber)
 endif
 
-lnk_lib     :=
+lnk_lib     := -Wl,--push-state -Wl,-Bstatic
 dlnk_lib    :=
 lnk_dep     :=
 dlnk_dep    :=
@@ -129,7 +134,7 @@ dlnk_dep    += $(md_dll)
 rpath1       = ,-rpath,$(pwd)/$(md_home)/$(libd)
 includes    += -I$(md_home)/include
 else
-lnk_lib     += -lraimd
+lnk_lib     += $(push_static) -lraimd $(pop_static)
 dlnk_lib    += -lraimd
 endif
 
@@ -143,7 +148,7 @@ dlnk_dep    += $(dec_dll)
 rpath2       = ,-rpath,$(pwd)/$(dec_home)/$(libd)
 dec_includes = -I$(dec_home)/include
 else
-lnk_lib     += -ldecnumber
+lnk_lib     += $(push_static) -ldecnumber $(pop_static)
 dlnk_lib    += -ldecnumber
 endif
 
@@ -157,11 +162,12 @@ dlnk_dep    += $(kv_dll)
 rpath3       = ,-rpath,$(pwd)/$(kv_home)/$(libd)
 includes    += -I$(kv_home)/include
 else
-lnk_lib     += -lraikv
+lnk_lib     += $(push_static) -lraikv $(pop_static)
 dlnk_lib    += -lraikv
 endif
 
-rpath := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)
+rpath   := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)
+lnk_lib += -Wl,--pop-state
 
 .PHONY: everything
 everything: $(kv_lib) $(dec_lib) $(md_lib) all

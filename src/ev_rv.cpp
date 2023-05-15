@@ -204,6 +204,7 @@ EvRvService::send_info( bool agree ) noexcept
 void
 EvRvService::process( void ) noexcept
 {
+  void   * msgbuf;
   uint32_t buflen, msglen;
   int      status = -1;
 
@@ -218,12 +219,19 @@ EvRvService::process( void ) noexcept
     for (;;) {
       if ( buflen < 8 )
         goto break_loop;
-      msglen = get_u32<MD_BIG>( &this->recv[ this->off ] );
+      msgbuf = &this->recv[ this->off ];
+      msglen = get_u32<MD_BIG>( msgbuf );
       if ( buflen < msglen ) {
+        uint32_t magic = get_u32<MD_BIG>( &this->recv[ off + 4 ] );
+        if ( magic != 0x9955eeaaU ) {
+          status = md::Err::BAD_MAGIC_NUMBER;
+          this->print_rv_msg_err( msgbuf, msglen, status );
+          break;
+        }
         this->recv_need( msglen );
         goto break_loop;
       }
-      status = this->dispatch_msg( &this->recv[ this->off ], msglen );
+      status = this->dispatch_msg( msgbuf, msglen );
 
       if ( status != 0 )
         break;
@@ -283,17 +291,11 @@ break_loop:;
 int
 EvRvService::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
 {
-  static const char *rv_status_string[] = RV_STATUS_STRINGS;
   int status;
   if ( (status = this->msg_in.unpack( msgbuf, msglen )) != 0 ) {
     if ( msglen == 8 ) /* empty msg */
       return 0;
-    if ( msglen != 0 ) {
-      MDOutput mout;
-      fprintf( stderr, "rv status %d: \"%s\" msglen=%u\n", status,
-               rv_status_string[ status ], (uint32_t) msglen );
-      mout.print_hex( msgbuf, msglen > 256 ? 256 : msglen );
-    }
+    this->print_rv_msg_err( msgbuf, msglen, status );
     return status;
   }
   /*this->msg_in.print();*/
@@ -333,6 +335,19 @@ EvRvService::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
       return -1;
   }
 }
+
+void
+EvRvService::print_rv_msg_err( void *msgbuf,  size_t msglen,
+                               int status ) noexcept
+{
+  static const char *rv_status_string[] = RV_STATUS_STRINGS;
+  MDOutput mout;
+  fprintf( stderr, "rv status %d: \"%s\" msglen=%u\n", status,
+           rv_status_string[ status ], (uint32_t) msglen );
+  if ( msglen > 0 )
+    mout.print_hex( msgbuf, msglen > 256 ? 256 : msglen );
+}
+
 /* when a 'D' message is received from client, forward the message data,
  * this also decapsulates the opaque data field and forwards the message
  * with the correct message type attribute:
@@ -1061,7 +1076,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
     static const char data_hdr[] = "\005data";
     RvMsgWriter submsg( NULL, 0 );
     uint32_t msg_enc = pub.msg_enc;
-    size_t   off,
+    size_t   msg_off,
              msg_len = pub.msg_len;
     void   * msg     = (void *) pub.msg;
     /* depending on message type, encode the hdr to send to the client */
@@ -1069,7 +1084,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       case RVMSG_TYPE_ID:
       do_rvmsg:;
         rvmsg.append_msg( SARG( "data" ), submsg );
-        off         = rvmsg.off + submsg.off;
+        msg_off     = rvmsg.off + submsg.off;
         submsg.off += msg_len - 8;
         msg         = &((uint8_t *) msg)[ 8 ];
         msg_len     = msg_len - 8;
@@ -1116,7 +1131,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
           buf[ rvmsg.off++ ] = ( ( msg_len + 4 ) >> 8 ) & 0xff;
           buf[ rvmsg.off++ ] = ( msg_len + 4 ) & 0xff;
         }
-        off = rvmsg.off;
+        msg_off = rvmsg.off;
         rvmsg.off += msg_len;
         rvmsg.update_hdr();
         break;
@@ -1127,31 +1142,31 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
         /* FALLTHRU */
       default:
         if ( msg_len == 0 ) {
-          off = rvmsg.off;
+          msg_off = rvmsg.off;
           rvmsg.update_hdr();
         }
         else {
           if ( MDMsg::is_msg_type( msg, 0, msg_len, 0 ) != 0 )
             goto do_tibmsg;
-          off = 0;
+          msg_off = 0;
         }
         msg     = NULL;
         msg_len = 0;
         break;
     }
-    if ( off > 0 ) {
+    if ( msg_off > 0 ) {
       uint32_t idx = 0;
       if ( msg_len > this->recv_highwater ) {
         idx = this->poll.zero_copy_ref( pub.src_route.fd, msg, msg_len );
         if ( idx != 0 )
-          this->append_ref_iov( buf, off, msg, msg_len, idx );
+          this->append_ref_iov( buf, msg_off, msg, msg_len, idx );
       }
       if ( idx == 0 ) {
-        char *m = this->append2( buf, off, msg, msg_len );
+        char *m = this->append2( buf, msg_off, msg, msg_len );
         if ( is_rv_debug )
-          this->print( m, off + msg_len );
+          this->print( m, msg_off + msg_len );
       }
-      this->host->stat.bs += off + msg_len;
+      this->host->stat.bs += msg_off + msg_len;
       this->msgs_sent++;
       this->host->stat.ms++;
       /*this->send( buf, off, msg, msg_len );*/
