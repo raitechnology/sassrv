@@ -58,7 +58,7 @@ count_segments( const char *value,  size_t len )
 static inline bool
 is_inbox_subject( const char *sub,  size_t sublen )
 {
-  if ( sublen > 6 && ::memcmp( sub, "_INBOX.", 6 ) == 0 )
+  if ( sublen > 7 && ::memcmp( sub, "_INBOX.", 7 ) == 0 )
     return true;
   return false;
 }
@@ -67,7 +67,7 @@ is_inbox_subject( const char *sub,  size_t sublen )
 static inline bool
 is_restricted_subject( const char *sub,  size_t sublen )
 {
-  if ( sublen > 3 && ::memcmp( sub, "_RV.", 3 ) == 0 )
+  if ( sublen > 4 && ::memcmp( sub, "_RV.", 4 ) == 0 )
     return true;
   return is_inbox_subject( sub, sublen );
 }
@@ -329,6 +329,7 @@ struct RvMsgIn {
   char            * reply;    /* the return : Z field */
   uint16_t          sublen,   /* string length of this->sub */
                     replylen; /* string length of this->reply */
+  uint32_t          suffix_len;
   bool              is_wild;  /* if a '*' or '>' pattern match in sub */
   uint8_t           mtype;    /* the type message (Data, Info, Listen, Cancel)*/
   char            * sub,      /* the subject of message, sub : X */
@@ -344,6 +345,7 @@ struct RvMsgIn {
     this->sub        = this->sub_buf;
     this->sublen     = 0;
     this->replylen   = 0;
+    this->suffix_len = 0;
     this->prefix_len = 0;
   }
   void release( void ) {
@@ -375,7 +377,6 @@ struct RvMsgIn {
   }
   bool subject_to_string( const uint8_t *buf,  size_t buflen ) noexcept;
   int unpack( void *msgbuf,  size_t msglen ) noexcept;
-  void print( int status,  void *m,  size_t len ) noexcept;
 };
 
 struct RvIDLElem {
@@ -472,14 +473,14 @@ struct EvRvService : public kv::EvConnection, public kv::BPData {
   void send_info( bool agree ) noexcept; /* info rec during connection start */
   int dispatch_msg( void *msg,  size_t msg_len ) noexcept; /* route msgs */
   int respond_info( void ) noexcept; /* parse and reply info msg ('I') */
-  void send_start( void ) noexcept;
-  void send_stop( void ) noexcept;
+  void send_start( void ) noexcept;  /* sned host start */
+  void send_stop( void ) noexcept;   /* send host stop */
   void add_sub( void ) noexcept;     /* add subscription ('L') */
   void rem_sub( void ) noexcept;     /* unsubscribe subject ('C') */
   void rem_all_sub( void ) noexcept; /* when client disconnects, this clears */
   enum { RV_FLOW_GOOD = 0, RV_FLOW_BACKPRESSURE = 1, RV_FLOW_STALLED = 2 };
   void print_rv_msg_err( void *msgbuf,  size_t msglen,  int status ) noexcept;
-  int fwd_pub( void ) noexcept;     /* fwd a message from client to network */
+  int fwd_pub( void *rvbuf,  size_t buflen ) noexcept; /* fwd msg from clnt */
   /* forward a message from network to client */
   bool fwd_msg( kv::EvPublish &pub ) noexcept;
   static bool convert_json( md::MDMsgMem &spc,  void *&msg,
@@ -487,7 +488,9 @@ struct EvRvService : public kv::EvConnection, public kv::BPData {
   void inbound_data_loss( const char *sub,  size_t sublen,
                           kv::EvPublish &pub ) noexcept;
   bool pub_inbound_data_loss( void ) noexcept;
-  static void print( void *m,  size_t len ) noexcept;
+  void print_in( int status,  void *m,  size_t len ) noexcept;
+  void print_out( void *m,  size_t len ) noexcept;
+  static void print( int fd,  void *m,  size_t len ) noexcept;
   /* EvSocket */
   virtual void read( void ) noexcept;
   virtual void process( void ) noexcept;

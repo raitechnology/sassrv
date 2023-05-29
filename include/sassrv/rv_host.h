@@ -28,6 +28,8 @@ enum RvAdv {
   ADV_REFCNT   = m(12), ADV_NETWORK  = m(25),
                         ADV_IRRS     = m(26),
                         ADV_ORRS     = m(27),
+                        ADV_TPORT    = m(28),
+                        ADV_SESS_SUF = m(29),
   #undef m
 
   ADV_HOST_START  = ADV_HOSTADDR | ADV_SN | ADV_OS | ADV_VER | ADV_HTTPADDR |
@@ -44,7 +46,8 @@ enum RvAdv {
   ADV_HOST_COMMON = ADV_HOST_START | ADV_HOST_STATUS |
                     ADV_HOST_STOP  | ADV_SESSION,
 
-  ADV_LISTEN      = ADV_ID | ADV_SUB | ADV_REFCNT
+  ADV_LISTEN      = ADV_ID | ADV_SUB | ADV_REFCNT,
+  ADV_UNREACHABLE = ADV_TPORT | ADV_HOSTADDR | ADV_SESS_SUF
 };
 
 static const size_t MAX_RV_NETWORK_LEN = 1680,
@@ -350,6 +353,7 @@ struct RvHost : public kv::EvSocket {
                            const char *session,  size_t session_len ) noexcept;
   void send_host_stop( EvRvService *svc ) noexcept;
   void send_session_stop( EvRvService &svc ) noexcept;
+  void send_unreachable_tport( EvRvService &svc ) noexcept;
   void send_session_stop( kv::EvSocket &sock ) noexcept;
   void send_session_stop( const char *user,  size_t user_len,
                           const char *session,  size_t session_len ) noexcept;

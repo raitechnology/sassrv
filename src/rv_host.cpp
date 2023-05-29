@@ -277,8 +277,7 @@ RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
   size = msg.update_hdr();
 
   EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, *this,
-                 this->dataloss_outbound_hash, RVMSG_TYPE_ID, 'p' );
-
+                 this->dataloss_outbound_hash, RVMSG_TYPE_ID );
   PeerMatchArgs ka( "rv", 2 );
   PeerMatchIter iter( *this, ka );
   for ( PeerData *p = iter.first(); p != NULL; p = iter.next() ) {
@@ -319,8 +318,7 @@ RvHost::send_outbound_data_loss( uint32_t msg_loss,  uint32_t pub_host,
   size_t size = rvmsg.update_hdr();
 
   EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, *this,
-                 this->dataloss_outbound_hash, RVMSG_TYPE_ID, 'p' );
-
+                 this->dataloss_outbound_hash, RVMSG_TYPE_ID );
   PeerMatchArgs ka( "tcp", 3 );
   PeerMatchIter iter( *this, ka );
   for ( EvSocket *p = iter.first(); p != NULL; p = iter.next() ) {
@@ -532,7 +530,7 @@ RvHost::send_inbound_data_loss( RvPubLoss &loss ) noexcept
 
   EvPublish pub( sys_sub, sys_sublen, NULL, 0, rvmsg.buf, size,
                  this->sub_route, *this, this->dataloss_inbound_hash,
-                 RVMSG_TYPE_ID, 'p' );
+                 RVMSG_TYPE_ID );
   this->sub_route.forward_to( pub, loss.sock->fd );
   return true;
 }
@@ -758,21 +756,24 @@ void
 RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
 {
   MDMsgMem mem;
-  char   * subj    = NULL,
-         * rsubj   = NULL;
-  size_t   sublen  = 0,
-           prelen  = 0,
-           rsublen = 0;
-  uint64_t now     = 0;
+  char   * subj     = NULL,
+         * rsubj    = NULL,
+         * tport    = NULL;
+  size_t   sublen   = 0,
+           prelen   = 0,
+           rsublen  = 0,
+           tportlen = 0;
+  uint64_t now      = 0;
 
   if ( host.has_service_prefix )
     sublen += host.service_len + 2;
   sublen += this->fix_len;
-  if ( this->suf_len > 0 )
+  if ( ( flags & ADV_SESS_SUF ) != 0 )
+    sublen += host.session_ip_len + 1 + this->suf_len;
+  else if ( this->suf_len > 0 )
     sublen += this->suf_len;
   else
     sublen += host.session_ip_len;
-
   subj = mem.str_make( sublen + 1 );
   sublen = 0;
 
@@ -801,7 +802,17 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
 
   ::memcpy( &subj[ sublen ], this->subj_prefix, this->fix_len );
   sublen += this->fix_len;
-  if ( this->suf_len > 0 ) {
+
+  if ( ( flags & ADV_SESS_SUF ) != 0 ) {
+    tport = &subj[ sublen ];
+    ::memcpy( &subj[ sublen ], host.session_ip, host.session_ip_len );
+    sublen += host.session_ip_len;
+    subj[ sublen++ ] = '.';
+    ::memcpy( &subj[ sublen ], this->subj_suffix, this->suf_len );
+    sublen += this->suf_len;
+    tportlen = &subj[ sublen + 1 ] - tport;
+  }
+  else if ( this->suf_len > 0 ) {
     ::memcpy( &subj[ sublen ], this->subj_suffix, this->suf_len );
     sublen += this->suf_len;
   }
@@ -874,6 +885,8 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
     msg.append_string( SARG( "id" ), this->session, this->session_len + 1 );
   if ( ( flags & ADV_USERID ) != 0 && this->userid_len != 0 )
     msg.append_string( SARG( "userid" ), this->userid, this->userid_len + 1 );
+  if ( ( flags & ADV_TPORT ) != 0 )
+    msg.append_string( SARG( "tport" ), tport, tportlen + 1 );
 
   if ( ( flags & ADV_SUB ) != 0 && this->suf_len != 0 ) {
     char * sub = mem.str_make( this->suf_len + 1 );
@@ -930,9 +943,10 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
   if ( is_rv_debug )
     printf( "fwd %.*s\n", (int) sublen, subj );
   EvPublish pub( subj, sublen, rsubj, rsublen, msg.buf, msg_size,
-                 host.sub_route, host, h, RVMSG_TYPE_ID, 'h' );
+                 host.sub_route, host, h, RVMSG_TYPE_ID,
+                 PUB_TYPE_SERIAL );
   if ( is_rv_debug )
-    EvRvService::print( msg.buf, msg_size );
+    EvRvService::print( host.fd, msg.buf, msg_size );
   host.sub_route.forward_msg( pub );
 }
 
@@ -1016,6 +1030,18 @@ RvHost::send_session_stop( EvRvService &svc ) noexcept
 {
   this->send_session_stop( svc.userid, svc.userid_len,
                            svc.session, svc.session_len );
+  svc.svc_state |= EvRvService::SENT_SESSION_STOP;
+  this->loss_array.remove_loss_entry( *this, svc.fd );
+}
+
+void
+RvHost::send_unreachable_tport( EvRvService &svc ) noexcept
+{
+  static const char   unre[]   = "_RV.INFO.SYSTEM.UNREACHABLE.TRANSPORT.";
+  static const size_t unre_len = sizeof( unre ) - 1;
+  RvFwdAdv fwd( *this, svc.userid, svc.userid_len, svc.session,
+                svc.session_len, unre, unre_len, ADV_UNREACHABLE, 0,
+                svc.gob, svc.gob_len );
   svc.svc_state |= EvRvService::SENT_SESSION_STOP;
   this->loss_array.remove_loss_entry( *this, svc.fd );
 }
@@ -1445,7 +1471,7 @@ RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
     printf( "pub sessions reply %.*s\n", (int) reply_len, (char *) reply );
   EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
                  this->sub_route, *this, kv_crc_c( reply, reply_len, 0 ),
-                 RVMSG_TYPE_ID, 'p' );
+                 RVMSG_TYPE_ID );
   this->sub_route.forward_msg( pub );
 }
 
@@ -1521,7 +1547,7 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
     printf( "pub subs reply %.*s\n", (int) reply_len, (char *) reply );
   EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
                  this->sub_route, *this, kv_crc_c( reply, reply_len, 0 ),
-                 RVMSG_TYPE_ID, 'p' );
+                 RVMSG_TYPE_ID );
   this->sub_route.forward_msg( pub );
 }
 

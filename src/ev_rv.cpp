@@ -292,10 +292,14 @@ int
 EvRvService::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
 {
   int status;
-  if ( (status = this->msg_in.unpack( msgbuf, msglen )) != 0 ) {
+  status = this->msg_in.unpack( msgbuf, msglen );
+  if ( is_rv_debug )
+    this->print_in( status, msgbuf, msglen );
+  if ( status != 0 ) {
     if ( msglen == 8 ) /* empty msg */
       return 0;
-    this->print_rv_msg_err( msgbuf, msglen, status );
+    if ( msglen != 0 )
+      this->print_rv_msg_err( msgbuf, msglen, status );
     return status;
   }
   /*this->msg_in.print();*/
@@ -311,7 +315,7 @@ EvRvService::dispatch_msg( void *msgbuf, size_t msglen ) noexcept
     ::write( xfd[ this->fd ], &this->msgs_recv, 8 );
     ::write( xfd[ this->fd ], msgbuf, msglen );
 #endif
-    int flow = this->fwd_pub();
+    int flow = this->fwd_pub( msgbuf, msglen );
     if ( flow == RV_FLOW_GOOD )
       this->svc_state &= ~FWD_BACKPRESSURE;
     else
@@ -354,7 +358,7 @@ EvRvService::print_rv_msg_err( void *msgbuf,  size_t msglen,
  * old style { sub: FD.SEC.INST.EX, mtype: 'D', data: <message> }
  * new style { sub: FD.SEC.INST.EX, mtype: 'D', data: { _data_ : <message> } }*/
 int
-EvRvService::fwd_pub( void ) noexcept
+EvRvService::fwd_pub( void *rvbuf,  size_t buflen ) noexcept
 {
   void   * msg     = this->msg_in.data.fptr;
   size_t   msg_len = this->msg_in.data.fsize;
@@ -397,7 +401,15 @@ EvRvService::fwd_pub( void ) noexcept
     }
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
-                 this->sub_route, *this, h, ftype, 'p' );
+                 this->sub_route, *this, h, ftype );
+  if ( this->msg_in.suffix_len != 0 ) {
+    uint32_t suf_len = this->msg_in.suffix_len;
+    if ( &((uint8_t *) msg)[ msg_len + (size_t) suf_len ] ==
+         &((uint8_t *) rvbuf)[ buflen ] ) {
+      pub.msg_len += suf_len;
+      pub.suf_len  = suf_len;
+    }
+  }
   BPData * data = NULL;
   if ( ( this->svc_state & ( FWD_BACKPRESSURE | FWD_BUFFERSIZE ) ) != 0 )
     data = this;
@@ -571,7 +583,7 @@ EvRvService::respond_info( void ) noexcept
   /* send the result */
   char *m = this->append( buf, size );
   if ( is_rv_debug )
-    this->print( m, size );
+    this->print_out( m, size );
 
   if ( status == HOST_OK ) {
     if ( this->svc_state < DATA_RECV )
@@ -621,6 +633,10 @@ EvRvService::send_stop( void ) noexcept
     if ( ( this->svc_state & SENT_SESSION_START ) != 0 &&
          ( this->svc_state & SENT_SESSION_STOP ) == 0 )
       this->host->send_session_stop( *this );
+  }
+  else if ( ( this->svc_state & IS_RV_DAEMON ) != 0 ) {
+    if ( ( this->svc_state & SENT_SESSION_STOP ) == 0 )
+      this->host->send_unreachable_tport( *this );
   }
 }
 
@@ -1003,6 +1019,33 @@ EvRvService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
   ::memcpy( key, rt->value, keylen );
   return true;
 }
+
+static uint32_t
+append_field_hdr( uint8_t *buf,  const char *fname,  size_t fname_len,
+                  uint32_t msg_len,  uint32_t msg_enc )
+{
+  uint32_t msg_off = 0;
+  buf[ msg_off++ ] = (uint8_t) fname_len;
+  ::memcpy( &buf[ msg_off ], fname, fname_len );
+  msg_off += fname_len;
+  buf[ msg_off++ ] = ( msg_enc == MD_STRING ) ? 8 : 7/*RV_OPAQUE*/;
+  if ( msg_len < 120 )
+    buf[ msg_off++ ] = (uint8_t) msg_len;
+  else if ( msg_len + 2 < 30000 ) {
+    buf[ msg_off++ ] = 121;
+    buf[ msg_off++ ] = ( ( msg_len + 2 ) >> 8 ) & 0xff;
+    buf[ msg_off++ ] = ( msg_len + 2 ) & 0xff;
+  }
+  else {
+    buf[ msg_off++ ] = 122;
+    buf[ msg_off++ ] = ( ( msg_len + 4 ) >> 24 ) & 0xff;
+    buf[ msg_off++ ] = ( ( msg_len + 4 ) >> 16 ) & 0xff;
+    buf[ msg_off++ ] = ( ( msg_len + 4 ) >> 8 ) & 0xff;
+    buf[ msg_off++ ] = ( msg_len + 4 ) & 0xff;
+  }
+  return msg_off;
+}
+
 /* message from network, encapsulate the message into the client format:
  * { mtype: 'D', sub: <subject>, data: <msg-data> }
  */
@@ -1073,11 +1116,11 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
     b[ rvmsg.off - 1 ] = '\0';
   }
   if ( status == 0 ) {
-    static const char data_hdr[] = "\005data";
     RvMsgWriter submsg( NULL, 0 );
-    uint32_t msg_enc = pub.msg_enc;
+    uint32_t msg_enc = pub.msg_enc,
+             suf_len = pub.suf_len;
     size_t   msg_off,
-             msg_len = pub.msg_len;
+             msg_len = pub.msg_len - suf_len;
     void   * msg     = (void *) pub.msg;
     /* depending on message type, encode the hdr to send to the client */
     switch ( msg_enc ) {
@@ -1088,7 +1131,8 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
         submsg.off += msg_len - 8;
         msg         = &((uint8_t *) msg)[ 8 ];
         msg_len     = msg_len - 8;
-        rvmsg.update_hdr( submsg );
+        rvmsg.update_hdr( submsg, suf_len );
+        msg_len    += suf_len;
         break;
 
       case MD_OPAQUE:
@@ -1102,8 +1146,10 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
           else {
             if ( MDMsg::is_msg_type( msg, 0, msg_len, 0 ) == JSON_TYPE_ID ) {
       case JSON_TYPE_ID:
-              if ( EvRvService::convert_json( this->spc, msg, msg_len ) )
+              if ( EvRvService::convert_json( this->spc, msg, msg_len ) ) {
+                suf_len = 0;
                 goto do_rvmsg;
+              }
             }
           }
         }
@@ -1114,26 +1160,23 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       case MARKETFEED_TYPE_ID:
       case RWF_TYPE_ID: /* ??? */
       do_tibmsg:;
-        ::memcpy( &buf[ rvmsg.off ], data_hdr, sizeof( data_hdr ) );
-        rvmsg.off += sizeof( data_hdr );
-        buf[ rvmsg.off++ ] = ( msg_enc == MD_STRING ) ? 8 : 7/*RV_OPAQUE*/;
-        if ( msg_len < 120 )
-          buf[ rvmsg.off++ ] = (uint8_t) msg_len;
-        else if ( msg_len + 2 < 30000 ) {
-          buf[ rvmsg.off++ ] = 121;
-          buf[ rvmsg.off++ ] = ( ( msg_len + 2 ) >> 8 ) & 0xff;
-          buf[ rvmsg.off++ ] = ( msg_len + 2 ) & 0xff;
+        if ( suf_len == 0 ) {
+          rvmsg.off += append_field_hdr( &buf[ rvmsg.off ], SARG( "data" ),
+                                         msg_len, msg_enc );
+          msg_off    = rvmsg.off;
+          rvmsg.off += msg_len;
+          rvmsg.update_hdr();
+          break;
         }
-        else {
-          buf[ rvmsg.off++ ] = 122;
-          buf[ rvmsg.off++ ] = ( ( msg_len + 4 ) >> 24 ) & 0xff;
-          buf[ rvmsg.off++ ] = ( ( msg_len + 4 ) >> 16 ) & 0xff;
-          buf[ rvmsg.off++ ] = ( ( msg_len + 4 ) >> 8 ) & 0xff;
-          buf[ rvmsg.off++ ] = ( msg_len + 4 ) & 0xff;
-        }
-        msg_off = rvmsg.off;
-        rvmsg.off += msg_len;
-        rvmsg.update_hdr();
+        rvmsg.append_msg( SARG( "data" ), submsg );
+        msg_off     = rvmsg.off + submsg.off;
+        msg_off     = append_field_hdr( &buf[ msg_off ], SARG( "_data_" ),
+                                        msg_len, msg_enc );
+        submsg.off += msg_off;
+        msg_off     = rvmsg.off + submsg.off;
+        submsg.off += msg_len;
+        rvmsg.update_hdr( submsg, suf_len );
+        msg_len    += suf_len;
         break;
 
       case MD_MESSAGE:
@@ -1164,7 +1207,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       if ( idx == 0 ) {
         char *m = this->append2( buf, msg_off, msg, msg_len );
         if ( is_rv_debug )
-          this->print( m, msg_off + msg_len );
+          this->print_out( m, msg_off + msg_len );
       }
       this->host->stat.bs += msg_off + msg_len;
       this->msgs_sent++;
@@ -1343,30 +1386,36 @@ struct RestrictOut : public MDOutput {
 };
 
 void
-EvRvService::print( void *m,  size_t len ) noexcept
+EvRvService::print_out( void *m,  size_t len ) noexcept
+{
+  EvRvService::print( this->fd, m, len );
+}
+
+void
+EvRvService::print( int fd,  void *m,  size_t len ) noexcept
 {
   RestrictOut mout;
   MDMsgMem mem;
   MDMsg *msg = MDMsg::unpack( m, 0, len, 0, NULL, &mem );
-  printf( "---->\n" );
+  mout.printf( "----> (%d)\n", fd );
   if ( msg != NULL )
     msg->print( &mout, 1, "%12s : ", NULL );
   else
     mout.print_hex( m, len );
-  printf( "---->\n" );
+  mout.printf( "---->\n" );
 }
 
 
 void
-RvMsgIn::print( int status,  void *m,  size_t len ) noexcept
+EvRvService::print_in( int status,  void *m,  size_t len ) noexcept
 {
   RestrictOut mout;
-  printf( "<----\n" );
+  mout.printf( "<---- (%d)\n", this->fd );
   if ( status != 0 ) {
     if ( len == 8 )
-      printf( "ping\n" );
+      mout.printf( "ping\n" );
     else
-      printf( "status %d\n", status );
+      mout.printf( "status %d\n", status );
   }
 #if 0
   printf( "msg_in(%s)", this->sub );
@@ -1375,11 +1424,11 @@ RvMsgIn::print( int status,  void *m,  size_t len ) noexcept
   else
     printf( "\n" );
 #endif
-  if ( this->msg != NULL )
-    this->msg->print( &mout, 1, "%12s : ", NULL );
+  if ( this->msg_in.msg != NULL )
+    this->msg_in.msg->print( &mout, 1, "%12s : ", NULL );
   else
     mout.print_hex( m, len );
-  printf( "<----\n" );
+  mout.printf( "<----\n" );
 }
 
 int
@@ -1389,8 +1438,13 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
   MDFieldIter * it;
   MDName        nm;
   MDReference   mref;
-  int           cnt = 0,
-                status = 0;
+  uint32_t      suf_len  = 0,
+                pre_off  = 0,
+                pre_len  = 0,
+                data_off = 0,
+                data_end = 0;
+  int           cnt      = 0,
+                status   = 0;
 
   this->mem.reuse();
   this->msg = RvMsg::unpack_rv( msgbuf, 0, msglen, 0, NULL, &this->mem );
@@ -1410,12 +1464,16 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
                 cnt |= HAS_SUB;
               else
                 return ERR_RV_SUB;
+              goto matched_field;
             }
             break;
           case 5:
             if ( ::memcmp( nm.fname, SARG( "data" ) ) == 0 ) {
+              data_off = this->iter->field_start;
+              data_end = this->iter->field_end;
               this->data = mref;
               cnt |= HAS_DATA;
+              goto matched_field;
             }
             break;
           case 6:
@@ -1436,6 +1494,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
                   #undef B
                 }
               }
+              goto matched_field;
             }
             break;
           case 7:
@@ -1445,12 +1504,22 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
               if ( this->replylen > 0 /*&& this->reply[ this->replylen - 1 ] == '\0'*/ )
                 this->replylen--;
               cnt |= HAS_RETURN;
+              goto matched_field;
             }
             break;
           default:
             break;
         }
-      } while ( cnt < 15 && this->iter->next() == 0 );
+        if ( (cnt & HAS_DATA ) != 0 ) {
+          suf_len += this->iter->field_end - this->iter->field_start;
+        }
+        else {
+          if ( pre_off == 0 )
+            pre_off = this->iter->field_start;
+          pre_len += this->iter->field_end - this->iter->field_start;
+        }
+      matched_field:;
+      } while ( this->iter->next() == 0 );
     }
     if ( ( cnt & HAS_MTYPE ) == 0 )
       status = ERR_RV_MTYPE; /* no mtype */
@@ -1466,10 +1535,25 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
     this->reply    = NULL;
     this->replylen = 0;
   }
+  this->suffix_len = 0;
   if ( ( cnt & HAS_DATA ) == 0 )
     this->data.zero();
-  if ( is_rv_debug )
-    this->print( status, msgbuf, msglen );
+  else if ( ( suf_len | pre_len ) != 0 ) {
+    uint8_t * b = (uint8_t *) msgbuf;
+    if ( pre_off + pre_len == data_off ) {
+      uint32_t data_len = data_end - data_off;
+      void   * tmp = this->mem.make( pre_len );
+      ::memcpy( tmp, &b[ pre_off ], pre_len );
+      ::memmove( &b[ pre_off ], &b[ data_off ], data_len );
+      ::memcpy( &b[ pre_off + data_len ], tmp, pre_len );
+      this->data.fptr -= pre_len;
+      suf_len += pre_len;
+    }
+    if ( suf_len != 0 ) {
+      if ( &this->data.fptr[ this->data.fsize + suf_len ] == &b[ msglen ] )
+        this->suffix_len = suf_len;
+    }
+  }
   return status;
 }
 

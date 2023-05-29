@@ -436,7 +436,7 @@ EvRvClient::fwd_pub( void ) noexcept
       ftype = ft;
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
-                 this->sub_route, *this, h, ftype, 'p' );
+                 this->sub_route, *this, h, ftype );
   if ( this->cb != NULL )
     return this->cb->on_msg( pub );
   return this->sub_route.forward_msg( pub );
