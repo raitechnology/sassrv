@@ -9,6 +9,8 @@
 #include <raimd/app_a.h>
 #include <raimd/enum_def.h>
 #include <raikv/ev_publish.h>
+#include <raikv/bit_set.h>
+#include <raikv/zipf.h>
 
 using namespace rai;
 using namespace kv;
@@ -24,7 +26,8 @@ static const uint32_t DICT_TIMER_SECS = 3,
                       RATE_TIMER_SECS = 1;
 static const uint64_t FIRST_TIMER_ID  = 1, /* first dict request */
                       SECOND_TIMER_ID = 2, /* second dict request */
-                      RATE_TIMER_ID   = 3; /* rate timer */
+                      RATE_TIMER_ID   = 3, /* rate timer */
+                      STOP_TIMER_ID   = 4; /* stop timer */
 
 /* rv client callback closure */
 struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
@@ -33,7 +36,8 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   EvRvClient  & client;          /* connection to rv */
   MDDict      * dict;            /* dictinary to use for decoding msgs */
   const char ** sub;             /* subject strings */
-  size_t        sub_count;       /* count of sub[] */
+  size_t        sub_count,       /* count of sub[] */
+                num_subs;
   uint64_t      msg_count,
                 last_count,
                 last_time,
@@ -44,17 +48,43 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
                 have_dictionary, /* set when dict request succeeded */
                 dump_hex,        /* print hex of message data */
                 show_rate;       /* show rate of messages recvd */
+  char        * subj_buf;
+  uint32_t    * rand_schedule,
+              * msg_recv;
+  size_t      * msg_recv_bytes;
+  UIntHashTab * subj_ht,
+              * coll_ht;
+  size_t        rand_range;
+  uint32_t      max_time_secs;
+  bool          use_random,
+                use_zipf,
+                quiet;
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t cnt,
-                  bool nodict,  bool hex,  bool rate )
+                  bool nodict,  bool hex,  bool rate,  size_t n,  size_t rng,
+                  bool zipf,  uint32_t secs,  bool q )
     : poll( p ), client( c ), dict( 0 ), sub( s ), sub_count( cnt ),
-      msg_count( 0 ), last_count( 0 ), last_time( 0 ), msg_bytes( 0 ),
-      last_bytes( 0 ), no_dictionary( nodict ), is_subscribed( false ),
-      have_dictionary( false ), dump_hex( hex ), show_rate( rate ) {}
+      num_subs( n ), msg_count( 0 ), last_count( 0 ), last_time( 0 ),
+      msg_bytes( 0 ), last_bytes( 0 ), no_dictionary( nodict ),
+      is_subscribed( false ), have_dictionary( false ), dump_hex( hex ),
+      show_rate( rate ), subj_buf( 0 ), rand_schedule( 0 ), msg_recv( 0 ),
+      msg_recv_bytes( 0 ), subj_ht( 0 ), coll_ht( 0 ), rand_range( rng ),
+      max_time_secs( secs ), use_random( rng > cnt ), use_zipf( zipf ),
+      quiet( q ) {}
 
+  void add_initial( size_t n,  size_t bytes ) {
+    this->msg_recv[ n ] |= 1;
+    this->msg_recv_bytes[ n ] += bytes;
+  }
+  void add_update( size_t n,  size_t bytes ) {
+    this->msg_recv[ n ] += 1 << 1;
+    this->msg_recv_bytes[ n ] += bytes;
+  }
   /* after CONNECTED message */
   virtual void on_connect( EvSocket &conn ) noexcept;
   /* start sub[] with inbox reply */
+  void make_random( void ) noexcept;
+  void make_subject( size_t n,  const char *&s,  size_t &slen ) noexcept;
   void start_subscriptions( void ) noexcept;
   /* when signalled, unsubscribe */
   void on_unsubscribe( void ) noexcept;
@@ -89,25 +119,139 @@ RvDataCallback::on_connect( EvSocket &conn ) noexcept
   this->start_subscriptions();
 }
 
+void
+RvDataCallback::make_random( void ) noexcept
+{
+  BitSpace used;
+  size_t   n     = this->num_subs,
+           size  = this->sub_count * n,
+           range = this->rand_range * this->sub_count;
+  kv::rand::xoroshiro128plus rand;
+  ZipfianGen<99, 100, kv::rand::xoroshiro128plus> zipf( range, rand ) ;
+  if ( range < size )
+    range = size;
+  rand.static_init( current_monotonic_time_ns(), current_realtime_ns() );
+
+  this->rand_schedule = (uint32_t *)
+    ::malloc( sizeof( this->rand_schedule[ 0 ] ) * size );
+  for ( size_t cnt = 0; cnt < size; ) {
+    size_t n;
+    if ( this->use_zipf )
+      n = zipf.next() % range;
+    else
+      n = rand.next() % range;
+    while ( used.test_set( n ) )
+      n = ( n + 1 ) % range;
+    this->rand_schedule[ cnt++ ] = n;
+  }
+}
+
+void
+RvDataCallback::make_subject( size_t n,  const char *&s, size_t &slen ) noexcept
+{
+  if ( this->use_random ) {
+    if ( this->rand_schedule == NULL )
+      this->make_random();
+    n = this->rand_schedule[ n ];
+  }
+  size_t j = n % this->sub_count;
+  n   /= this->sub_count;
+  s    = this->sub[ j ];
+  slen = ::strlen( s );
+
+  const char * p = ::strstr( s, "%d" );
+  if ( this->num_subs > 1 || p != NULL ) {
+    if ( this->subj_buf == NULL || slen + 12 > 1024 ) {
+      size_t len = ( slen + 12 < 1024 ? 1024 : slen + 12 );
+      this->subj_buf = (char *) ::realloc( this->subj_buf, len );
+    }
+    CatPtr cat( this->subj_buf );
+    const char * e = &s[ slen ];
+    if ( p == NULL ) {
+      cat.x( s, e - s ).s( "." ).u( n );
+    }
+    else {
+      cat.x( s, p - s ).u( n );
+      p += 2;
+      if ( p < e )
+        cat.x( p, e - p );
+    }
+    s    = cat.start;
+    slen = cat.end();
+  }
+}
+
 /* start subscriptions from command line, inbox number indexes the sub[] */
 void
 RvDataCallback::start_subscriptions( void ) noexcept
 {
   if ( this->is_subscribed ) /* subscribing multiple times is allowed, */
     return;                  /* but must unsub multiple times as well */
-  for ( size_t i = 0; i < this->sub_count; i++ ) {
-    char     inbox[ MAX_RV_INBOX_LEN ]; /* _INBOX.<session>.3 + <sub> */
-    uint16_t inbox_len = this->client.make_inbox( inbox, i + SUB_INBOX_BASE );
-    size_t   sub_len   = ::strlen( this->sub[ i ] );
-    printf( "Subscribe \"%.*s\", reply \"%.*s\"\n",
-            (int) sub_len, this->sub[ i ], (int) inbox_len, inbox );
-    /* subscribe with inbox reply */
-    this->client.subscribe( this->sub[ i ], sub_len, inbox, inbox_len );
+
+  this->subj_ht = UIntHashTab::resize( NULL );
+  this->coll_ht = UIntHashTab::resize( NULL );
+  size_t n   = this->sub_count * this->num_subs;
+  size_t sz  = sizeof( this->msg_recv[ 0 ] ) * n,
+         sz2 = sizeof( this->msg_recv_bytes[ 0 ] ) * n;
+  this->msg_recv = (uint32_t *) ::malloc( sz );
+  this->msg_recv_bytes = (size_t *) ::malloc( sz2 );
+  ::memset( this->msg_recv, 0, sz );
+  ::memset( this->msg_recv_bytes, 0, sz2 );
+
+  for ( n = 0; ; ) {
+    for ( size_t j = 0; j < this->sub_count; j++, n++ ) {
+      char         inbox[ MAX_RV_INBOX_LEN ]; /* _INBOX.<session>.3 + <sub> */
+      uint16_t     inbox_len;
+      const char * subject;
+      size_t       subject_len;
+
+      inbox_len = this->client.make_inbox( inbox, n + SUB_INBOX_BASE );
+      this->make_subject( n, subject, subject_len );
+
+      printf( "Subscribe \"%.*s\", reply \"%.*s\"\n",
+              (int) subject_len, subject, (int) inbox_len, inbox );
+      /* subscribe with inbox reply */
+      this->client.subscribe( subject, subject_len, inbox, inbox_len );
+
+      uint32_t h = kv_crc_c( subject, subject_len, 0 ), val;
+      size_t   pos;
+      if ( this->subj_ht->find( h, pos, val ) ) {
+        const char * coll_sub;
+        size_t       coll_sublen;
+        this->subj_ht->remove( pos );
+
+        this->make_subject( val, coll_sub, coll_sublen );
+        h = kv_djb( coll_sub, coll_sublen );
+        if ( ! this->coll_ht->find( h, pos ) )
+          this->coll_ht->set_rsz( this->coll_ht, h, pos, val );
+        else {
+          printf( "HT collision \"%.*s\", no update tracking\n",
+                  (int) coll_sublen, coll_sub );
+        }
+        h = kv_djb( subject, subject_len );
+        if ( ! this->coll_ht->find( h, pos ) )
+          this->coll_ht->set_rsz( this->coll_ht, h, pos, n );
+        else {
+          printf( "HT collision \"%.*s\", no update tracking\n",
+                  (int) subject_len, subject );
+        }
+      }
+      else {
+        this->subj_ht->set_rsz( this->subj_ht, h, pos, n );
+      }
+    }
+    if ( n >= this->num_subs * this->sub_count )
+      break;
   }
+
   if ( this->show_rate ) {
     this->last_time = this->poll.current_coarse_ns();
     this->poll.timer.add_timer_seconds( *this, RATE_TIMER_SECS,
                                         RATE_TIMER_ID, 0 );
+  }
+  if ( this->max_time_secs != 0 ) {
+    this->poll.timer.add_timer_seconds( *this, this->max_time_secs,
+                                        STOP_TIMER_ID, 0 );
   }
   this->is_subscribed = true;
 }
@@ -119,11 +263,19 @@ RvDataCallback::on_unsubscribe( void ) noexcept
   if ( ! this->is_subscribed )
     return;
   this->is_subscribed = false;
-  for ( size_t i = 0; i < this->sub_count; i++ ) {
-    size_t sub_len = ::strlen( this->sub[ i ] );
-    printf( "Unsubscribe \"%.*s\"\n", (int) sub_len, this->sub[ i ] );
-    /* unsubscribe sub */
-    this->client.unsubscribe( this->sub[ i ], sub_len );
+  for ( size_t n = 0; ; ) {
+    for ( size_t j = 0; j < this->sub_count; j++, n++ ) {
+      const char * subject;
+      size_t       subject_len;
+      this->make_subject( n, subject, subject_len );
+      printf( "Unsubscribe \"%.*s\" initial=%u update=%u bytes=%u\n",
+              (int) subject_len, subject, this->msg_recv[ n ] & 1,
+              this->msg_recv[ n ] >> 1, (uint32_t) this->msg_recv_bytes[ n ] );
+      /* subscribe with inbox reply */
+      this->client.unsubscribe( subject, subject_len );
+    }
+    if ( n >= this->num_subs * this->sub_count )
+      break;
   }
 }
 
@@ -176,6 +328,12 @@ RvDataCallback::timer_cb( uint64_t timer_id,  uint64_t ) noexcept
     this->last_bytes += bytes;
     return true;
   }
+  if ( timer_id == STOP_TIMER_ID ) {
+    this->on_unsubscribe();
+    if ( this->poll.quit == 0 )
+      this->poll.quit = 1; /* causes poll loop to exit */
+    return false;
+  }
   if ( this->have_dictionary )
     return false;
   if ( timer_id == FIRST_TIMER_ID ) {
@@ -207,43 +365,55 @@ RvDataCallback::on_shutdown( EvSocket &conn,  const char *err,
 bool
 RvDataCallback::on_msg( EvPublish &pub ) noexcept
 {
+  const char * subject     = pub.subject;
+  size_t       subject_len = pub.subject_len,
+               pub_len     = pub.msg_len + subject_len;
   MDMsgMem mem;
   MDMsg  * m;
+  size_t   n;
   /* check if published to _INBOX.<session>. */
-  uint64_t which = this->client.is_inbox( pub.subject, pub.subject_len );
+  uint64_t which = this->client.is_inbox( subject, subject_len );
   if ( which != 0 ) {
-    size_t idx = which - SUB_INBOX_BASE;
-    if ( which >= SUB_INBOX_BASE && idx < this->sub_count ) {
-      if ( this->show_rate ) {
-        this->msg_count++;
-        return true;
-      }
-      printf( "## %s: (inbox: %.*s)\n", this->sub[ idx ],
-               (int) pub.subject_len, pub.subject );
+    if ( which >= SUB_INBOX_BASE ) {
+      n = which - SUB_INBOX_BASE;
+      this->make_subject( n, subject, subject_len );
+      this->add_initial( n, pub_len );
     }
     else if ( which == DICT_INBOX_ID ) {
-      printf( "Received dictionary message\n" );
-      m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict,
-                         &mem );
+      printf( "Received dictionary message (len=%u)\n", (uint32_t) pub_len );
+      m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, &mem);
       this->on_dict( m );
       this->start_subscriptions();
       return true;
     }
-    else {
-      printf( "## Unknown inbox message (%u)\n", (uint32_t) idx );
-    }
   }
-  else { /* not inbox subject */
+  if ( which == 0 || which >= SUB_INBOX_BASE ) {
+    if ( which == 0 ) {
+      size_t pos;
+      uint32_t val;
+      if ( this->subj_ht->find( pub.subj_hash, pos, val ) )
+        this->add_update( val, pub_len );
+      else if ( this->coll_ht->find( kv_djb( subject, subject_len ), pos, val ) )
+        this->add_update( val, pub_len );
+    }
     if ( this->show_rate ) {
       this->msg_count++;
-      this->msg_bytes += pub.msg_len + pub.subject_len;
+      this->msg_bytes += pub_len;
       return true;
     }
+  }
+  if ( this->quiet )
+    return true;
+  if ( which >= SUB_INBOX_BASE ) {
+    printf( "## %.*s: (inbox: %.*s)\n", (int) subject_len, subject,
+            (int) pub.subject_len, pub.subject );
+  }
+  else { /* not inbox subject */
     if ( pub.reply_len != 0 )
-      printf( "## %.*s (reply: %.*s):\n", (int) pub.subject_len, pub.subject,
+      printf( "## %.*s (reply: %.*s):\n", (int) subject_len, subject,
               (int) pub.reply_len, (const char *) pub.reply );
     else
-      printf( "## %.*s:\n", (int) pub.subject_len, pub.subject );
+      printf( "## %.*s:\n", (int) subject_len, subject );
   }
   m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, &mem );
   /* print message */
@@ -286,8 +456,13 @@ main( int argc, const char *argv[] )
              * nodict  = get_arg( x, argc, argv, 0, "-x", "-nodict", NULL ),
              * dump    = get_arg( x, argc, argv, 0, "-e", "-hex", NULL ),
              * rate    = get_arg( x, argc, argv, 0, "-r", "-rate", NULL ),
+             * sub_cnt = get_arg( x, argc, argv, 1, "-k", "-count", NULL ),
+             * zipf    = get_arg( x, argc, argv, 0, "-Z", "-zipf", NULL ),
+             * time    = get_arg( x, argc, argv, 1, "-t", "-secs", NULL ),
+             * quiet   = get_arg( x, argc, argv, 0, "-q", "-quiet", NULL ),
              * help    = get_arg( x, argc, argv, 0, "-h", "-help", 0 );
   int first_sub = x, idle_count = 0;
+  size_t cnt = 1, range = 0, secs = 0;
 
   if ( help != NULL ) {
   help:;
@@ -300,12 +475,49 @@ main( int argc, const char *argv[] )
              "  -x         = don't load a dictionary\n"
              "  -e         = show hex dump of messages\n"
              "  -r         = show rate of messages\n"
+             "  -k         = subscribe to numeric subjects (subject.%%d)\n"
+             "  -Z         = use zipf(0.99) distribution\n"
+             "  -t secs    = stop after seconds expire\n"
+             "  -q         = quiet, don't print messages\n"
              "  subject    = subject to subscribe\n", argv[ 0 ] );
     return 1;
   }
   if ( first_sub >= argc ) {
     fprintf( stderr, "No subjects subscribed\n" );
     goto help;
+  }
+  bool valid = true;
+  if ( sub_cnt != NULL ) {
+    size_t       len = ::strlen( sub_cnt );
+    const char * p   = ::strchr( sub_cnt, ':' ),
+               * e   = &sub_cnt[ len ];
+    if ( p == NULL )
+      p = e;
+    valid = valid_uint64( sub_cnt, p - sub_cnt );
+    if ( &p[ 1 ] < e )
+      valid = valid_uint64( &p[ 1 ], e - &p[ 1 ] );
+
+    if ( valid ) {
+      cnt = string_to_uint64( sub_cnt, p - sub_cnt );
+      if ( &p[ 1 ] < e )
+        range = string_to_uint64( &p[ 1 ], e - &p[ 1 ] );
+      if ( cnt == 0 || range < cnt )
+        valid = false;
+    }
+    if ( ! valid ) {
+      fprintf( stderr, "Invalid -k/-count\n" );
+      goto help;
+    }
+  }
+  if ( time != NULL ) {
+    MDStamp stamp;
+    if( stamp.parse( time, ::strlen( time ), true ) != 0 )
+      valid = false;
+    if ( ! valid ) {
+      fprintf( stderr, "Invalid -t/-secs\n" );
+      goto help;
+    }
+    secs = stamp.seconds();
   }
 
   EvPoll poll;
@@ -314,7 +526,8 @@ main( int argc, const char *argv[] )
   EvRvClientParameters parm( daemon, network, service, 0 );
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, &argv[ first_sub ], argc - first_sub,
-                             nodict != NULL, dump != NULL, rate != NULL );
+                             nodict != NULL, dump != NULL, rate != NULL, cnt,
+                             range, zipf != NULL, secs, quiet != NULL );
   /* load dictionary if present */
   if ( ! data.no_dictionary ) {
     if ( path != NULL || (path = ::getenv( "cfile_path" )) != NULL ) {

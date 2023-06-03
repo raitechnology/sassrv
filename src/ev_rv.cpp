@@ -664,7 +664,8 @@ EvRvService::is_subscribed( const NotifySub &sub ) noexcept
 {
   uint8_t v    = 0;
   bool    coll = false;
-  if ( this->sub_tab.find( sub.subj_hash, sub.subject, sub.subject_len,
+  if ( ! sub.is_notify_queue() &&
+       this->sub_tab.find( sub.subj_hash, sub.subject, sub.subject_len,
                            coll ) == RV_SUB_OK )
     v |= EV_SUBSCRIBED;
   else
@@ -681,7 +682,8 @@ EvRvService::is_psubscribed( const NotifyPattern &pat ) noexcept
   bool    coll = false;
   const PatternCvt & cvt = pat.cvt;
   RvPatternRoute   * rt;
-  if ( this->pat_tab.find( pat.prefix_hash, pat.pattern, cvt.prefixlen,
+  if ( ! pat.is_notify_queue() &&
+       this->pat_tab.find( pat.prefix_hash, pat.pattern, cvt.prefixlen,
                            rt, coll ) == RV_SUB_OK ) {
     RvWildMatch *m;
     for ( m = rt->list.hd; m != NULL; m = m->next ) {
