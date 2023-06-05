@@ -407,12 +407,11 @@ struct EvRvService : public kv::EvConnection, public kv::BPData {
     DATA_RECV          = 2, /* normal processing when state >= DATA_RECV */
     IS_RV_DAEMON       = 4, /* rv7+ uses a DAEMON session for the service */
     IS_RV_SESSION      = 8, /* each session is distinct, based on the conn */
-    SENT_HOST_START    = 16, /* sent a host start message */
-    SENT_SESSION_START = 32, /* sent a session start message */
-    SENT_SESSION_STOP  = 64, /* sent a session stop message */
-    FWD_BACKPRESSURE   = 128,/* backpressure on forward msg */
-    FWD_BUFFERSIZE     = 256,/* using lots of bufferspace */
-    TIMER_ACTIVE       = 512 /* timer is running */
+    SENT_SESSION_START = 16, /* sent a session start message */
+    SENT_SESSION_STOP  = 32, /* sent a session stop message */
+    FWD_BACKPRESSURE   = 64,/* backpressure on forward msg */
+    FWD_BUFFERSIZE     = 128,/* using lots of bufferspace */
+    TIMER_ACTIVE       = 256 /* timer is running */
   };
   static const size_t MAX_CONTROL_LEN = 64,
                       MAX_GOB_LEN     = 16;

@@ -612,10 +612,7 @@ void
 EvRvService::send_start( void ) noexcept
 {
   if ( ( this->svc_state & ( IS_RV_DAEMON | IS_RV_SESSION ) ) != 0 ) {
-    if ( this->host->active_clients == 1 ) {
-      if ( ( this->svc_state & SENT_HOST_START ) == 0 )
-        this->host->send_host_start( this );
-    }
+    this->host->send_host_start( this );
   }
   if ( ( this->svc_state & IS_RV_SESSION ) != 0 ) {
     if ( ( this->svc_state & SENT_SESSION_START ) == 0 )

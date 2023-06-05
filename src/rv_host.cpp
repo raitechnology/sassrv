@@ -241,7 +241,8 @@ RvHost::stop_host( void ) noexcept
       this->rpc->unsubscribe_daemon_inbox();
       this->daemon_subscribed = false;
     }
-    this->send_host_stop( NULL );
+    if ( this->host_started )
+      this->send_host_stop( NULL );
   }
   return 0;
 }
@@ -984,9 +985,10 @@ RvHost::send_host_start( EvRvService *svc ) noexcept
 {
   static const char   start[]   = "_RV.INFO.SYSTEM.HOST.START.";
   static const size_t start_len = sizeof( start ) - 1;
-  RvFwdAdv fwd( *this, svc, start, start_len, ADV_HOST_START );
-  if ( svc != NULL )
-    svc->svc_state |= EvRvService::SENT_HOST_START;
+  if ( ! this->host_started ) {
+    RvFwdAdv fwd( *this, svc, start, start_len, ADV_HOST_START );
+    this->host_started = true;
+  }
 }
 
 void
@@ -1022,7 +1024,10 @@ RvHost::send_host_stop( EvRvService *svc ) noexcept
 {
   static const char   stop[]   = "_RV.INFO.SYSTEM.HOST.STOP.";
   static const size_t stop_len = sizeof( stop ) - 1;
-  RvFwdAdv fwd( *this, svc, stop, stop_len, ADV_HOST_STOP );
+  if ( this->host_started ) {
+    RvFwdAdv fwd( *this, svc, stop, stop_len, ADV_HOST_STOP );
+    this->host_started = false;
+  }
 }
 
 void

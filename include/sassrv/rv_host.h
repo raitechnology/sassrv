@@ -287,7 +287,8 @@ struct RvHost : public kv::EvSocket {
   bool          network_started,   /* if start_network() called and succeeded */
                 daemon_subscribed, /* if _INBOX.DAEMON.ABCDEF is subscribed */
                 start_in_progress, /* when network start is in progress */
-                has_service_prefix;/* if _7500. service prefix is used */
+                has_service_prefix,/* if _7500. service prefix is used */
+                host_started;
   static const size_t session_ip_len = 8;
   RvHostStat    stat,
                 previous_stat[ 2 ];
