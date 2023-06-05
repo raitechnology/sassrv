@@ -55,7 +55,8 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   UIntHashTab * subj_ht,
               * coll_ht;
   size_t        rand_range;
-  uint32_t      max_time_secs;
+  uint32_t      max_time_secs,
+                msg_type_cnt[ 32 ];
   bool          use_random,
                 use_zipf,
                 quiet;
@@ -70,7 +71,9 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
       show_rate( rate ), subj_buf( 0 ), rand_schedule( 0 ), msg_recv( 0 ),
       msg_recv_bytes( 0 ), subj_ht( 0 ), coll_ht( 0 ), rand_range( rng ),
       max_time_secs( secs ), use_random( rng > cnt ), use_zipf( zipf ),
-      quiet( q ) {}
+      quiet( q ) {
+    ::memset( this->msg_type_cnt, 0, sizeof( this->msg_type_cnt ) );
+  }
 
   void add_initial( size_t n,  size_t bytes ) {
     this->msg_recv[ n ] |= 1;
@@ -402,6 +405,20 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
       return true;
     }
   }
+  m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, &mem );
+  MDFieldIter * iter = NULL;
+  if ( m != NULL && m->get_field_iter( iter ) == 0 && iter->first() == 0 ) {
+    MDName nm;
+    MDReference mref;
+    if ( iter->get_name( nm ) == 0 && iter->get_reference( mref ) == 0 ) {
+      const MDName mtype( "MSG_TYPE", 9 );
+      if ( nm.equals( mtype ) &&
+           ( mref.ftype == MD_UINT || mref.ftype == MD_INT ) ) {
+        uint16_t t = get_int<uint16_t>( mref );
+        this->msg_type_cnt[ t < 31 ? t : 31 ]++;
+      }
+    }
+  }
   if ( this->quiet )
     return true;
   if ( which >= SUB_INBOX_BASE ) {
@@ -415,7 +432,6 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
     else
       printf( "## %.*s:\n", (int) subject_len, subject );
   }
-  m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, &mem );
   /* print message */
   if ( m != NULL ) {
     printf( "## format: %s, length %u\n", m->get_proto_string(), pub.msg_len );
@@ -574,6 +590,15 @@ main( int argc, const char *argv[] )
       poll.quit++;
     }
   }
+  const char *s = "";
+  for ( uint32_t i = 0; i < 32; i++ ) {
+    if ( data.msg_type_cnt[ i ] != 0 ) {
+      printf( "%s%u: %u", s, i, data.msg_type_cnt[ i ] );
+      s = ", ";
+    }
+  }
+  if ( ::strlen( s ) > 0 )
+    printf( "\n" );
   return 0;
 }
 
