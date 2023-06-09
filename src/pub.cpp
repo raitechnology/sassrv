@@ -146,6 +146,7 @@ RvDataCallback::on_connect( EvSocket &conn ) noexcept
 {
   int len = (int) conn.get_peer_address_strlen();
   printf( "Connected: %.*s\n", len, conn.peer_address.buf );
+  fflush( stdout );
 
   if ( ! this->no_dictionary ) {
     /* if no cfile dict, request one */
@@ -222,9 +223,6 @@ RvDataCallback::start_pub_timer( void ) noexcept
   t = (uint32_t) ( 1000000.0 / (double) this->rate_per_sec );
   if ( t < 10 ) t = 10;
   this->poll.timer.add_timer_micros( *this, t, PUB_TIMER_ID, 0 );
-#if 0
-  printf( "timer %u\n", t );
-#endif
   this->has_rate_timer = true;
 }
 
@@ -377,6 +375,7 @@ RvDataCallback::run_publishers( void ) noexcept
       if ( this->dump_hex ) {
         mout.print_hex( this->msg_buf, msg_len );
       }
+      fflush( stdout );
     }
     EvPublish pub( subject, subject_len, NULL, 0, this->msg_buf, msg_len,
                    this->client.sub_route, this->client, 0, msg_enc );
@@ -445,6 +444,7 @@ RvDataCallback::timer_cb( uint64_t timer_id,  uint64_t ) noexcept
     printf( "Dict request timeout again, starting publisher\n" );
     this->run_publishers();
   }
+  fflush( stdout );
   return false; /* return false to disable recurrent timer */
 }
 
@@ -456,6 +456,7 @@ RvDataCallback::on_shutdown( EvSocket &conn,  const char *err,
   int len = (int) conn.get_peer_address_strlen();
   printf( "Shutdown: %.*s %.*s\n",
           len, conn.peer_address.buf, (int) errlen, err );
+  fflush( stdout );
   /* if disconnected by tcp, usually a reconnect protocol, but this just exits*/
   if ( this->poll.quit == 0 )
     this->poll.quit = 1; /* causes poll loop to exit */
@@ -500,7 +501,8 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
     if ( this->dump_hex )
       mout.print_hex( m );
   }
-  else
+  fflush( stdout );
+  if ( m == NULL )
     fprintf( stderr, "Message unpack error\n" );
   return true;
 }
