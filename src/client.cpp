@@ -60,10 +60,11 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   bool          use_random,
                 use_zipf,
                 quiet;
+  uint64_t      seed1, seed2;
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t cnt,
                   bool nodict,  bool hex,  bool rate,  size_t n,  size_t rng,
-                  bool zipf,  uint32_t secs,  bool q )
+                  bool zipf,  uint32_t secs,  bool q, uint64_t s1, uint64_t s2 )
     : poll( p ), client( c ), dict( 0 ), sub( s ), sub_count( cnt ),
       num_subs( n ), msg_count( 0 ), last_count( 0 ), last_time( 0 ),
       msg_bytes( 0 ), last_bytes( 0 ), no_dictionary( nodict ),
@@ -73,6 +74,8 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
       max_time_secs( secs ), use_random( rng > cnt ), use_zipf( zipf ),
       quiet( q ) {
     ::memset( this->msg_type_cnt, 0, sizeof( this->msg_type_cnt ) );
+    this->seed1 = ( s1 == 0 ? current_monotonic_time_ns() : s1 );
+    this->seed2 = ( s2 == 0 ? current_realtime_ns() : s2 );
   }
 
   void add_initial( size_t n,  size_t bytes ) {
@@ -109,6 +112,11 @@ RvDataCallback::on_connect( EvSocket &conn ) noexcept
 {
   int len = (int) conn.get_peer_address_strlen();
   printf( "Connected: %.*s\n", len, conn.peer_address.buf );
+  if ( this->use_random ) {
+    printf( "Random seed1: 0x%016lx seed2 0x%016lx\n", this->seed1,
+            this->seed2 );
+  }
+  fflush( stdout );
 
   if ( ! this->no_dictionary ) {
     /* if no cfile dict, request one */
@@ -133,7 +141,7 @@ RvDataCallback::make_random( void ) noexcept
   ZipfianGen<99, 100, kv::rand::xoroshiro128plus> zipf( range, rand ) ;
   if ( range < size )
     range = size;
-  rand.static_init( current_monotonic_time_ns(), current_realtime_ns() );
+  rand.static_init( this->seed1, this->seed2 );
 
   this->rand_schedule = (uint32_t *)
     ::malloc( sizeof( this->rand_schedule[ 0 ] ) * size );
@@ -246,6 +254,7 @@ RvDataCallback::start_subscriptions( void ) noexcept
     if ( n >= this->num_subs * this->sub_count )
       break;
   }
+  fflush( stdout );
 
   if ( this->show_rate ) {
     this->last_time = this->poll.current_coarse_ns();
@@ -280,6 +289,7 @@ RvDataCallback::on_unsubscribe( void ) noexcept
     if ( n >= this->num_subs * this->sub_count )
       break;
   }
+  fflush( stdout );
 }
 
 /* when dict message is replied */
@@ -444,6 +454,7 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
     printf( "## No message data\n" );
   else
     fprintf( stderr, "Message unpack error\n" );
+  fflush( stdout );
   return true;
 }
 
@@ -476,9 +487,12 @@ main( int argc, const char *argv[] )
              * zipf    = get_arg( x, argc, argv, 0, "-Z", "-zipf", NULL ),
              * time    = get_arg( x, argc, argv, 1, "-t", "-secs", NULL ),
              * quiet   = get_arg( x, argc, argv, 0, "-q", "-quiet", NULL ),
+             * s1      = get_arg( x, argc, argv, 1, "-S", "-seed1", NULL ),
+             * s2      = get_arg( x, argc, argv, 1, "-T", "-seed2", NULL ),
              * help    = get_arg( x, argc, argv, 0, "-h", "-help", 0 );
   int first_sub = x, idle_count = 0;
   size_t cnt = 1, range = 0, secs = 0;
+  uint64_t seed1 = 0, seed2 = 0;
 
   if ( help != NULL ) {
   help:;
@@ -495,6 +509,8 @@ main( int argc, const char *argv[] )
              "  -Z         = use zipf(0.99) distribution\n"
              "  -t secs    = stop after seconds expire\n"
              "  -q         = quiet, don't print messages\n"
+             "  -S hex     = random seed1\n"
+             "  -T hex     = random seed2\n"
              "  subject    = subject to subscribe\n", argv[ 0 ] );
     return 1;
   }
@@ -535,6 +551,15 @@ main( int argc, const char *argv[] )
     }
     secs = stamp.seconds();
   }
+  if ( s1 != NULL || s2 != NULL ) {
+    if ( s1 == NULL || ! valid_uint64( s1, ::strlen( s1 ) ) ||
+         s2 == NULL || ! valid_uint64( s2, ::strlen( s2 ) ) ) {
+      fprintf( stderr, "Invalid -S/-T/-seed1/-seed2\n" );
+      goto help;
+    }
+    seed1 = string_to_uint64( s1, ::strlen( s1 ) );
+    seed2 = string_to_uint64( s2, ::strlen( s2 ) );
+  }
 
   EvPoll poll;
   poll.init( 5, false );
@@ -543,7 +568,8 @@ main( int argc, const char *argv[] )
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, &argv[ first_sub ], argc - first_sub,
                              nodict != NULL, dump != NULL, rate != NULL, cnt,
-                             range, zipf != NULL, secs, quiet != NULL );
+                             range, zipf != NULL, secs, quiet != NULL,
+                             seed1, seed2 );
   /* load dictionary if present */
   if ( ! data.no_dictionary ) {
     if ( path != NULL || (path = ::getenv( "cfile_path" )) != NULL ) {
@@ -599,6 +625,10 @@ main( int argc, const char *argv[] )
   }
   if ( ::strlen( s ) > 0 )
     printf( "\n" );
+  if ( data.use_random ) {
+    printf( "Random seed1: 0x%016lx seed2 0x%016lx\n", data.seed1,
+            data.seed2 );
+  }
   return 0;
 }
 
