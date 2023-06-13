@@ -123,6 +123,8 @@ lnk_lib     := -Wl,--push-state -Wl,-Bstatic
 dlnk_lib    :=
 lnk_dep     :=
 dlnk_dep    :=
+rv_dlnk_lib := -L$(pwd)/$(libd) -lsassrv
+rv_dlnk_dep := $(libd)/libsassrv.$(dll)
 
 ifneq (,$(md_home))
 md_lib      := $(md_home)/$(libd)/libraimd.a
@@ -227,13 +229,13 @@ libsassrv_dlnk  := $(dlnk_lib)
 libsassrv_spec  := $(version)-$(build_num)_$(git_hash)
 libsassrv_ver   := $(major_num).$(minor_num)
 
-sassrv_lib := $(libd)/libsassrv.a
 $(libd)/libsassrv.a: $(libsassrv_objs)
 $(libd)/libsassrv.$(dll): $(libsassrv_dbjs) $(dlnk_dep)
 
 all_libs    += $(libd)/libsassrv.a
 all_dlls    += $(libd)/libsassrv.$(dll)
 all_depends += $(libsassrv_deps)
+sassrv_lib   := $(libd)/libsassrv.a
 
 server_defines := -DSASSRV_VER=$(ver_build)
 $(objd)/server.o : .copr/Makefile
@@ -268,11 +270,30 @@ rv_pub_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_pub_files)))
 rv_pub_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_pub_files)))
 rv_pub_libs  := $(sassrv_lib)
 rv_pub_lnk   := $(sassrv_lib) $(lnk_lib)
+#rv_pub_libs  :=
+#rv_pub_lnk   := $(rv_dlnk_lib) $(dlnk_lib)
+
+#$(bind)/rv_pub$(exe): $(rv_pub_objs) $(rv_pub_libs) $(dlnk_dep) $(rv_dlnk_dep)
 
 $(bind)/rv_pub$(exe): $(rv_pub_objs) $(rv_pub_libs) $(lnk_dep)
 
 all_exes    += $(bind)/rv_pub$(exe)
 all_depends += $(rv_pub_deps)
+
+tibco_home = $(shell if [ -d /usr/tibco/tibrv ] ; then echo /usr/tibco/tibrv ; \
+                        elif [ -d /home/chris/tibco/tibrv ] ; then echo /home/chris/tibco/tibrv ; fi)
+api_client_includes = -I$(tibco_home)/include
+api_client_files := api_client
+api_client_cfile := $(addprefix src/, $(addsuffix .cpp, $(api_client_files)))
+api_client_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(api_client_files)))
+api_client_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(api_client_files)))
+api_client_libs  :=
+api_client_lnk   := $(lnk_lib) $(tibco_home)/lib/libtibrv64.a
+
+$(bind)/api_client$(exe): $(api_client_objs) $(api_client_libs) $(lnk_dep)
+
+#all_exes    += $(bind)/api_client$(exe)
+#all_depends += $(api_client_deps)
 
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
