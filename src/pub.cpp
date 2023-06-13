@@ -31,6 +31,37 @@ static const uint64_t FIRST_TIMER_ID  = 1, /* first dict request */
                       SECOND_TIMER_ID = 2, /* second dict request */
                       PUB_TIMER_ID    = 3;
 
+struct RandBuf : public ArrayCount<uint64_t, 1024> {
+  uint64_t hd, tl;
+  RandBuf() : hd( 0 ), tl( 0 ) {}
+  uint64_t index( uint64_t off ) {
+    return this->ptr[ this->tl + off ];
+  }
+  uint64_t avail( void ) {
+    return this->hd - this->tl;
+  }
+  uint64_t consume( void ) {
+    uint64_t off = this->tl++;
+    return this->ptr[ off ];
+  }
+  void append( uint64_t n ) {
+    if ( this->hd < this->count )
+      this->ptr[ this->hd++ ] = n;
+    else {
+      this->push( n );
+      this->hd++;
+    }
+  }
+  void adjust( void ) {
+    if ( this->tl > this->count / 2 ) {
+      ::memmove( this->ptr, &this->ptr[ this->tl ],
+                 sizeof( this->ptr[ 0 ] ) * this->avail() );
+      this->hd -= this->tl;
+      this->tl = 0;
+    }
+  }
+};
+
 /* rv client callback closure */
 struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
                         public EvTimerCallback, public BPData {
@@ -50,9 +81,10 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
                 i, j, k,
                 max_len,
                 payload_bytes,
-                msg_buf_len,
-                rate_per_sec;
-  uint64_t      start_time_ns;
+                msg_buf_len;
+  uint64_t      rate_per_sec,
+                start_time_ns,
+                ns_per_msg;
   bool          no_dictionary,   /* don't request dictionary */
                 have_dictionary, /* set when dict request succeeded */
                 use_json,
@@ -62,27 +94,32 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
                 dump_hex,
                 has_rate_timer,
                 use_random,
-                use_zipf;
+                use_zipf,
+                track_time;
 
   kv::rand::xoroshiro128plus rand;
   ZipfianGen<99, 100, kv::rand::xoroshiro128plus> zipf;
   uint32_t   ** sequence;
+  RandBuf       rand_buf;
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t n,
                   size_t cnt,  size_t pcnt,  size_t sz,  bool nd,  bool uj,
                   bool ur,  bool ut,  bool verb,  bool hex,  size_t rate,
-                  bool ra,  bool zi )
+                  bool ra,  bool zi,  bool ts )
     : poll( p ), client( c ), dict( 0 ), sub( s ), sub_buf( 0 ), payload( 0 ),
       msg_buf( 0 ), sub_n( n ), sub_count( cnt ), pub_count( pcnt ),
       current_pub( 0 ), total_pub( n * cnt * pcnt ), rate_accum( 0 ),
       i( 0 ), j( 0 ), k( 0 ), max_len( 0 ), payload_bytes( sz ),
       msg_buf_len( 0 ), rate_per_sec( rate ), start_time_ns( 0 ),
-      no_dictionary( nd ), have_dictionary( false ),
+      ns_per_msg( 0 ), no_dictionary( nd ), have_dictionary( false ),
       use_json( uj ), use_rv( ur ), use_tibmsg( ut ), verbose( hex | verb ),
       dump_hex( hex ), has_rate_timer( false ), use_random( ra | zi ),
-      use_zipf( zi ), zipf( n * cnt * pcnt, this->rand ), sequence( 0 ) {
+      use_zipf( zi ), track_time( ts ), zipf( n * cnt * pcnt, this->rand ),
+      sequence( 0 ) {
     this->rand.static_init( current_monotonic_time_ns(),
                             current_realtime_ns() );
+    if ( rate > 0 )
+      this->ns_per_msg = 1000000000 / rate;
     this->init_subjects();
     this->bp_flags  = BP_FORWARD | BP_NOTIFY;
   }
@@ -101,8 +138,11 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   /* dict timeout */
   void start_pub_timer( void ) noexcept;
   bool calc_rate_limit( void ) noexcept;
-  void get_random_index( size_t &sub_idx,  size_t &sub_num,
-                         uint32_t &seqno ) noexcept;
+  bool same_sub( uint64_t sub_idx,  uint64_t sub_num,  uint64_t n ) noexcept;
+  void rand_next( uint64_t &sub_idx,  uint64_t &sub_num,
+                  uint64_t &delta ) noexcept;
+  void get_random_index( uint64_t &sub_idx,  uint64_t &sub_num,
+                         uint32_t &seqno,  uint64_t &delta ) noexcept;
   void make_subject( size_t sub_idx,  size_t sub_num,
                      const char *&s,  size_t &slen ) noexcept;
   virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
@@ -160,10 +200,25 @@ RvDataCallback::on_connect( EvSocket &conn ) noexcept
   this->run_publishers();
 }
 
+struct WriteParam {
+  const char * sub;
+  size_t       sublen;
+  uint64_t     seqno,
+               cur_time,
+               delta;
+  const char * payload;
+  size_t       payload_bytes;
+  bool         track_time;
+
+  WriteParam( const char *s,  size_t len,  uint64_t num,  uint64_t t,
+              uint64_t del,  const char *pay,  size_t pay_bytes,  bool track )
+    : sub( s ), sublen( len ), seqno( num ), cur_time( t ), delta( del ),
+      payload( pay ), payload_bytes( pay_bytes ),  track_time( track ) {}
+};
+
 template< class Writer >
 size_t
-write_msg( Writer &writer,  const char *sub,  size_t sublen,
-           size_t seqno,  const char *payload,  size_t payload_bytes ) noexcept
+write_msg( Writer &writer,  WriteParam &p ) noexcept
 {
   static char msg_type[]    = "MSG_TYPE",
               seq_no[]      = "SEQ_NO",
@@ -175,16 +230,18 @@ write_msg( Writer &writer,  const char *sub,  size_t sublen,
               ask[]         = "ASK",
               timact[]      = "TIMACT",
               trade_date[]  = "TRADE_DATE",
+              volume[]      = "VOLUME",
+              duration[]    = "DURATION",
               buffer_data[] = "BUFFER_DATA";
   MDDecimal dec;
   MDTime time;
   MDDate date;
 
-  short type = ( seqno == 0 ? 8 : 1 );
+  short type = ( p.seqno == 0 ? 8 : 1 );
   writer.append_int( msg_type, sizeof( msg_type ),  type );
-  writer.append_int( seq_no, sizeof( seq_no ),  seqno );
+  writer.append_int( seq_no, sizeof( seq_no ),  p.seqno );
   writer.append_int( rec_status, sizeof( rec_status ), (short) 0 );
-  writer.append_string( symbol, sizeof( symbol ), sub, sublen + 1 );
+  writer.append_string( symbol, sizeof( symbol ), p.sub, p.sublen + 1 );
   writer.append_real( bid_size, sizeof( bid_size ), 10.0 );
   writer.append_real( ask_size, sizeof( ask_size ), 20.0 );
 
@@ -208,11 +265,18 @@ write_msg( Writer &writer,  const char *sub,  size_t sublen,
   date.day  = 9;
   writer.append_date( trade_date, sizeof( trade_date ), date );
 
-  if ( payload_bytes > 0 ) {
-    writer.append_string( buffer_data, sizeof( buffer_data ),
-                          payload, payload_bytes );
+  if ( p.track_time ) {
+    dec.ival = p.cur_time;
+    dec.hint = MD_DEC_LOGn10_9;
+    writer.append_decimal( volume, sizeof( volume ), dec );
+    dec.ival = p.delta;
+    dec.hint = MD_DEC_LOGn10_9;
+    writer.append_decimal( duration, sizeof( duration ), dec );
   }
-
+  if ( p.payload_bytes > 0 ) {
+    writer.append_string( buffer_data, sizeof( buffer_data ),
+                          p.payload, p.payload_bytes );
+  }
   return writer.update_hdr();
 }
 
@@ -234,7 +298,7 @@ RvDataCallback::calc_rate_limit( void ) noexcept
   if ( ! this->has_rate_timer )
     this->start_pub_timer();
 
-  uint64_t ns = current_monotonic_time_ns();
+  uint64_t ns = this->poll.current_mono_ns();
   if ( this->start_time_ns == 0 )
     this->start_time_ns = ns;
   if ( ns == this->start_time_ns )
@@ -247,22 +311,66 @@ RvDataCallback::calc_rate_limit( void ) noexcept
   return true;
 }
 
-void
-RvDataCallback::get_random_index( size_t &sub_idx,  size_t &sub_num,
-                                  uint32_t &seqno ) noexcept
+bool
+RvDataCallback::same_sub( uint64_t sub_idx,  uint64_t sub_num,
+                          uint64_t n ) noexcept
 {
-  size_t n;
-  if ( this->use_zipf )
-    n = this->zipf.next();
+  if ( this->sub_n > 1 ) {
+    return ( sub_idx == n % this->sub_n &&
+             sub_num == ( n / this->sub_n ) % this->sub_count );
+  }
+  return sub_num == n % this->sub_count;
+}
+
+void
+RvDataCallback::rand_next( uint64_t &sub_idx,  uint64_t &sub_num,
+                           uint64_t &delta ) noexcept
+{
+  uint64_t n;
+  if ( this->rand_buf.avail() > 0 )
+    n = this->rand_buf.consume();
   else
-    n = this->rand.next() % this->total_pub;
+    n = this->use_zipf ? this->zipf.next() :
+        ( this->rand.next() % this->total_pub );
+
   if ( this->sub_n > 1 ) {
     sub_idx = n % this->sub_n;
     sub_num = ( n / this->sub_n ) % this->sub_count;
   }
   else {
+    sub_idx = 0;
     sub_num = n % this->sub_count;
   }
+  if ( ! this->track_time || this->ns_per_msg == 0 ) {
+    delta = 0;
+    return;
+  }
+  uint64_t avail = this->rand_buf.avail(),
+           left  = this->total_pub - this->current_pub, m;
+
+  for ( delta = 1; delta <= avail; delta++ ) {
+    m = this->rand_buf.index( delta - 1 );
+    if ( this->same_sub( sub_idx, sub_num, m ) )
+      goto found_delta;
+  }
+  for ( ; delta < left; delta++ ) {
+    m = this->use_zipf ? this->zipf.next() :
+        ( this->rand.next() % this->total_pub );
+    this->rand_buf.append( m );
+    if ( this->same_sub( sub_idx, sub_num, m ) )
+      goto found_delta;
+  }
+  delta = 0;
+found_delta:;
+  this->rand_buf.adjust();
+}
+
+void
+RvDataCallback::get_random_index( uint64_t &sub_idx,  uint64_t &sub_num,
+                                  uint32_t &seqno,  uint64_t &delta ) noexcept
+{
+  this->rand_next( sub_idx, sub_num, delta );
+
   if ( this->sequence == NULL ) {
     this->sequence = (uint32_t **)
       ::malloc( sizeof( this->sequence[ 0 ] ) * this->sub_n );
@@ -319,38 +427,47 @@ RvDataCallback::run_publishers( void ) noexcept
       return;
     this->current_pub++;
 
-    size_t       sub_idx = this->i,
-                 sub_num = this->j;
-    uint32_t     seqno   = this->k;
+    uint64_t     sub_idx  = this->i,
+                 sub_num  = this->j;
+    uint32_t     seqno    = this->k;
+    uint64_t     delta    = 0,
+                 cur_time = 0;
     const char * subject;
     size_t       subject_len;
 
-    if ( this->use_random )
-      this->get_random_index( sub_idx, sub_num, seqno );
+    if ( this->use_random ) {
+      this->get_random_index( sub_idx, sub_num, seqno, delta );
+      if ( this->track_time ) {
+        cur_time = this->poll.current_coarse_ns();
+        delta   *= this->ns_per_msg;
+      }
+    }
+    else if ( this->track_time ) {
+      cur_time = this->poll.current_coarse_ns();
+      delta    = this->sub_n * this->sub_count * this->ns_per_msg;
+    }
     this->make_subject( sub_idx, sub_num, subject, subject_len );
 
+    WriteParam param( subject, subject_len, seqno, cur_time, delta,
+                      this->payload, this->payload_bytes, this->track_time );
     if ( this->use_json ) {
       JsonMsgWriter jsonmsg( this->msg_buf, this->msg_buf_len );
-      msg_len = write_msg<JsonMsgWriter>( jsonmsg, subject, subject_len, seqno,
-                                          this->payload, this->payload_bytes );
+      msg_len = write_msg<JsonMsgWriter>( jsonmsg, param );
       msg_enc = JSON_TYPE_ID;
     }
     else if ( this->use_rv ) {
       RvMsgWriter rvmsg( this->msg_buf, this->msg_buf_len );
-      msg_len = write_msg<RvMsgWriter>( rvmsg, subject, subject_len, seqno,
-                                        this->payload, this->payload_bytes );
+      msg_len = write_msg<RvMsgWriter>( rvmsg, param );
       msg_enc = RVMSG_TYPE_ID;
     }
     else if ( this->use_tibmsg || ! this->have_dictionary ) {
       TibMsgWriter tibmsg( this->msg_buf, this->msg_buf_len );
-      msg_len = write_msg<TibMsgWriter>( tibmsg, subject, subject_len, seqno,
-                                         this->payload, this->payload_bytes );
+      msg_len = write_msg<TibMsgWriter>( tibmsg, param );
       msg_enc = TIBMSG_TYPE_ID;
     }
     else {
       TibSassMsgWriter tibmsg( this->dict, this->msg_buf, this->msg_buf_len );
-      msg_len = write_msg<TibSassMsgWriter>( tibmsg, subject, subject_len,
-                                    seqno, this->payload, this->payload_bytes );
+      msg_len = write_msg<TibSassMsgWriter>( tibmsg, param );
       msg_enc = TIB_SASS_TYPE_ID;
     }
     if ( ++this->i == this->sub_n ) {
@@ -541,6 +658,7 @@ main( int argc, const char *argv[] )
              * msg_rate   = get_arg( x, argc, argv, 1, "-m", "-rate", NULL ),
              * random     = get_arg( x, argc, argv, 0, "-R", "-random", NULL ),
              * zipf       = get_arg( x, argc, argv, 0, "-Z", "-zipf", NULL ),
+             * use_ts     = get_arg( x, argc, argv, 0, "-T", "-stamp", NULL ),
              * help       = get_arg( x, argc, argv, 0, "-h", "-help", 0 );
   int first_sub = x, idle_count = 0;
 
@@ -565,6 +683,7 @@ main( int argc, const char *argv[] )
              "  -m         = msgs per second\n"
              "  -R         = random subjects\n"
              "  -Z         = random, zipf(0.99) distribution\n"
+             "  -A         = add timestamp to message\n"
              "  subject    = subject to publish\n", argv[ 0 ] );
     return 1;
   }
@@ -593,7 +712,8 @@ main( int argc, const char *argv[] )
        vb = ( verbose    != NULL ),
        du = ( dump       != NULL ),
        ra = ( random     != NULL ),
-       zi = ( zipf       != NULL );
+       zi = ( zipf       != NULL ),
+       ts = ( use_ts     != NULL );
   size_t sub_cnt = string_to_uint64( sub_count, ::strlen( sub_count ) ),
          pub_cnt = string_to_uint64( pub_count, ::strlen( pub_count ) ),
          pay_siz = string_to_uint64( payload, ::strlen( payload ) ),
@@ -607,7 +727,7 @@ main( int argc, const char *argv[] )
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, &argv[ first_sub ], n,
                          sub_cnt, pub_cnt, pay_siz, nd || uj || ur || ut,
-                         uj, ur, ut, vb, du, rate, ra, zi );
+                         uj, ur, ut, vb, du, rate, ra, zi, ts );
   /* load dictionary if present */
   if ( ! data.no_dictionary ) {
     if ( path != NULL || (path = ::getenv( "cfile_path" )) != NULL ) {

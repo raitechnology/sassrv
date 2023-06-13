@@ -619,7 +619,9 @@ main( int argc, const char *argv[] )
   const char *s = "";
   for ( uint32_t i = 0; i < 32; i++ ) {
     if ( data.msg_type_cnt[ i ] != 0 ) {
-      printf( "%s%u: %u", s, i, data.msg_type_cnt[ i ] );
+      char buf[ 32 ];
+      printf( "%s%u (%s): %u", s, i, md_sass_msg_type_str( i, buf ),
+              data.msg_type_cnt[ i ] );
       s = ", ";
     }
   }

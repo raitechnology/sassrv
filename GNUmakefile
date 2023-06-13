@@ -290,7 +290,7 @@ api_client_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(api_client_files)
 api_client_libs  :=
 api_client_lnk   := $(lnk_lib) $(tibco_home)/lib/libtibrv64.a
 
-$(bind)/api_client$(exe): $(api_client_objs) $(api_client_libs) $(lnk_dep)
+#$(bind)/api_client$(exe): $(api_client_objs) $(api_client_libs) $(lnk_dep)
 
 #all_exes    += $(bind)/api_client$(exe)
 #all_depends += $(api_client_deps)
