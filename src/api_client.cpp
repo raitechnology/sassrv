@@ -94,6 +94,11 @@ struct TimerCB {
     cb( c ), tm( 0 ), timer_id( tid ), event_id( 0 ) {}
 };
 
+static const double histogram[] = {
+  0.0001, 0.001, 0.01, 0.1, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0
+};
+static const uint32_t histogram_size = sizeof( histogram ) /
+                                       sizeof( histogram[ 0 ] );
 /* rv client callback closure */
 struct RvDataCallback {
   tibrvQueue     q;
@@ -127,15 +132,23 @@ struct RvDataCallback {
                 quiet,
                 track_time;
   uint64_t      seed1, seed2;
-  ArrayCount<MsgCB *,64> sub_cb,
-                         ibx_cb;
-  ArrayCount<double,64>  next_pub;
+  ArrayCount<MsgCB *,64>  sub_cb,
+                          ibx_cb;
+  ArrayCount<double,64>   next_pub;
+  ArrayCount<uint64_t,64> last_seqno;
   double        total_latency,
                 miss_latency,
                 trail_latency;
   uint64_t      total_count,
                 miss_count,
-                trail_count;
+                repeat_count,
+                trail_count,
+                initial_count,
+                update_count,
+                miss_seqno;
+  uint64_t      hist[ histogram_size + 1 ],
+                hist_count;
+  double        start_time;
 
   RvDataCallback( const char **s,  size_t cnt,
                   bool nodict,  bool hex,  bool rate,  size_t n,  size_t rng,
@@ -150,8 +163,11 @@ struct RvDataCallback {
       rand_range( rng ), max_time_secs( secs ), use_random( rng > cnt ),
       use_zipf( zipf ), quiet( q ), track_time( ts ),
       total_latency( 0 ), miss_latency( 0 ), trail_latency( 0 ),
-      total_count( 0 ), miss_count( 0 ), trail_count( 0 ) {
+      total_count( 0 ), miss_count( 0 ), repeat_count( 0 ), trail_count( 0 ),
+      initial_count( 0 ), update_count( 0 ), miss_seqno( 0 ), hist_count( 0 ),
+      start_time( 0 ) {
     ::memset( this->msg_type_cnt, 0, sizeof( this->msg_type_cnt ) );
+    ::memset( this->hist, 0, sizeof( this->hist ) );
     this->seed1 = ( s1 == 0 ? current_monotonic_time_ns() : s1 );
     this->seed2 = ( s2 == 0 ? current_realtime_ns() : s2 );
   }
@@ -159,10 +175,12 @@ struct RvDataCallback {
   void add_initial( size_t n,  size_t bytes ) {
     this->msg_recv[ n ] |= 1;
     this->msg_recv_bytes[ n ] += bytes;
+    this->initial_count++;
   }
   void add_update( size_t n,  size_t bytes ) {
     this->msg_recv[ n ] += 1 << 1;
     this->msg_recv_bytes[ n ] += bytes;
+    this->update_count++;
   }
   /* after CONNECTED message */
   void on_connect( void ) noexcept;
@@ -384,6 +402,7 @@ RvDataCallback::start_subscriptions( void ) noexcept
   if ( this->is_subscribed ) /* subscribing multiple times is allowed, */
     return;                  /* but must unsub multiple times as well */
 
+  this->start_time = current_realtime_s();
   this->subj_ht = UIntHashTab::resize( NULL );
   this->coll_ht = UIntHashTab::resize( NULL );
   size_t n   = this->sub_count * this->num_subs;
@@ -611,6 +630,7 @@ RvDataCallback::on_msg( const char *subject,  size_t subject_len,
   m = MDMsg::unpack( (void *) msg, 0, msg_len, 0, this->dict, &mem );
   MDFieldIter * iter = NULL;
   double delta = 0, next_delta = 0, duration = 0;
+  uint64_t  sequence = 0, last_sequence = 0;
   if ( m != NULL && m->get_field_iter( iter ) == 0 && iter->first() == 0 ) {
     MDName nm;
     MDReference mref;
@@ -624,19 +644,40 @@ RvDataCallback::on_msg( const char *subject,  size_t subject_len,
       }
       if ( have_sub && this->track_time ) {
         static const char volume[] = "VOLUME",
-                          durati[] = "DURATION";
+                          durati[] = "DURATION",
+                          seqno[]  = "SEQ_NO";
         const MDName vol( volume, sizeof( volume ) ),
-                     dur( durati, sizeof( durati ) );
+                     dur( durati, sizeof( durati ) ),
+                     seq( seqno, sizeof( seqno ) );
         MDDecimal dec;
         double    next = 0, val, last, cur;
         while ( iter->next() == 0 && iter->get_name( nm ) == 0 ) {
           bool is_volume   = nm.equals( vol ),
-               is_duration = ! is_volume && nm.equals( dur );
-          if ( ( is_volume | is_duration ) == true ) {
+               is_duration = false,
+               is_seqno    = false;
+          if ( ! is_volume ) {
+            is_duration = nm.equals( dur );
+            if ( ! is_duration )
+              is_seqno = nm.equals( seq );
+          }
+          if ( ( is_volume | is_duration | is_seqno ) == true ) {
             if ( iter->get_reference( mref ) == 0 ) {
-              if ( mref.ftype == MD_DECIMAL ) {
-                dec.get_decimal( mref );
-                if ( dec.get_real( val ) == 0 ) {
+              if ( is_seqno ) {
+                if ( mref.ftype == MD_INT || mref.ftype == MD_UINT ) {
+                  sequence = get_uint<uint64_t>( mref );
+                }
+              }
+              else {
+                if ( mref.ftype == MD_DECIMAL ) {
+                  dec.get_decimal( mref );
+                  if ( dec.get_real( val ) == 0 ) {
+                    if ( is_duration )
+                      duration = val;
+                    next += val;
+                  }
+                }
+                else if ( mref.ftype == MD_REAL ) {
+                  val = get_float<double>( mref );
                   if ( is_duration )
                     duration = val;
                   next += val;
@@ -645,22 +686,48 @@ RvDataCallback::on_msg( const char *subject,  size_t subject_len,
             }
           }
         }
-        last = this->next_pub[ sub_idx ];
-        cur  = current_realtime_s();
+        last = this->next_pub[ sub_idx ]; /* last should be close to current */
+        last_sequence = this->last_seqno[ sub_idx ];
+        cur = current_realtime_s();
         if ( last != 0 ) {
-          delta = cur - last;
-          if ( delta > 0.5 || delta < -0.5 ) {
+          bool missed = ( sequence > ( last_sequence + 1 ) );
+          delta = cur - last; /* positive is secs in before current time */
+          if ( ! missed && delta > 0 ) {
+            uint32_t i = 0;
+            for ( ; i < histogram_size; i++ ) {
+              if ( delta <= histogram[ i ] ) {
+                this->hist[ i ]++;
+                break;
+              }
+            }
+            if ( i == histogram_size )
+              this->hist[ i ]++;
+            this->hist_count++;
+          }
+#if 0
+          if ( missed ) {
             if ( this->quiet ) {
               out.ts().printf(
-                "## %.*s delta %.6f (expected=%.6f, current=%.6f)\n",
-                (int) subject_len, subject, delta, last, cur );
+"## %.*s delta %.6f (expected=%.6f, current=%.6f, seqno=%lu, last_seqno=%lu, missed=%lu)\n",
+                (int) subject_len, subject, delta, last, cur, sequence,
+                last_sequence, ( sequence - ( last_sequence + 1 ) ) );
             }
+          }
+#endif
+          if ( missed ) {
             this->miss_latency += delta;
             this->miss_count++;
+            this->miss_seqno += sequence - ( last_sequence + 1 );
           }
           else {
-            this->total_latency += delta;
-            this->total_count++;
+            /* initial and update with same seqno */
+            if ( sequence == ( last_sequence + 1 ) ) {
+              this->total_latency += delta;
+              this->total_count++;
+            }
+            else {
+              this->repeat_count++;
+            }
           }
         }
         if ( duration == 0 || ( is_initial && next < cur ) )
@@ -668,6 +735,7 @@ RvDataCallback::on_msg( const char *subject,  size_t subject_len,
         else
           next_delta = next - cur;
         this->next_pub.ptr[ sub_idx ] = next;
+        this->last_seqno.ptr[ sub_idx ] = sequence;
       }
     }
   }
@@ -676,6 +744,10 @@ RvDataCallback::on_msg( const char *subject,  size_t subject_len,
   if ( delta != 0 || next_delta != 0 ) {
     out.ts().printf( "## update latency %.6f, next expected %f\n", delta,
                      next_delta );
+  }
+  if ( last_sequence != 0 && sequence != 0 ) {
+    out.ts().printf( "## last seqno %lu, current seqno %lu\n", last_sequence,
+                     sequence );
   }
   if ( which >= SUB_INBOX_BASE ) {
     out.ts().printf( "## %.*s: (inbox: %.*s)\n", (int) subject_len, subject,
@@ -709,18 +781,20 @@ RvDataCallback::check_trail_time( void ) noexcept
 {
   const char * subject;
   size_t       subject_len;
-  double       cur, last, delta;
+  double       cur, next, delta;
+  uint64_t     seqno;
   cur = current_realtime_s();
 
   for ( uint32_t sub_idx = 0; sub_idx < this->next_pub.count; sub_idx++ ) {
-    last = this->next_pub.ptr[ sub_idx ];
-    if ( last != 0 ) {
-      delta = cur - last;
-      if ( delta > 0.5 || delta < -0.5 ) {
+    next = this->next_pub.ptr[ sub_idx ];
+    seqno = this->last_seqno[ sub_idx ];
+    if ( next != 0 ) {
+      delta = cur - next; /* if exepcted next more than 5.0 seconds ago */
+      if ( delta > 5.0 ) {
         this->make_subject( sub_idx, subject, subject_len );
         out.ts().printf(
-          "## %.*s delta %.6f (expected=%.6f, current=%.6f) (missed)\n",
-          (int) subject_len, subject, delta, last, cur );
+"## %.*s delta %.6f (expected=%.6f, current=%.6f, last_seqno=%lu) (trail)\n",
+          (int) subject_len, subject, delta, next, cur, seqno );
         this->trail_latency += delta;
         this->trail_count++;
       }
@@ -899,22 +973,55 @@ main( int argc, const char *argv[] )
   }
   if ( ! first )
     out.puts( "\n" );
-  if ( data.track_time ) {
+  if ( data.track_time && data.start_time != 0 ) {
     double lat = data.total_latency;
     if ( data.total_count > 0 )
       lat /= (double) data.total_count;
-    out.ts().printf( "avg latency %.6f total count %lu\n", lat,
-                     data.total_count );
+    uint64_t track_count =
+      data.total_count + data.miss_count + data.trail_count + data.repeat_count;
+    double t = current_realtime_s() - data.start_time;
+    const char *u = "seconds";
+    if ( t > 4 * 60 ) {
+      t /= 60;
+      u = "minutes";
+      if ( t > 3 * 60 ) {
+        t /= 60;
+        u = "hours";
+        if ( t > 2 * 24 ) {
+          t /= 24;
+          u = "days";
+        }
+      }
+    }
+    out.ts().printf( "Run time %f %s\n", t, u );
+    out.ts().printf( "Initial inbox msgs %lu, update bcast msgs %lu\n",
+                     data.initial_count, data.update_count );
+    out.ts().printf( "Avg latency %.6f updates, %lu of %lu tracked\n",
+                     lat, data.total_count, track_count );
     lat = data.miss_latency;
     if ( data.miss_count > 0 )
       lat /= (double) data.miss_count;
-    out.ts().printf( "miss latency %.6f miss count %lu\n", lat,
-                     data.miss_count );
+    out.ts().printf(
+    "Miss latency %.6f miss count %lu miss seqno %lu, repeat seqno %lu\n", lat,
+                     data.miss_count, data.miss_seqno, data.repeat_count );
     lat = data.trail_latency;
     if ( data.trail_count > 0 )
       lat /= (double) data.trail_count;
-    out.ts().printf( "trail latency %.6f trail count %lu\n", lat,
+    out.ts().printf( "Trail latency %.6f trail count %lu\n", lat,
                      data.trail_count );
+    uint32_t i = 0;
+    for ( ; i < histogram_size; i++ ) {
+      if ( data.hist[ i ] != 0 ) {
+        out.printf( "<= %f : %lu (%.2f%%)\n",
+          histogram[ i ], data.hist[ i ],
+          (double) data.hist[ i ] * 100.0 / (double) data.hist_count );
+      }
+    }
+    if ( data.hist[ i ] != 0 ) {
+      out.printf( " > %f : %lu (%.2f%%)\n",
+        histogram[ i-1 ], data.hist[ i ],
+        (double) data.hist[ i ] * 100.0 / (double) data.hist_count );
+    }
   }
   if ( data.use_random ) {
     out.ts().printf( "Random seed1: 0x%016lx seed2 0x%016lx\n", data.seed1,

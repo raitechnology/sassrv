@@ -683,7 +683,7 @@ main( int argc, const char *argv[] )
              "  -m         = msgs per second\n"
              "  -R         = random subjects\n"
              "  -Z         = random, zipf(0.99) distribution\n"
-             "  -A         = add timestamp to message\n"
+             "  -T         = add timestamp to message\n"
              "  subject    = subject to publish\n", argv[ 0 ] );
     return 1;
   }
