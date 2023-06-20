@@ -515,7 +515,9 @@ struct EvRvService : public kv::EvConnection, public kv::BPData {
 };
 
 #define is_rv_debug kv_unlikely( rv_debug != 0 )
+#define is_rv_host_debug kv_unlikely( rv_host_debug != 0 )
 extern uint32_t rv_debug;
+extern uint32_t rv_host_debug;
 
 }
 }

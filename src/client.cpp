@@ -533,7 +533,9 @@ main( int argc, const char *argv[] )
       cnt = string_to_uint64( sub_cnt, p - sub_cnt );
       if ( &p[ 1 ] < e )
         range = string_to_uint64( &p[ 1 ], e - &p[ 1 ] );
-      if ( cnt == 0 || range < cnt )
+      else
+        range = cnt;
+      if ( cnt == 0 )
         valid = false;
     }
     if ( ! valid ) {

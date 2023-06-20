@@ -52,7 +52,8 @@ enum RvAdv {
 
 static const size_t MAX_RV_NETWORK_LEN = 1680,
                     MAX_RV_SERVICE_LEN = 32,
-                    MAX_RV_HOST_ID_LEN = 64;
+                    MAX_RV_HOST_ID_LEN = 64,
+                    MAX_RV_VER_LEN     = 24;
 
 struct RvFwdAdv {
   const char * userid;
@@ -189,7 +190,9 @@ struct RvHostDB {
 struct RvDataLossElem {
   uint32_t     hash,         /* hash of subject */
                msg_loss,     /* number of messages lost */
+               restart,      /* number of pub restarts */
                pub_msg_loss, /* count lost published */
+               pub_restart,  /* count restart published */
                pub_host;     /* source of loss */
   const char * pub_host_id;
   uint16_t     len;          /* length of subject */
@@ -271,7 +274,8 @@ struct RvHost : public kv::EvSocket {
                 network[ MAX_RV_NETWORK_LEN ], /* network string */
                 service[ MAX_RV_SERVICE_LEN ], /* service string */
                 sess_ip[ 4 * 4 ],  /* sess ip address (may be same as host_ip) */
-                host_id[ MAX_RV_HOST_ID_LEN ];
+                host_id[ MAX_RV_HOST_ID_LEN ],
+                ver[ MAX_RV_VER_LEN ];
   uint16_t      host_len,          /* len of above */
                 daemon_len,        /* len of this->daomon_id[] */
                 network_len,       /* len of this->network[] */
@@ -280,6 +284,7 @@ struct RvHost : public kv::EvSocket {
                 service_num,       /* service in host order */
                 sess_ip_len,       /* len of sess_ip[] */
                 host_id_len,       /* len of host_id[] */
+                ver_len,
                 http_port;         /* http listen port (network order) */
   uint32_t      http_addr,         /* http tcp addr (network order) */
                 host_ip;
@@ -383,8 +388,8 @@ struct RvHost : public kv::EvSocket {
   size_t make_session( uint64_t ns,  char session[ MAX_SESSION_LEN ] ) noexcept;
 
   void send_host_status( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.STATUS */
-  void send_outbound_data_loss( uint32_t msg_loss,  uint32_t pub_host,
-                                const char *pub_host_id ) noexcept;
+  void send_outbound_data_loss( uint32_t msg_loss,  bool is_restart,
+                          uint32_t pub_host, const char *pub_host_id ) noexcept;
   void data_loss_error( uint64_t bytes_lost,  const char *err,
                         size_t errlen ) noexcept;
   /* start / stop network */

@@ -22,6 +22,7 @@ using namespace rai;
 using namespace sassrv;
 using namespace kv;
 using namespace md;
+uint32_t rai::sassrv::rv_host_debug = 0;
 
 RvHost::RvHost( RvHostDB &d,  EvPoll &poll,  RoutePublish &sr,
                 const char *svc,  size_t svc_len,  uint16_t port,
@@ -35,10 +36,17 @@ RvHost::RvHost( RvHostDB &d,  EvPoll &poll,  RoutePublish &sr,
              * isub = inbound_sub;
   size_t       olen = sizeof( outbound_sub ) - 1,
                ilen = sizeof( inbound_sub ) - 1;
+  const char * v    = sassrv_get_version();
+  size_t       vlen = ::strlen( v );
 
   this->sock_opts = OPT_NO_POLL;
   ::memset( this->host, 0, (char *) (void *) &this[ 1 ] - this->host );
   ::memcpy( this->service, svc, svc_len );
+  if ( vlen > MAX_RV_VER_LEN - 1 )
+    vlen = MAX_RV_VER_LEN - 1;
+  ::memcpy( this->ver, v, vlen );
+  this->ver[ vlen ] = '\0';
+  this->ver_len     = vlen + 1;
   this->service_len = svc_len;
   this->ipport      = port;
   this->has_service_prefix = has_svc_pre;
@@ -289,8 +297,8 @@ RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
 }
 
 void
-RvHost::send_outbound_data_loss( uint32_t msg_loss,  uint32_t pub_host,
-                                 const char *pub_host_id ) noexcept
+RvHost::send_outbound_data_loss( uint32_t msg_loss,  bool is_restart,
+                          uint32_t pub_host,  const char *pub_host_id ) noexcept
 {
   const char * subj   = this->dataloss_outbound_sub;
   const size_t sublen = this->dataloss_outbound_len;
@@ -309,7 +317,10 @@ RvHost::send_outbound_data_loss( uint32_t msg_loss,  uint32_t pub_host,
   rvmsg.append_string( SARG( "ADV_CLASS" ), SARG( "ERROR" ) );
   rvmsg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
   rvmsg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.OUTBOUND.BCAST" ) );
-  rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost msgs" ) );
+  if ( is_restart )
+    rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost seqno tracking" ) );
+  else
+    rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost msgs" ) );
   rvmsg.append_uint( SARG( "lost" ), msg_loss );
   rvmsg.append_string( SARG( "host" ), pub_host_ip, pub_host_ip_len + 1 );
   if ( pub_host_id_len != 0 )
@@ -389,9 +400,12 @@ RvPubLoss::data_loss( RvHost &host,  EvPublish &pub,
   else
     host.loss_array.pub_status[ pub.pub_status & EV_MAX_LOSS ]++; /* other ev */
 
-  uint32_t msg_loss = pub.pub_status;
-  if ( msg_loss == EV_PUB_RESTART )
+  uint32_t msg_loss = pub.pub_status,
+           restart  = 0;
+  if ( msg_loss == EV_PUB_RESTART ) {
     msg_loss = 1; /* not sure how many lost */
+    restart  = 1;
+  }
   if ( msg_loss <= EV_MAX_LOSS ) { /* if message loss */
     host.stat.idl += msg_loss;
 
@@ -414,12 +428,15 @@ RvPubLoss::data_loss( RvHost &host,  EvPublish &pub,
     el = this->loss_queue->tab.upsert( pub.subj_hash, sub, sublen, loc );
     if ( loc.is_new ) {
       el->msg_loss     = msg_loss;
+      el->restart      = restart;
       el->pub_host     = pub.pub_host;
       el->pub_host_id  = pub_host_id;
       el->pub_msg_loss = 0;
+      el->pub_restart  = 0;
     }
     else {
       el->msg_loss   += msg_loss;
+      el->restart    += restart;
       el->pub_host    = pub.pub_host;
       el->pub_host_id = pub_host_id;
     }
@@ -456,10 +473,11 @@ RvHost::send_inbound_data_loss( RvPubLoss &loss ) noexcept
   const char * sub[ 9 ];
   size_t       sublen[ 9 ];
   uint32_t     msg_loss[ 9 ],
-               sub_cnt      = 0,
-               extra_sublen = 0,
-               pub_host     = 0;
-  uint64_t     total_loss   = 0;
+               sub_cnt       = 0,
+               extra_sublen  = 0,
+               pub_host      = 0;
+  uint64_t     total_loss    = 0,
+               total_restart = 0;
   char         pub_host_ip[ 32 ];
   size_t       pub_host_ip_len = 0;
   const char * pub_host_id  = NULL;
@@ -472,7 +490,8 @@ RvHost::send_inbound_data_loss( RvPubLoss &loss ) noexcept
         el = loss.loss_queue->tab.next( loc ) ) {
     if ( el->pub_msg_loss != el->msg_loss &&
          ( el->pub_host == pub_host || pub_host == 0 ) ) {
-      uint32_t loss = el->msg_loss - el->pub_msg_loss;
+      uint32_t loss    = el->msg_loss - el->pub_msg_loss,
+               restart = el->restart  - el->pub_restart;
       if ( sub_cnt < 9 ) {
         sub[ sub_cnt ]      = el->value;
         sublen[ sub_cnt ]   = el->len;
@@ -480,11 +499,13 @@ RvHost::send_inbound_data_loss( RvPubLoss &loss ) noexcept
         extra_sublen       += el->len;
       }
       sub_cnt++;
-      total_loss += loss;
+      total_loss      += loss;
+      total_restart   += restart;
       el->pub_msg_loss = el->msg_loss;
-      pub_host = el->pub_host;
-      pub_host_id = el->pub_host_id;
-      pub_host_id_len = ( pub_host_id == NULL ? 0 : ::strlen( pub_host_id ) );
+      el->pub_restart  = el->restart;
+      pub_host         = el->pub_host;
+      pub_host_id      = el->pub_host_id;
+      pub_host_id_len  = ( pub_host_id == NULL ? 0 : ::strlen( pub_host_id ) );
     }
   }
   if ( total_loss == 0 ) {
@@ -510,7 +531,10 @@ RvHost::send_inbound_data_loss( RvPubLoss &loss ) noexcept
   rvmsg.append_string( SARG( "ADV_CLASS" ), SARG( "ERROR" ) );
   rvmsg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
   rvmsg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.INBOUND.BCAST" ) );
-  rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost msgs" ) );
+  if ( total_loss == total_restart )
+    rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost seqno tracking" ) );
+  else
+    rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost msgs" ) );
   rvmsg.append_string( SARG( "host" ), pub_host_ip, pub_host_ip_len + 1 );
   if ( pub_host_id_len != 0 )
     rvmsg.append_string( SARG( "hostid" ), pub_host_id, pub_host_id_len + 1 );
@@ -866,7 +890,7 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
     if ( ( flags & ADV_OS ) != 0 )
       msg.append_uint( SARG( "os" ), (uint8_t) 1 );
     if ( ( flags & ADV_VER ) != 0 )
-      msg.append_string( SARG( "ver" ), SARG( "5.4.2" ) );
+      msg.append_string( SARG( "ver" ), host.ver, host.ver_len );
     if ( ( flags & ADV_HTTPADDR ) != 0 ) {
       if ( host.http_addr != 0 || host.http_port != 0 )
         msg.append_ipdata( SARG( "httpaddr" ), host.http_addr );
@@ -1503,10 +1527,17 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
     size_t n;
     if ( (n = p->get_session( this->svc, sess )) > 0 ) {
       if ( n + 1 == session_len && ::memcmp( sess, session, n ) == 0 ) {
-        subcnt  = p->get_subscriptions( this->svc, subs );
-        patcnt  = p->get_patterns( this->svc, RV_PATTERN_FMT, pats );
-        userlen = p->get_userid( user );
-        break;
+        size_t i = p->get_subscriptions( this->svc, subs ),
+               j = p->get_patterns( this->svc, RV_PATTERN_FMT, pats );
+        if ( i + j != 0 ) {
+          if ( is_rv_host_debug )
+            printf( "rv session [%.*s] subcnt %u patcnt %u\n",
+                    (int) session_len, session, (uint32_t) i, (uint32_t) j );
+          subcnt += i;
+          patcnt += j;
+          if ( userlen == 0 )
+            userlen = p->get_userid( user );
+        }
       }
     }
   }
