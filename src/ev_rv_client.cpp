@@ -176,7 +176,7 @@ EvRvClient::trace_msg( char dir,  void *msg,  size_t msglen ) noexcept
   RvMsg  * m;
   printf( " === %s\n", dir == '>' ? "send ->" : "recv <-" );
 
-  m = RvMsg::unpack_rv( msg, 0, msglen, 0, NULL, &mem );
+  m = RvMsg::unpack_rv( msg, 0, msglen, 0, NULL, mem );
   if ( m != NULL )
     m->print( &out );
   else {
@@ -280,7 +280,7 @@ EvRvClient::recv_info( void ) noexcept
   MDFieldIter * it;
 
   m = RvMsg::unpack_rv( this->msg_in.data.fptr, 0, this->msg_in.data.fsize, 0,
-                        NULL, &mem );
+                        NULL, mem );
   if ( this->msg_in.sublen != sizeof( init ) - 1 ||
        ::memcmp( this->msg_in.sub, init, sizeof( init ) - 1 ) != 0 ) {
     if ( this->msg_in.sublen == sizeof( refu ) - 1 &&
@@ -423,7 +423,7 @@ EvRvClient::fwd_pub( void ) noexcept
   if ( ftype == MD_MESSAGE ) {
     ftype = RVMSG_TYPE_ID;
     MDMsg * m = RvMsg::opaque_extract( (uint8_t *) msg, 8, msg_len, NULL,
-                                       &this->msg_in.mem );
+                                       this->msg_in.mem );
     if ( m != NULL ) {
       ftype   = m->get_type_id();
       msg     = &((uint8_t *) m->msg_buf)[ m->msg_off ];
@@ -520,7 +520,7 @@ EvRvClient::publish( EvPublish &pub ) noexcept
       case TIB_SASS_TYPE_ID:
       case TIB_SASS_FORM_TYPE_ID:
       case MARKETFEED_TYPE_ID:
-      case RWF_TYPE_ID: /* ??? */
+      case RWF_FIELD_LIST_TYPE_ID: /* ??? */
       do_tibmsg:;
         ::memcpy( &buf[ rvmsg.off ], data_hdr, sizeof( data_hdr ) );
         rvmsg.off += sizeof( data_hdr );

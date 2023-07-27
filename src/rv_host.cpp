@@ -1600,7 +1600,7 @@ RvDaemonRpc::on_msg( EvPublish &pub ) noexcept
 
   if ( is_rv_debug )
     printf( "daemon rpc %.*s\n", (int) pub.subject_len, pub.subject );
-  m = RvMsg::unpack_rv( (void *) pub.msg, 0, pub.msg_len, 0, NULL, &mem );
+  m = RvMsg::unpack_rv( (void *) pub.msg, 0, pub.msg_len, 0, NULL, mem );
   if ( m != NULL ) {
     /*m->print( &mout );*/
     /* "op":"get", "what":"sessions"

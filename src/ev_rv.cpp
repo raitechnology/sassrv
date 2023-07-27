@@ -369,7 +369,7 @@ EvRvService::fwd_pub( void *rvbuf,  size_t buflen ) noexcept
   if ( ftype == MD_MESSAGE || ftype == RVMSG_TYPE_ID ) {
     ftype = RVMSG_TYPE_ID;
     MDMsg * m = RvMsg::opaque_extract( (uint8_t *) msg, 8, msg_len, NULL,
-                                       &this->msg_in.mem );
+                                       this->msg_in.mem );
     if ( m != NULL ) {
       ftype   = m->get_type_id();
       msg     = &((uint8_t *) m->msg_buf)[ m->msg_off ];
@@ -1157,7 +1157,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       case TIB_SASS_TYPE_ID:
       case TIB_SASS_FORM_TYPE_ID:
       case MARKETFEED_TYPE_ID:
-      case RWF_TYPE_ID: /* ??? */
+      case RWF_FIELD_LIST_TYPE_ID: /* ??? */
       do_tibmsg:;
         if ( suf_len == 0 ) {
           rvmsg.off += append_field_hdr( &buf[ rvmsg.off ], SARG( "data" ),
@@ -1229,7 +1229,7 @@ EvRvService::convert_json( MDMsgMem &spc,  void *&msg,
   MDMsgMem   tmp_mem;
   JsonMsgCtx ctx;
 
-  if ( ctx.parse( msg, 0, msg_len, NULL, &tmp_mem, false ) != 0 )
+  if ( ctx.parse( msg, 0, msg_len, NULL, tmp_mem, false ) != 0 )
     return false;
   spc.reuse();
   size_t max_len = ( ( msg_len | 15 ) + 1 ) * 16;
@@ -1395,7 +1395,7 @@ EvRvService::print( int fd,  void *m,  size_t len ) noexcept
 {
   RestrictOut mout;
   MDMsgMem mem;
-  MDMsg *msg = MDMsg::unpack( m, 0, len, 0, NULL, &mem );
+  MDMsg *msg = MDMsg::unpack( m, 0, len, 0, NULL, mem );
   mout.printf( "----> (%d)\n", fd );
   if ( msg != NULL )
     msg->print( &mout, 1, "%12s : ", NULL );
@@ -1446,7 +1446,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
                 status   = 0;
 
   this->mem.reuse();
-  this->msg = RvMsg::unpack_rv( msgbuf, 0, msglen, 0, NULL, &this->mem );
+  this->msg = RvMsg::unpack_rv( msgbuf, 0, msglen, 0, NULL, this->mem );
   if ( this->msg == NULL || this->msg->get_field_iter( it ) != 0 )
     status = ERR_RV_MSG;
   else {

@@ -394,7 +394,7 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
     }
     else if ( which == DICT_INBOX_ID ) {
       printf( "Received dictionary message (len=%u)\n", (uint32_t) pub_len );
-      m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, &mem);
+      m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, mem );
       this->on_dict( m );
       this->start_subscriptions();
       return true;
@@ -415,7 +415,7 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
       return true;
     }
   }
-  m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, &mem );
+  m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, mem );
   MDFieldIter * iter = NULL;
   if ( m != NULL && m->get_field_iter( iter ) == 0 && iter->first() == 0 ) {
     MDName nm;

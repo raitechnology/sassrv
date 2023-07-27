@@ -85,6 +85,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   uint64_t      rate_per_sec,
                 start_time_ns,
                 ns_per_msg;
+  uint16_t      rectype;
   bool          no_dictionary,   /* don't request dictionary */
                 have_dictionary, /* set when dict request succeeded */
                 use_json,
@@ -111,11 +112,11 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
       current_pub( 0 ), total_pub( n * cnt * pcnt ), rate_accum( 0 ),
       i( 0 ), j( 0 ), k( 0 ), max_len( 0 ), payload_bytes( sz ),
       msg_buf_len( 0 ), rate_per_sec( rate ), start_time_ns( 0 ),
-      ns_per_msg( 0 ), no_dictionary( nd ), have_dictionary( false ),
-      use_json( uj ), use_rv( ur ), use_tibmsg( ut ), verbose( hex | verb ),
-      dump_hex( hex ), has_rate_timer( false ), use_random( ra | zi ),
-      use_zipf( zi ), track_time( ts ), zipf( n * cnt * pcnt, this->rand ),
-      sequence( 0 ) {
+      ns_per_msg( 0 ), rectype( 0 ), no_dictionary( nd ),
+      have_dictionary( false ), use_json( uj ), use_rv( ur ),
+      use_tibmsg( ut ), verbose( hex | verb ), dump_hex( hex ),
+      has_rate_timer( false ), use_random( ra | zi ), use_zipf( zi ),
+      track_time( ts ), zipf( n * cnt * pcnt, this->rand ), sequence( 0 ) {
     this->rand.static_init( current_monotonic_time_ns(),
                             current_realtime_ns() );
     if ( rate > 0 )
@@ -208,12 +209,15 @@ struct WriteParam {
                delta;
   const char * payload;
   size_t       payload_bytes;
+  uint16_t     rectype;
   bool         track_time;
 
   WriteParam( const char *s,  size_t len,  uint64_t num,  uint64_t t,
-              uint64_t del,  const char *pay,  size_t pay_bytes,  bool track )
+              uint64_t del,  const char *pay,  size_t pay_bytes,
+              uint16_t rec,  bool track )
     : sub( s ), sublen( len ), seqno( num ), cur_time( t ), delta( del ),
-      payload( pay ), payload_bytes( pay_bytes ),  track_time( track ) {}
+      payload( pay ), payload_bytes( pay_bytes ), rectype( rec ),
+      track_time( track ) {}
 };
 
 template< class Writer >
@@ -221,6 +225,7 @@ size_t
 write_msg( Writer &writer,  WriteParam &p ) noexcept
 {
   static char msg_type[]    = "MSG_TYPE",
+              rec_type[]    = "REC_TYPE",
               seq_no[]      = "SEQ_NO",
               rec_status[]  = "REC_STATUS",
               symbol[]      = "SYMBOL",
@@ -238,10 +243,20 @@ write_msg( Writer &writer,  WriteParam &p ) noexcept
   MDDate date;
 
   short type = ( p.seqno == 0 ? 8 : 1 );
-  writer.append_int( msg_type, sizeof( msg_type ),  type );
+  writer.append_int( msg_type, sizeof( msg_type ), type );
+  if ( p.rectype != 0 )
+    writer.append_int( rec_type, sizeof( rec_type ), p.rectype );
   writer.append_int( seq_no, sizeof( seq_no ),  p.seqno );
   writer.append_int( rec_status, sizeof( rec_status ), (short) 0 );
-  writer.append_string( symbol, sizeof( symbol ), p.sub, p.sublen + 1 );
+  const char *s = &p.sub[ p.sublen ];
+  int dots = 0;
+  for ( ; s > p.sub; s-- ) {
+    if ( s[ -1 ] == '.' )
+      if ( ++dots == 2 )
+        break;
+  }
+  writer.append_string( symbol, sizeof( symbol ), s,
+                        &p.sub[ p.sublen + 1 ] - s );
   writer.append_real( bid_size, sizeof( bid_size ), 10.0 );
   writer.append_real( ask_size, sizeof( ask_size ), 20.0 );
 
@@ -449,7 +464,8 @@ RvDataCallback::run_publishers( void ) noexcept
     this->make_subject( sub_idx, sub_num, subject, subject_len );
 
     WriteParam param( subject, subject_len, seqno, cur_time, delta,
-                      this->payload, this->payload_bytes, this->track_time );
+                      this->payload, this->payload_bytes,
+                      this->rectype, this->track_time );
     if ( this->use_json ) {
       JsonMsgWriter jsonmsg( this->msg_buf, this->msg_buf_len );
       msg_len = write_msg<JsonMsgWriter>( jsonmsg, param );
@@ -482,7 +498,7 @@ RvDataCallback::run_publishers( void ) noexcept
       MDMsgMem mem;
       MDOutput mout;
       mout.printf( "## %s seqno=%u\n", subject, seqno );
-      m = MDMsg::unpack( this->msg_buf, 0, msg_len, 0, this->dict, &mem );
+      m = MDMsg::unpack( this->msg_buf, 0, msg_len, 0, this->dict, mem );
       /* print message */
       if ( m != NULL ) {
         printf( "## format: %s, length %u\n", m->get_proto_string(),
@@ -584,7 +600,7 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
 {
   MDMsgMem mem;
   MDMsg  * m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict,
-                              &mem );
+                              mem );
   /* check if published to _INBOX.<session>. */
   uint64_t which = this->client.is_inbox( pub.subject, pub.subject_len );
   if ( which != 0 ) {
@@ -649,6 +665,7 @@ main( int argc, const char *argv[] )
              * pub_count  = get_arg( x, argc, argv, 1, "-p", "-pub", "1" ),
              * sub_count  = get_arg( x, argc, argv, 1, "-k", "-sub", "1" ),
              * payload    = get_arg( x, argc, argv, 1, "-z", "-payload", "0" ),
+             * rectype    = get_arg( x, argc, argv, 1, "-f", "-rectype", NULL ),
              * nodict     = get_arg( x, argc, argv, 0, "-x", "-nodict", NULL ),
              * verbose    = get_arg( x, argc, argv, 0, "-v", "-verbose", NULL ),
              * dump       = get_arg( x, argc, argv, 0, "-e", "-hex", NULL ),
@@ -666,7 +683,7 @@ main( int argc, const char *argv[] )
   help:;
     fprintf( stderr,
  "%s [-d daemon] [-n network] [-s service] [-c cfile_path] [-x] "
-    "[-m rate] [-z size] [-k sub_count] [-p times] subject ...\n"
+    "[-m rate] [-z size] [-f rectype] [-k sub_count] [-p times] subject ...\n"
              "  -d daemon  = daemon port to connect (tcp:7500)\n"
              "  -n network = network\n"
              "  -s service = service (7500)\n"
@@ -674,6 +691,7 @@ main( int argc, const char *argv[] )
              "  -p count   = number of times to publish a record (1)\n"
              "  -k count   = number of subjects to publish (1)\n"
              "  -z size    = payload bytes added to message (0)\n"
+             "  -f rectype = add REC_TYPE field to message\n"
              "  -x         = don't load a dictionary\n"
              "  -v         = print messages\n"
              "  -e         = show hex dump of messages\n"
@@ -748,6 +766,27 @@ main( int argc, const char *argv[] )
         data.have_dictionary = true;
       }
     }
+  }
+  if ( rectype != NULL ) {
+    uint16_t formclass = 0;
+    if ( rectype[ 0 ] >= '0' && rectype[ 0 ] <= '9' )
+      formclass = string_to_uint64( rectype, ::strlen( rectype ) );
+    if ( formclass == 0 ) {
+      if ( data.have_dictionary ) {
+        MDLookup by( rectype, ::strlen( rectype ) );
+        if ( data.dict->get( by ) ) {
+          if ( by.ftype == MD_MESSAGE )
+            formclass = by.fid;
+        }
+      }
+    }
+    if ( formclass == 0 ) {
+      fprintf( stderr, "unable to resolve rec type %s\n", rectype );
+      return 1;
+    }
+    if ( rectype[ 0 ] < '0' || rectype[ 0 ] > '9' )
+      printf( "Resolve rec type %u (%s)\n", formclass, rectype );
+    data.rectype = formclass;
   }
   /* connect to daemon */
   if ( ! conn.connect( parm, &data, &data ) ) {
