@@ -30,8 +30,10 @@ RvHost::RvHost( RvHostDB &d,  EvPoll &poll,  RoutePublish &sr,
       : EvSocket( poll, poll.register_type( "rv_host" ) ),
         db( d ), sub_route( sr )
 {
-  const char   outbound_sub[] = "_RV.ERROR.SYSTEM.DATALOSS.OUTBOUND.BCAST",
-               inbound_sub[]  = "_RV.ERROR.SYSTEM.DATALOSS.INBOUND.BCAST";
+                             /*_RV.ERROR.SYSTEM.DATALOSS.OUTBOUND.BCAST */
+  const char   outbound_sub[] = _RV_ERROR_DATALOSS_OUT_BCAST,
+                             /*_RV.ERROR.SYSTEM.DATALOSS.INBOUND.BCAST */
+               inbound_sub[]  = _RV_ERROR_DATALOSS_INB_BCAST;
   const char * osub = outbound_sub,
              * isub = inbound_sub;
   size_t       olen = sizeof( outbound_sub ) - 1,
@@ -266,9 +268,9 @@ RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
   size_t      size;
   RvMsgWriter msg( buf, sizeof( buf ) );
 
-  msg.append_string( SARG( "ADV_CLASS" ), SARG( "ERROR" ) );
-  msg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
-  msg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.OUTBOUND.BCAST" ) );
+  msg.append_string( SARG( _ADV_CLASS ), SARG( _ERROR ) );
+  msg.append_string( SARG( _ADV_SOURCE ), SARG( _SYSTEM ) );
+  msg.append_string( SARG( _ADV_NAME ), SARG( _DATALOSS_OUTBOUND_BCAST ) );
   if ( errlen > 0 ) {
     if ( errlen > sizeof( str ) - 1 )
       errlen = sizeof( str ) - 1;
@@ -279,7 +281,7 @@ RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
     ::strcpy( str, "nats-server connection lost" );
     errlen = ::strlen( str );
   }
-  msg.append_string( SARG( "ADV_DESC" ), str, errlen + 1 );
+  msg.append_string( SARG( _ADV_DESC ), str, errlen + 1 );
   msg.append_uint( SARG( "lost" ), bytes_lost );
   if ( this->ipport != 0 )
     msg.append_ipdata( SARG( "scid" ), this->ipport );
@@ -314,13 +316,13 @@ RvHost::send_outbound_data_loss( uint32_t msg_loss,  bool is_restart,
   pub_host_id_len = ( pub_host_id == NULL ? 0 : ::strlen( pub_host_id ) );
   pub_host_ip_len = RvMcast::ip4_string( pub_host, pub_host_ip );
 
-  rvmsg.append_string( SARG( "ADV_CLASS" ), SARG( "ERROR" ) );
-  rvmsg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
-  rvmsg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.OUTBOUND.BCAST" ) );
+  rvmsg.append_string( SARG( _ADV_CLASS ), SARG( _ERROR ) );
+  rvmsg.append_string( SARG( _ADV_SOURCE ), SARG( _SYSTEM ) );
+  rvmsg.append_string( SARG( _ADV_NAME ), SARG( _DATALOSS_OUTBOUND_BCAST ) );
   if ( is_restart )
-    rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost seqno tracking" ) );
+    rvmsg.append_string( SARG( _ADV_DESC ), SARG( "lost seqno tracking" ) );
   else
-    rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost msgs" ) );
+    rvmsg.append_string( SARG( _ADV_DESC ), SARG( "lost msgs" ) );
   rvmsg.append_uint( SARG( "lost" ), msg_loss );
   rvmsg.append_string( SARG( "host" ), pub_host_ip, pub_host_ip_len + 1 );
   if ( pub_host_id_len != 0 )
@@ -528,13 +530,13 @@ RvHost::send_inbound_data_loss( RvPubLoss &loss ) noexcept
 
   RvMsgWriter rvmsg( b, blen );
 
-  rvmsg.append_string( SARG( "ADV_CLASS" ), SARG( "ERROR" ) );
-  rvmsg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
-  rvmsg.append_string( SARG( "ADV_NAME" ), SARG( "DATALOSS.INBOUND.BCAST" ) );
+  rvmsg.append_string( SARG( _ADV_CLASS ), SARG( _ERROR ) );
+  rvmsg.append_string( SARG( _ADV_SOURCE ), SARG( _SYSTEM ) );
+  rvmsg.append_string( SARG( _ADV_NAME ), SARG( _DATALOSS_INBOUND_BCAST ) );
   if ( total_loss == total_restart )
-    rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost seqno tracking" ) );
+    rvmsg.append_string( SARG( _ADV_DESC ), SARG( "lost seqno tracking" ) );
   else
-    rvmsg.append_string( SARG( "ADV_DESC" ), SARG( "lost msgs" ) );
+    rvmsg.append_string( SARG( _ADV_DESC ), SARG( "lost msgs" ) );
   rvmsg.append_string( SARG( "host" ), pub_host_ip, pub_host_ip_len + 1 );
   if ( pub_host_id_len != 0 )
     rvmsg.append_string( SARG( "hostid" ), pub_host_id, pub_host_id_len + 1 );
@@ -871,10 +873,10 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
 
   RvMsgWriter msg( mem.make( sublen + 1024 ), sublen + 1024 );
 
-  msg.append_string( SARG( "ADV_CLASS" ), class_str, class_len + 1 );
-  msg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
+  msg.append_string( SARG( _ADV_CLASS ), class_str, class_len + 1 );
+  msg.append_string( SARG( _ADV_SOURCE ), SARG( _SYSTEM ) );
   /* skip prefix: _RV.INFO.SYSTEM. */
-  msg.append_string( SARG( "ADV_NAME" ), nam, &subj[ sublen + 1 ] - nam );
+  msg.append_string( SARG( _ADV_NAME ), nam, &subj[ sublen + 1 ] - nam );
 
   if ( ( flags & ADV_HOST_COMMON ) != 0 ) {
     now = kv_current_realtime_ns();
@@ -978,7 +980,8 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
 void
 RvHost::send_host_status( void ) noexcept
 {
-  static const char   status[]   = "_RV.INFO.SYSTEM.HOST.STATUS.";
+                                /*_RV.INFO.SYSTEM.HOST.STATUS.*/
+  static const char   status[]   = _RV_INFO_HOST_STATUS ".";
   static const size_t status_len = sizeof( status ) - 1;
 
   PeerMatchArgs ka( "tcp", 3 );
@@ -1007,7 +1010,8 @@ RvHost::send_host_status( void ) noexcept
 void
 RvHost::send_host_start( EvRvService *svc ) noexcept
 {
-  static const char   start[]   = "_RV.INFO.SYSTEM.HOST.START.";
+                               /*_RV.INFO.SYSTEM.HOST.START.*/
+  static const char   start[]   = _RV_INFO_HOST_START ".";
   static const size_t start_len = sizeof( start ) - 1;
   if ( ! this->host_started ) {
     RvFwdAdv fwd( *this, svc, start, start_len, ADV_HOST_START );
@@ -1037,7 +1041,8 @@ void
 RvHost::send_session_start( const char *user,  size_t user_len,
                             const char *session,  size_t session_len ) noexcept
 {
-  static const char   start[]   = "_RV.INFO.SYSTEM.SESSION.START.";
+                               /*_RV.INFO.SYSTEM.SESSION.START.*/
+  static const char   start[]   = _RV_INFO_SESSION_START ".";
   static const size_t start_len = sizeof( start ) - 1;
   RvFwdAdv fwd( *this, user, user_len, session, session_len, start,
                 start_len, ADV_SESSION );
@@ -1046,7 +1051,8 @@ RvHost::send_session_start( const char *user,  size_t user_len,
 void
 RvHost::send_host_stop( EvRvService *svc ) noexcept
 {
-  static const char   stop[]   = "_RV.INFO.SYSTEM.HOST.STOP.";
+                              /*_RV.INFO.SYSTEM.HOST.STOP.*/
+  static const char   stop[]   = _RV_INFO_HOST_STOP ".";
   static const size_t stop_len = sizeof( stop ) - 1;
   if ( this->host_started ) {
     RvFwdAdv fwd( *this, svc, stop, stop_len, ADV_HOST_STOP );
@@ -1066,7 +1072,8 @@ RvHost::send_session_stop( EvRvService &svc ) noexcept
 void
 RvHost::send_unreachable_tport( EvRvService &svc ) noexcept
 {
-  static const char   unre[]   = "_RV.INFO.SYSTEM.UNREACHABLE.TRANSPORT.";
+                              /*_RV.INFO.SYSTEM.UNREACHABLE.TRANSPORT.*/
+  static const char   unre[]   = _RV_INFO_UNREACHABLE_TPORT ".";
   static const size_t unre_len = sizeof( unre ) - 1;
   RvFwdAdv fwd( *this, svc.userid, svc.userid_len, svc.session,
                 svc.session_len, unre, unre_len, ADV_UNREACHABLE, 0,
@@ -1090,7 +1097,8 @@ void
 RvHost::send_session_stop( const char *user,  size_t user_len,
                            const char *session,  size_t session_len ) noexcept
 {
-  static const char   stop[]   = "_RV.INFO.SYSTEM.SESSION.STOP.";
+                              /*_RV.INFO.SYSTEM.SESSION.STOP.*/
+  static const char   stop[]   = _RV_INFO_SESSION_STOP ".";
   static const size_t stop_len = sizeof( stop ) - 1;
   RvFwdAdv fwd( *this, user, user_len, session, session_len, stop,
                 stop_len, ADV_SESSION );
@@ -1112,7 +1120,8 @@ RvHost::send_listen_start( const char *session,  size_t session_len,
                            uint32_t refcnt ) noexcept
 {
   if ( ! is_restricted_subject( sub, sublen ) ) {
-    static const char   start[]   = "_RV.INFO.SYSTEM.LISTEN.START.";
+                                 /*_RV.INFO.SYSTEM.LISTEN.START.*/
+    static const char   start[]   = _RV_INFO_LISTEN_START ".";
     static const size_t start_len = sizeof( start ) - 1;
     RvFwdAdv fwd( *this, NULL, 0, session, session_len, start,
                   start_len, ADV_LISTEN, refcnt, sub, sublen, rep, replen );
@@ -1133,7 +1142,8 @@ RvHost::send_listen_stop( const char *session,  size_t session_len,
                            uint32_t refcnt ) noexcept
 {
   if ( ! is_restricted_subject( sub, sublen ) ) {
-    static const char   stop[]   = "_RV.INFO.SYSTEM.LISTEN.STOP.";
+                                /*_RV.INFO.SYSTEM.LISTEN.STOP.*/
+    static const char   stop[]   = _RV_INFO_LISTEN_STOP ".";
     static const size_t stop_len = sizeof( stop ) - 1;
     RvFwdAdv fwd( *this, NULL, 0, session, session_len, stop,
                   stop_len, ADV_LISTEN, refcnt, sub, sublen, NULL, 0 );
@@ -1461,8 +1471,14 @@ RvDaemonRpc::process_close( void ) noexcept
 static bool
 match_string( const char *s,  size_t len,  const MDReference &mref )
 {
-  return len == mref.fsize && mref.ftype == MD_STRING &&
-         ::memcmp( s, mref.fptr, len ) == 0;
+  if ( mref.ftype != MD_STRING )
+    return false;
+  size_t len2 = mref.fsize;
+  if ( s[ len - 1 ] == '\0' )
+    len--;
+  if ( len2 > 0 && mref.fptr[ len2 - 1 ] == '\0' )
+    len2--;
+  return len == len2 && ::memcmp( s, mref.fptr, len ) == 0;
 }
 
 void
@@ -1522,11 +1538,13 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
   RouteLoc      loc;
 
   ka.skipme = true;
+  if ( session_len > 0 && session[ session_len - 1 ] == '\0' )
+    session_len--;
   for ( EvSocket *p = iter.first(); p != NULL; p = iter.next() ) {
     char sess[ MAX_SESSION_LEN ];
     size_t n;
     if ( (n = p->get_session( this->svc, sess )) > 0 ) {
-      if ( n + 1 == session_len && ::memcmp( sess, session, n ) == 0 ) {
+      if ( n == session_len && ::memcmp( sess, session, n ) == 0 ) {
         size_t i = p->get_subscriptions( this->svc, subs ),
                j = p->get_patterns( this->svc, RV_PATTERN_FMT, pats );
         if ( i + j != 0 ) {

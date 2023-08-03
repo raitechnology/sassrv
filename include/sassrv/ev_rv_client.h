@@ -117,7 +117,13 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
     /* a new subscription */
   void subscribe( const char *sub,  size_t sublen,
                   const char *rep = NULL,  size_t replen = 0 ) noexcept;
+  void subscribe( const char *sub ) {
+    this->subscribe( sub, ::strlen( sub ) );
+  }
   void unsubscribe( const char *sub,  size_t sublen ) noexcept;
+  void unsubscribe( const char *sub ) {
+    this->unsubscribe( sub, ::strlen( sub ) );
+  }
   virtual void on_sub( kv::NotifySub &sub ) noexcept;
   /* an unsubscribed sub */
   virtual void on_unsub( kv::NotifySub &sub ) noexcept;

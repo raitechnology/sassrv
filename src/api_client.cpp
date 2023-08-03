@@ -601,7 +601,7 @@ RvDataCallback::on_msg( const char *subject,  size_t subject_len,
     else if ( which == DICT_INBOX_ID ) {
       out.ts().printf( "Received dictionary message (len=%u)\n",
                        (uint32_t) pub_len );
-      m = MDMsg::unpack( (void *) msg, 0, msg_len, 0, this->dict, &mem );
+      m = MDMsg::unpack( (void *) msg, 0, msg_len, 0, this->dict, mem );
       this->on_dict( m );
       this->start_subscriptions();
       return;
@@ -627,7 +627,7 @@ RvDataCallback::on_msg( const char *subject,  size_t subject_len,
       return;
     }
   }
-  m = MDMsg::unpack( (void *) msg, 0, msg_len, 0, this->dict, &mem );
+  m = MDMsg::unpack( (void *) msg, 0, msg_len, 0, this->dict, mem );
   MDFieldIter * iter = NULL;
   double delta = 0, next_delta = 0, duration = 0;
   uint64_t  sequence = 0, last_sequence = 0;

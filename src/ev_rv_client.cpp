@@ -468,19 +468,15 @@ EvRvClient::publish( EvPublish &pub ) noexcept
   }
 
   RvMsgWriter rvmsg( b, buf_len );
-  int         status;
-
-  status = rvmsg.append_subject( SARG( "sub" ), pub.subject,
-                                 pub.subject_len );
   /* some subjects may not encode */
-  if ( status == 0 )
-    status = rvmsg.append_string( SARG( "mtype" ), SARG( "D" ) );
-  if ( status == 0 && pub.reply_len > 0 ) {
-    status = rvmsg.append_string( SARG( "return" ), (const char *) pub.reply,
-                                  pub.reply_len + 1 );
+  rvmsg.append_subject( SARG( "sub" ), pub.subject, pub.subject_len )
+       .append_string( SARG( "mtype" ), SARG( "D" ) );
+  if ( rvmsg.err == 0 && pub.reply_len > 0 ) {
+    rvmsg.append_string( SARG( "return" ), (const char *) pub.reply,
+                         pub.reply_len + 1 );
     buf[ rvmsg.off - 1 ] = '\0';
   }
-  if ( status == 0 ) {
+  if ( rvmsg.err == 0 ) {
     static const char data_hdr[] = "\005data";
     RvMsgWriter  submsg( NULL, 0 );
     uint32_t     msg_enc = pub.msg_enc;
@@ -637,8 +633,12 @@ EvRvClient::subscribe( const char *sub,  size_t sublen,
   }
   RvMsgWriter msg( b, buflen );
   msg.append_string( SARG( "mtype" ), SARG( "L" ) );
+  if ( sublen > 0 && sub[ sublen - 1 ] == '\0' )
+    sublen--;
   msg.append_subject( SARG( "sub" ), sub, sublen );
   if ( replen > 0 ) {
+    if ( rep[ replen - 1 ] == '\0' )
+      replen--;
     msg.append_string( SARG( "return" ), rep, replen + 1 );
     b[ msg.off - 1 ] = '\0';
   }
@@ -662,6 +662,8 @@ EvRvClient::unsubscribe( const char *sub,  size_t sublen ) noexcept
   }
   RvMsgWriter msg( b, buflen );
   msg.append_string( SARG( "mtype" ), SARG( "C" ) );
+  if ( sublen > 0 && sub[ sublen - 1 ] == '\0' )
+    sublen--;
   msg.append_subject( SARG( "sub" ), sub, sublen );
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )

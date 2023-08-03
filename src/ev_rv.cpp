@@ -572,12 +572,12 @@ EvRvService::respond_info( void ) noexcept
     /* { sub: _RV.INFO.SYSTEM.RVD.CONNECTED, mtype: D,
      *   data: { ADV_CLASS: INFO, ADV_SOURCE: SYSTEM, ADV_NAME: RVD.CONNECTED } } */
     this->sent_rvdconn = true;
-    rvmsg.append_subject( SARG( "sub" ), "_RV.INFO.SYSTEM.RVD.CONNECTED" );
+    rvmsg.append_subject( SARG( "sub" ), _RV_INFO_SYSTEM ".RVD.CONNECTED" );
     rvmsg.append_string( SARG( "mtype" ), SARG( "D" ) );
     rvmsg.append_msg( SARG( "data" ), submsg );
-    submsg.append_string( SARG( "ADV_CLASS" ), SARG( "INFO" ) );
-    submsg.append_string( SARG( "ADV_SOURCE" ), SARG( "SYSTEM" ) );
-    submsg.append_string( SARG( "ADV_NAME" ), SARG( "RVD.CONNECTED" ) );
+    submsg.append_string( SARG( _ADV_CLASS ), SARG( _INFO ) );
+    submsg.append_string( SARG( _ADV_SOURCE ), SARG( _SYSTEM ) );
+    submsg.append_string( SARG( _ADV_NAME ), SARG( "RVD.CONNECTED" ) );
     size = rvmsg.update_hdr( submsg );
   }
   /* send the result */
@@ -1090,11 +1090,9 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
   }
 
   RvMsgWriter rvmsg( b, buf_len );
-  int         status;
-
-  status = rvmsg.append_subject( SARG( "sub" ), sub, sublen );
+  rvmsg.append_subject( SARG( "sub" ), sub, sublen );
   /* some subjects may not encode */
-  if ( status == 0 ) {
+  if ( rvmsg.err == 0 ) {
     const char * mtype = "D"; /* data */
     if ( sublen > 16 && sub[ 0 ] == '_' ) {
       if ( ::memcmp( "_RV.INFO.SYSTEM.", sub, 16 ) == 0 ) {
@@ -1108,13 +1106,13 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       else if ( ::memcmp( "_RV.ERROR.SYSTEM.", sub, 17 ) == 0 )
         mtype = "A"; /* advisory */
     }
-    status = rvmsg.append_string( SARG( "mtype" ), mtype, 2 );
+    rvmsg.append_string( SARG( "mtype" ), mtype, 2 );
   }
-  if ( status == 0 && replen > 0 ) {
-    status = rvmsg.append_string( SARG( "return" ), reply, replen + 1 );
+  if ( rvmsg.err == 0 && replen > 0 ) {
+    rvmsg.append_string( SARG( "return" ), reply, replen + 1 );
     b[ rvmsg.off - 1 ] = '\0';
   }
-  if ( status == 0 ) {
+  if ( rvmsg.err == 0 ) {
     RvMsgWriter submsg( NULL, 0 );
     uint32_t msg_enc = pub.msg_enc,
              suf_len = pub.suf_len;

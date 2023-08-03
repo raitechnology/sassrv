@@ -219,7 +219,7 @@ gen_files   :=
 ev_rv_defines  := -DSASSRV_VER=$(ver_build)
 $(objd)/ev_rv.o : .copr/Makefile
 $(objd)/ev_rv.fpic.o : .copr/Makefile
-libsassrv_files := ev_rv rv_host ev_rv_client
+libsassrv_files := ev_rv rv_host ev_rv_client submgr
 libsassrv_cfile := $(addprefix src/, $(addsuffix .cpp, $(libsassrv_files)))
 libsassrv_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libsassrv_files)))
 libsassrv_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libsassrv_files)))
@@ -294,6 +294,18 @@ $(bind)/api_client$(exe): $(api_client_objs) $(api_client_libs) $(lnk_dep)
 
 #all_exes    += $(bind)/api_client$(exe)
 #all_depends += $(api_client_deps)
+
+subtop_files := subtop
+subtop_cfile := $(addprefix src/, $(addsuffix .cpp, $(subtop_files)))
+subtop_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(subtop_files)))
+subtop_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(subtop_files)))
+subtop_libs  := $(sassrv_lib)
+subtop_lnk   := $(sassrv_lib) $(lnk_lib)
+
+$(bind)/subtop$(exe): $(subtop_objs) $(subtop_libs) $(lnk_dep)
+
+all_exes    += $(bind)/subtop$(exe)
+all_depends += $(subtop_deps)
 
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
