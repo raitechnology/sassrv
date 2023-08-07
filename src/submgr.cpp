@@ -25,7 +25,8 @@ static const char host_status[]   = _RV_INFO_HOST_STATUS ".>",
                   session_start[] = _RV_INFO_SESSION_START ".>",
                   session_stop[]  = _RV_INFO_SESSION_STOP ".>",
                   listen_start[]  = _RV_INFO_LISTEN_START ".>",
-                  listen_stop[]   = _RV_INFO_LISTEN_STOP ".>";
+                  listen_stop[]   = _RV_INFO_LISTEN_STOP ".>",
+                  snap[]          = "_SNAP.>";
 enum SubKind {
   IS_HOST_STATUS   = 0,
   IS_HOST_START    = 1,
@@ -34,7 +35,8 @@ enum SubKind {
   IS_SESSION_STOP  = 4,
   IS_LISTEN_START  = 5,
   IS_LISTEN_STOP   = 6,
-  MAX_SUB_KIND     = 7
+  IS_SNAP          = 7,
+  MAX_SUB_KIND     = 8
 };
 
 struct SubMatch {
@@ -50,7 +52,8 @@ static const SubMatch rv_info_sub[ MAX_SUB_KIND ] = {
 { session_start, sizeof( session_start ) - 1, IS_SESSION_START },
 { session_stop , sizeof( session_stop ) - 1 , IS_SESSION_STOP },
 { listen_start , sizeof( listen_start ) - 1 , IS_LISTEN_START },
-{ listen_stop  , sizeof( listen_stop ) - 1  , IS_LISTEN_STOP }
+{ listen_stop  , sizeof( listen_stop ) - 1  , IS_LISTEN_STOP },
+{ snap         , sizeof( snap ) - 1         , IS_SNAP }
 };
 
 static const SubMatch *
@@ -119,7 +122,7 @@ SubscriptionDB::SubscriptionDB( EvRvClient &c,
               : client( c ), cb( sl ), host_ht( 0 ), sess_ht( 0 ),
                 cur_mono( 0 ), next_session_id( 0 ), next_subject_id( 0 ),
                 soft_host_query( 0 ), first_free_host( 0 ), next_gc( 0 ),
-                is_subscribed( false ), mout( 0 )
+                is_subscribed( false ), is_all_subscribed( false ), mout( 0 )
 {
   this->host_ht = kv::UIntHashTab::resize( NULL );
   this->sess_ht = kv::UIntHashTab::resize( NULL );
@@ -127,6 +130,7 @@ SubscriptionDB::SubscriptionDB( EvRvClient &c,
 
 void SubscriptionListener::on_listen_start( StartListener & ) noexcept {}
 void SubscriptionListener::on_listen_stop ( StopListener  & ) noexcept {}
+void SubscriptionListener::on_snapshot    ( SnapListener  & ) noexcept {}
 
 void
 SubscriptionDB::add_wildcard( const char *wildcard ) noexcept
@@ -189,16 +193,20 @@ SubscriptionDB::is_matched( const char *sub,  size_t sub_len ) noexcept
 }
 
 void
-SubscriptionDB::start_subscriptions( void ) noexcept
+SubscriptionDB::start_subscriptions( bool all ) noexcept
 {
   if ( this->is_subscribed )
     return;
   this->is_subscribed = true;
+  this->is_all_subscribed = all;
   this->cur_mono = this->client.poll.mono_ns / NS;
   this->next_gc  = this->cur_mono + 131;
   this->do_subscriptions( true );
   Host &host = this->host_ref( ntohl( this->client.ipaddr ), true );
   host.state = RV_HOST_QUERY;
+  Session &session = this->session_start( host.host_id, this->client.session,
+                                          this->client.session_len );
+  session.state = RV_SESSION_SELF;
 }
 
 void
@@ -216,21 +224,11 @@ SubscriptionDB::do_subscriptions( bool is_subscribe ) noexcept
   const char * un = ( is_subscribe ? "" : "un" );
   for ( int i = 0; i < MAX_SUB_KIND; i++ ) {
     const SubMatch & match = rv_info_sub[ i ];
-    if ( this->filters.count > 0 &&
-         ( i == IS_LISTEN_START || i == IS_LISTEN_STOP ) ) {
-      for ( size_t j = 0; j < this->filters.count; j++ ) {
-        Filter & f = this->filters.ptr[ j ];
-        size_t len = f.wild_len + match.len;
-        CatMalloc sub( len );
-        sub.b( match.sub, match.len - 1 ) /* strip '>' */
-           .b( f.wild, f.wild_len ).end();
-        if ( this->mout != NULL )
-          this->mout->printf( "%ssubscribe (%s)\n", un, sub.start );
-        if ( is_subscribe )
-          this->client.subscribe( sub.start, sub.len() );
-        else
-          this->client.unsubscribe( sub.start, sub.len() );
-      }
+
+    if ( ! this->is_all_subscribed &&
+         ( i == IS_LISTEN_START || i == IS_LISTEN_STOP || i == IS_SNAP ) ) {
+      for ( size_t j = 0; j < this->filters.count; j++ )
+        this->do_wild_subscription( this->filters.ptr[ j ], is_subscribe, i );
     }
     else {
       if ( this->mout != NULL )
@@ -241,6 +239,27 @@ SubscriptionDB::do_subscriptions( bool is_subscribe ) noexcept
         this->client.unsubscribe( match.sub, match.len );
     }
   }
+}
+
+void
+SubscriptionDB::do_wild_subscription( Filter &f,  bool is_subscribe,
+                                      int k ) noexcept
+{
+  const char * un = ( is_subscribe ? "" : "un" );
+  const SubMatch & match = rv_info_sub[ k ];
+  size_t           len   = f.wild_len + match.len;
+  CatMalloc        sub( len );
+
+  sub.b( match.sub, match.len - 1 ) /* strip '>' */
+     .b( f.wild, f.wild_len ).end();
+
+  if ( this->mout != NULL )
+    this->mout->printf( "%ssubscribe (%s)\n", un, sub.start );
+
+  if ( is_subscribe )
+    this->client.subscribe( sub.start, sub.len() );
+  else
+    this->client.unsubscribe( sub.start, sub.len() );
 }
 
 Host &
@@ -366,7 +385,7 @@ SubscriptionDB::unsub_session( Session &sess ) noexcept
   sess.stop( this->cur_mono );
 }
 
-void
+Session &
 SubscriptionDB::session_start( uint32_t host_id,  const char *session_name,
                                size_t session_len ) noexcept
 {
@@ -394,6 +413,7 @@ SubscriptionDB::session_start( uint32_t host_id,  const char *session_name,
                           host_id, entry->len, entry->value );
   }
   this->add_session( host, *entry );
+  return *entry;
 }
 
 void
@@ -455,20 +475,17 @@ SubscriptionDB::rem_session( Host &host,  Session &sess ) noexcept
 }
 
 Subscription &
-SubscriptionDB::listen_start( const char *session_name,  size_t session_len,
-                              const char *sub,  size_t sub_len,
-                              bool &is_added,  Session *&session ) noexcept
+SubscriptionDB::listen_start( Session &session,  const char *sub,
+                              size_t sub_len,  bool &is_added ) noexcept
 {
   if ( this->mout != NULL )
     this->mout->printf( "> listen start %.*s %.*s\n",
-                        (int) session_len, session_name, (int) sub_len, sub );
-  Session & entry = this->session_ref( session_name, session_len );
-  session = &entry;
-  return this->listen_ref( entry, sub, sub_len, is_added );
+                        session.len, session.value, (int) sub_len, sub );
+  return this->listen_ref( session, sub, sub_len, is_added );
 }
 
 Subscription &
-SubscriptionDB::listen_ref( Session & entry,  const char *sub,
+SubscriptionDB::listen_ref( Session & session,  const char *sub,
                             size_t sub_len,  bool &is_added ) noexcept
 {
   if ( sub_len > 0 && sub[ sub_len - 1 ] == '\0' )
@@ -482,31 +499,28 @@ SubscriptionDB::listen_ref( Session & entry,  const char *sub,
     script->start( ++this->next_subject_id, this->cur_mono );
   else
     script->ref( this->cur_mono );
-  is_added = entry.add_subject( *script );
+  is_added = session.add_subject( *script );
   if ( is_added && script->refcnt == 1 )
     this->subscriptions.active++;
   return *script;
 }
 
 Subscription &
-SubscriptionDB::listen_stop( const char *session_name,  size_t session_len,
-                             const char *sub,  size_t sub_len,
-                             bool &is_orphan,  Session *&session ) noexcept
+SubscriptionDB::listen_stop( Session &session,  const char *sub,
+                             size_t sub_len,  bool &is_orphan ) noexcept
 {
   if ( this->mout != NULL )
     this->mout->printf( "> listen stop %.*s %.*s\n",
-                        (int) session_len, session_name, (int) sub_len, sub );
-  Session      & entry = this->session_ref( session_name, session_len );
+                        session.len, session.value, (int) sub_len, sub );
   RouteLoc       loc;
   uint32_t       subj_hash = kv_crc_c( sub, sub_len, 0 );
   Subscription * script;
 
-  session   = &entry;
   script    = this->sub_tab.find( subj_hash, sub, sub_len, loc );
   is_orphan = ( script == NULL );
 
   if ( script != NULL ) {
-    if ( entry.rem_subject( *script ) ) {
+    if ( session.rem_subject( *script ) ) {
       if ( script->refcnt == 0 ) {
         this->subscriptions.active--;
         this->subscriptions.removed++;
@@ -523,9 +537,26 @@ SubscriptionDB::listen_stop( const char *session_name,  size_t session_len,
   if ( is_orphan ) {
     if ( this->mout != NULL )
       this->mout->printf( "! listen stop without start %.*s %.*s\n",
-                        (int) session_len, session_name, (int) sub_len, sub );
-    if ( entry.state != RV_SESSION_SELF )
-      entry.state = RV_SESSION_QUERY;
+                        session.len, session.value, (int) sub_len, sub );
+    if ( session.state != RV_SESSION_SELF )
+      session.state = RV_SESSION_QUERY;
+  }
+  return *script;
+}
+
+Subscription &
+SubscriptionDB::snapshot( const char *sub,  size_t sub_len ) noexcept
+{
+  if ( this->mout != NULL )
+    this->mout->printf( "> snapshot %.*s\n", (int) sub_len, sub );
+  RouteLoc       loc;
+  uint32_t       subj_hash = kv_crc_c( sub, sub_len, 0 );
+  Subscription * script;
+
+  script = this->sub_tab.find( subj_hash, sub, sub_len, loc );
+  if ( script == NULL ) {
+    script = this->sub_tab.insert( subj_hash, sub, sub_len, loc );
+    script->start( ++this->next_subject_id, this->cur_mono );
   }
   return *script;
 }
@@ -885,46 +916,71 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
       return false;
   }
   this->cur_mono = this->client.poll.mono_ns / NS;
-
-  MDMsgMem mem;
-  RvMsg  * m;
-  m = RvMsg::unpack_rv( (void *) pub.msg, 0, pub.msg_len, 0, NULL, mem );
   if ( this->mout != NULL ) {
     char buf[ 32 ];
     time_t now = this->client.poll.mono_to_utc_secs( this->cur_mono );
     this->mout->printf( "-- %s\n## %.*s\n", hms( now, buf ),
                         (int) subject_len, subject );
-    m->print( this->mout );
+  }
+  MDMsgMem mem;
+  RvMsg  * m = NULL;
+  if ( pub.msg_len > 0 ) {
+    m = RvMsg::unpack_rv( (void *) pub.msg, 0, pub.msg_len, 0, NULL, mem );
+    if ( m != NULL ) {
+      if ( this->mout != NULL ) {
+        m->print( this->mout );
+        this->mout->flush();
+      }
+    }
+    else {
+      fprintf( stderr, "unpack_rv error %.*s\n", (int) subject_len, subject );
+      return true;
+    }
+  }
+  else if ( this->mout != NULL ) {
     this->mout->flush();
   }
-  if ( m == NULL ) {
-    fprintf( stderr, "unpack_rv error %.*s\n", (int) subject_len, subject );
-    return false;
-  }
-
+  /* if is not an inbox */
   if ( match != NULL ) {
+    /* these have host-id in the subject:
+     *   _RV.INFO.SYSTEM.HOST.START.<host-id>
+     *   _RV.INFO.SYSTEM.HOST.STATUS.<host-id>
+     *   _RV.INFO.SYSTEM.HOST.STOP.<host-id>
+     *   _RV.INFO.SYSTEM.SESSION.START.<host-id>.<session-name>
+     *   _RV.INFO.SYSTEM.SESSION.STOP.<host-id>.<session-name>
+     */
     uint32_t id = ( match->kind <= IS_SESSION_STOP ?
                     string_to_host_id( &subject[ match->len - 1 ] ) : 0 );
-    char   * x    = NULL,
-           * s    = NULL;
-    size_t   xlen = 0,
-             slen = 0;
-    uint32_t idl  = 0,
-             odl  = 0;
+    char   * x     = NULL,
+           * s     = NULL;
+    size_t   xlen  = 0,
+             slen  = 0;
+    uint32_t idl   = 0,
+             odl   = 0;
+    uint16_t flags = 0;
 
     switch ( match->kind ) {
       case IS_SESSION_START:
       case IS_SESSION_STOP :
       case IS_LISTEN_START :
       case IS_LISTEN_STOP  :
-      case IS_HOST_STATUS  : {
+      case IS_HOST_STATUS  :
+      case IS_SNAP         : {
+        if ( m == NULL )
+          break;
         MDFieldReader rd( *m );
-        if ( match->kind == IS_HOST_STATUS ) {
+        /* get inbound-data-loss and outbound-data-loss */
+        if ( match->kind == IS_SNAP ) {
+          if ( rd.find( "flags" ) ) 
+            rd.get_uint( flags );
+        }
+        else if ( match->kind == IS_HOST_STATUS ) {
           if ( rd.find( "idl" ) )
             rd.get_uint( idl );
           if ( rd.find( "odl" ) )
             rd.get_uint( odl );
         }
+        /* get id: session-name, sub: subject */
         else {
           if ( rd.find( "id" ) )
             rd.get_string( x, xlen );
@@ -959,28 +1015,43 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
       case IS_SESSION_START: this->session_start( id, x, xlen ); break;
       case IS_SESSION_STOP : this->session_stop( id, x, xlen ); break;
       case IS_LISTEN_START : {
+        Session & session  = this->session_ref( x, xlen );
+        if ( session.state == RV_SESSION_SELF )
+          break;
         bool           is_added = false;
-        Session      * session  = NULL;
-        Subscription & script   = this->listen_start( x, xlen, s, slen,
-                                                      is_added, session );
+        Subscription & script   = this->listen_start( session, s, slen,
+                                                      is_added );
         if ( this->cb != NULL ) {
-          StartListener op( *session, script, (const char *) pub.reply,
+          StartListener op( session, script, (const char *) pub.reply,
                             pub.reply_len, true );
           this->cb->on_listen_start( op );
         }
         break;
       }
-      case IS_LISTEN_STOP  : {
+      case IS_LISTEN_STOP: {
+        Session & session = this->session_ref( x, xlen );
+        if ( session.state == RV_SESSION_SELF )
+          break;
         bool           is_orphan = false;
-        Session      * session   = NULL;
-        Subscription & script    = this->listen_stop( x, xlen, s, slen,
-                                                      is_orphan, session );
+        Subscription & script    = this->listen_stop( session, s, slen,
+                                                      is_orphan );
         if ( this->cb != NULL ) {
-          StopListener op( *session, script, is_orphan, true );
+          StopListener op( session, script, is_orphan, true );
           this->cb->on_listen_stop( op );
         }
         break;
       }
+      /* _SNAP.<subject> = strip 6 char prefix */
+      case IS_SNAP:
+        if ( this->cb != NULL && subject_len > 6 ) {
+          Subscription & script =
+            this->snapshot( &subject[ 6 ], subject_len - 6 );
+          SnapListener op( script, (const char *) pub.reply, pub.reply_len,
+                           flags );
+          this->cb->on_snapshot( op );
+        }
+        break;
+
       default:
         break;
     }
@@ -1023,6 +1094,7 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
     else {
       Session * session = this->get_session( i );
       if ( session != NULL && session->state == RV_SESSION_QUERY ) {
+        this->mark_subscriptions( *session );
         for ( bool b = rd.first( nm ); b; b = rd.next( nm ) ) {
           char * sub    = NULL;
           size_t sub_len = 0;
@@ -1042,6 +1114,7 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
         session->state = RV_SESSION_RV5;
         if ( session->has_daemon() )
           session->state = RV_SESSION_RV7;
+        this->stop_marked_subscriptions( *session );
       }
     }
   }

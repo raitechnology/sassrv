@@ -1019,32 +1019,6 @@ EvRvService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
   return true;
 }
 
-static uint32_t
-append_field_hdr( uint8_t *buf,  const char *fname,  size_t fname_len,
-                  uint32_t msg_len,  uint32_t msg_enc )
-{
-  uint32_t msg_off = 0;
-  buf[ msg_off++ ] = (uint8_t) fname_len;
-  ::memcpy( &buf[ msg_off ], fname, fname_len );
-  msg_off += fname_len;
-  buf[ msg_off++ ] = ( msg_enc == MD_STRING ) ? 8 : 7/*RV_OPAQUE*/;
-  if ( msg_len < 120 )
-    buf[ msg_off++ ] = (uint8_t) msg_len;
-  else if ( msg_len + 2 < 30000 ) {
-    buf[ msg_off++ ] = 121;
-    buf[ msg_off++ ] = ( ( msg_len + 2 ) >> 8 ) & 0xff;
-    buf[ msg_off++ ] = ( msg_len + 2 ) & 0xff;
-  }
-  else {
-    buf[ msg_off++ ] = 122;
-    buf[ msg_off++ ] = ( ( msg_len + 4 ) >> 24 ) & 0xff;
-    buf[ msg_off++ ] = ( ( msg_len + 4 ) >> 16 ) & 0xff;
-    buf[ msg_off++ ] = ( ( msg_len + 4 ) >> 8 ) & 0xff;
-    buf[ msg_off++ ] = ( msg_len + 4 ) & 0xff;
-  }
-  return msg_off;
-}
-
 /* message from network, encapsulate the message into the client format:
  * { mtype: 'D', sub: <subject>, data: <msg-data> }
  */
@@ -1155,11 +1129,10 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       case TIB_SASS_TYPE_ID:
       case TIB_SASS_FORM_TYPE_ID:
       case MARKETFEED_TYPE_ID:
-      case RWF_FIELD_LIST_TYPE_ID: /* ??? */
       do_tibmsg:;
         if ( suf_len == 0 ) {
-          rvmsg.off += append_field_hdr( &buf[ rvmsg.off ], SARG( "data" ),
-                                         msg_len, msg_enc );
+          rvmsg.off += append_rv_field_hdr( &buf[ rvmsg.off ], SARG( "data" ),
+                                            msg_len, msg_enc );
           msg_off    = rvmsg.off;
           rvmsg.off += msg_len;
           rvmsg.update_hdr();
@@ -1167,13 +1140,25 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
         }
         rvmsg.append_msg( SARG( "data" ), submsg );
         msg_off     = rvmsg.off + submsg.off;
-        msg_off     = append_field_hdr( &buf[ msg_off ], SARG( "_data_" ),
-                                        msg_len, msg_enc );
+        msg_off     = append_rv_field_hdr( &buf[ msg_off ], SARG( "_data_" ),
+                                           msg_len, msg_enc );
         submsg.off += msg_off;
         msg_off     = rvmsg.off + submsg.off;
         submsg.off += msg_len;
         rvmsg.update_hdr( submsg, suf_len );
         msg_len    += suf_len;
+        break;
+
+      case RWF_MSG_TYPE_ID:
+        rvmsg.append_msg( SARG( "data" ), submsg );
+
+        msg_off     = rvmsg.off + submsg.off;
+        msg_off     = append_rv_field_hdr( &buf[ msg_off ], SARG( "_RWFMSG" ),
+                                           msg_len, msg_enc );
+        submsg.off += msg_off;
+        msg_off     = rvmsg.off + submsg.off;
+        submsg.off += msg_len;
+        rvmsg.update_hdr( submsg );
         break;
 
       case MD_MESSAGE:
@@ -1233,7 +1218,7 @@ EvRvService::convert_json( MDMsgMem &spc,  void *&msg,
   size_t max_len = ( ( msg_len | 15 ) + 1 ) * 16;
   RvMsgWriter rvmsg( spc.reuse_make( max_len ), max_len );
 
-  if ( rvmsg.convert_msg( *ctx.msg ) != 0 )
+  if ( rvmsg.convert_msg( *ctx.msg, false ) != 0 )
     return false;
   rvmsg.update_hdr();
   msg     = rvmsg.buf;

@@ -41,10 +41,11 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   /* dict timeout */
   virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
   /* message from network */
-  virtual bool on_msg( EvPublish &pub ) noexcept;
+  virtual bool on_rv_msg( EvPublish &pub ) noexcept;
   /* new listen start */
   virtual void on_listen_start( StartListener &add ) noexcept;
   virtual void on_listen_stop ( StopListener  &rem ) noexcept;
+  virtual void on_snapshot    ( SnapListener  &snp ) noexcept;
   const char * ts( uint32_t mono,  const char *str,  char *buf ) noexcept;
 };
 
@@ -64,7 +65,7 @@ RvDataCallback::on_connect( EvSocket &conn ) noexcept
 void
 RvDataCallback::start_subscriptions( void ) noexcept
 {
-  this->sub_db.start_subscriptions();
+  this->sub_db.start_subscriptions( this->sub_count == 0 );
   this->poll.timer.add_timer_seconds( *this, 3, 1, 0 );
 }
 
@@ -167,6 +168,14 @@ RvDataCallback::on_listen_stop( StopListener &rem ) noexcept
     rem.session.len, rem.session.value, rem.is_orphan ? " orphan" : "" );
 }
 
+void
+RvDataCallback::on_snapshot( SnapListener &snp ) noexcept
+{
+  printf( "snap %.*s reply %.*s refs %u flags %u\n",
+    snp.sub.len, snp.sub.value, snp.reply_len, snp.reply, snp.sub.refcnt,
+    snp.flags );
+}
+
 /* when client connection stops */
 void
 RvDataCallback::on_shutdown( EvSocket &conn,  const char *err,
@@ -181,7 +190,7 @@ RvDataCallback::on_shutdown( EvSocket &conn,  const char *err,
 }
 
 bool
-RvDataCallback::on_msg( EvPublish &pub ) noexcept
+RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
 {
   this->sub_db.process_pub( pub );
   return true;

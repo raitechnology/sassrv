@@ -48,7 +48,7 @@ EvRvClient::EvRvClient( EvPoll &p ) noexcept
   md_init_auto_unpack();
 }
 
-bool RvClientCB::on_msg( EvPublish & ) noexcept { return true; }
+bool RvClientCB::on_rv_msg( EvPublish & ) noexcept { return true; }
 
 bool
 EvRvClient::connect( EvRvClientParameters &p,
@@ -353,7 +353,7 @@ EvRvClient::recv_conn( void ) noexcept
   this->rv_state = DATA_RECV;
 
   /* if all subs are forwarded to RV */
-  if ( this->fwd_all_subs )
+  if ( this->fwd_all_subs && this->cb == NULL )
     this->sub_route.add_route_notify( *this );
   /* if all msgs are forwarded to RV */
   if ( this->fwd_all_msgs ) {
@@ -438,7 +438,7 @@ EvRvClient::fwd_pub( void ) noexcept
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
                  this->sub_route, *this, h, ftype );
   if ( this->cb != NULL )
-    return this->cb->on_msg( pub );
+    return this->cb->on_rv_msg( pub );
   return this->sub_route.forward_msg( pub );
 }
 
@@ -477,10 +477,9 @@ EvRvClient::publish( EvPublish &pub ) noexcept
     buf[ rvmsg.off - 1 ] = '\0';
   }
   if ( rvmsg.err == 0 ) {
-    static const char data_hdr[] = "\005data";
     RvMsgWriter  submsg( NULL, 0 );
     uint32_t     msg_enc = pub.msg_enc;
-    size_t       off,
+    size_t       msg_off,
                  msg_len = pub.msg_len;
     void       * msg     = (void *) pub.msg;
     /* depending on message type, encode the hdr to send to the client */
@@ -488,7 +487,7 @@ EvRvClient::publish( EvPublish &pub ) noexcept
       case RVMSG_TYPE_ID:
       do_rvmsg:;
         rvmsg.append_msg( SARG( "data" ), submsg );
-        off         = rvmsg.off + submsg.off;
+        msg_off     = rvmsg.off + submsg.off;
         submsg.off += msg_len - 8;
         msg         = &((uint8_t *) msg)[ 8 ];
         msg_len     = msg_len - 8;
@@ -516,28 +515,24 @@ EvRvClient::publish( EvPublish &pub ) noexcept
       case TIB_SASS_TYPE_ID:
       case TIB_SASS_FORM_TYPE_ID:
       case MARKETFEED_TYPE_ID:
-      case RWF_FIELD_LIST_TYPE_ID: /* ??? */
       do_tibmsg:;
-        ::memcpy( &buf[ rvmsg.off ], data_hdr, sizeof( data_hdr ) );
-        rvmsg.off += sizeof( data_hdr );
-        buf[ rvmsg.off++ ] = ( msg_enc == MD_STRING ) ? 8 : 7/*RV_OPAQUE*/;
-        if ( msg_len < 120 )
-          buf[ rvmsg.off++ ] = (uint8_t) msg_len;
-        else if ( msg_len + 2 < 30000 ) {
-          buf[ rvmsg.off++ ] = 121;
-          buf[ rvmsg.off++ ] = ( ( msg_len + 2 ) >> 8 ) & 0xff;
-          buf[ rvmsg.off++ ] = ( msg_len + 2 ) & 0xff;
-        }
-        else {
-          buf[ rvmsg.off++ ] = 122;
-          buf[ rvmsg.off++ ] = ( ( msg_len + 4 ) >> 24 ) & 0xff;
-          buf[ rvmsg.off++ ] = ( ( msg_len + 4 ) >> 16 ) & 0xff;
-          buf[ rvmsg.off++ ] = ( ( msg_len + 4 ) >> 8 ) & 0xff;
-          buf[ rvmsg.off++ ] = ( msg_len + 4 ) & 0xff;
-        }
-        off = rvmsg.off;
+        rvmsg.off += append_rv_field_hdr( &buf[ rvmsg.off ], SARG( "data" ),
+                                          msg_len, msg_enc );
+        msg_off    = rvmsg.off;
         rvmsg.off += msg_len;
         rvmsg.update_hdr();
+        break;
+
+      case RWF_MSG_TYPE_ID:
+        rvmsg.append_msg( SARG( "data" ), submsg );
+
+        msg_off     = rvmsg.off + submsg.off;
+        msg_off     = append_rv_field_hdr( &buf[ msg_off ], SARG( "_RWFMSG" ),
+                                           msg_len, msg_enc );
+        submsg.off += msg_off;
+        msg_off     = rvmsg.off + submsg.off;
+        submsg.off += msg_len;
+        rvmsg.update_hdr( submsg );
         break;
 
       case MD_MESSAGE:
@@ -546,22 +541,22 @@ EvRvClient::publish( EvPublish &pub ) noexcept
         /* FALLTHRU */
       default:
         if ( msg_len == 0 ) {
-          off = rvmsg.off;
+          msg_off = rvmsg.off;
           rvmsg.update_hdr();
         }
         else {
           if ( MDMsg::is_msg_type( msg, 0, msg_len, 0 ) != 0 )
             goto do_tibmsg;
-          off = 0;
+          msg_off = 0;
         }
         msg     = NULL;
         msg_len = 0;
         break;
     }
-    if ( off > 0 )
-      return this->queue_send( buf, off, msg, msg_len );
+    if ( msg_off > 0 )
+      return this->queue_send( buf, msg_off, msg, msg_len );
     fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %u\n",
-             msg_enc, (int) pub.subject_len, pub.subject, (uint32_t) off );
+             msg_enc, (int) pub.subject_len, pub.subject, (uint32_t) msg_off );
   }
   return true;
 }
@@ -610,7 +605,7 @@ EvRvClient::release( void ) noexcept
     uint32_t h = this->sub_route.prefix_seed( 0 );
     this->sub_route.del_pattern_route( h, this->fd, 0 );
   }
-  if ( this->fwd_all_subs )
+  if ( this->fwd_all_subs && this->cb == NULL )
     this->sub_route.remove_route_notify( *this );
   if ( this->notify != NULL )
     this->notify->on_shutdown( *this, NULL, 0 );

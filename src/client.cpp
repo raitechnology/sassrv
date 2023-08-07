@@ -28,6 +28,25 @@ static const uint64_t FIRST_TIMER_ID  = 1, /* first dict request */
                       SECOND_TIMER_ID = 2, /* second dict request */
                       RATE_TIMER_ID   = 3, /* rate timer */
                       STOP_TIMER_ID   = 4; /* stop timer */
+struct SubjHT {
+  UInt64HashTab * ht;
+  SubjHT() : ht( 0 ) {
+    this->ht = UInt64HashTab::resize( NULL );
+  }
+
+  bool find( const char *sub,  size_t sublen,  uint32_t &val ) {
+    uint64_t h = kv_hash_murmur64( sub, sublen, 0 ), val64;
+    size_t pos;
+    if ( ! this->ht->find( h, pos, val64 ) )
+      return false;
+    val = val64;
+    return true;
+  }
+  void upsert( const char *sub,  size_t sublen,  uint32_t val ) {
+    uint64_t h = kv_hash_murmur64( sub, sublen, 0 );
+    this->ht->upsert_rsz( this->ht, h, val );
+  }
+};
 
 /* rv client callback closure */
 struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
@@ -52,8 +71,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   uint32_t    * rand_schedule,
               * msg_recv;
   size_t      * msg_recv_bytes;
-  UIntHashTab * subj_ht,
-              * coll_ht;
+  SubjHT        subj_ht;
   size_t        rand_range;
   uint32_t      max_time_secs,
                 msg_type_cnt[ 32 ];
@@ -70,7 +88,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
       msg_bytes( 0 ), last_bytes( 0 ), no_dictionary( nodict ),
       is_subscribed( false ), have_dictionary( false ), dump_hex( hex ),
       show_rate( rate ), subj_buf( 0 ), rand_schedule( 0 ), msg_recv( 0 ),
-      msg_recv_bytes( 0 ), subj_ht( 0 ), coll_ht( 0 ), rand_range( rng ),
+      msg_recv_bytes( 0 ), rand_range( rng ),
       max_time_secs( secs ), use_random( rng > cnt ), use_zipf( zipf ),
       quiet( q ) {
     ::memset( this->msg_type_cnt, 0, sizeof( this->msg_type_cnt ) );
@@ -103,7 +121,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   /* dict timeout */
   virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
   /* message from network */
-  virtual bool on_msg( EvPublish &pub ) noexcept;
+  virtual bool on_rv_msg( EvPublish &pub ) noexcept;
 };
 
 /* called after daemon responds with CONNECTED message */
@@ -199,8 +217,6 @@ RvDataCallback::start_subscriptions( void ) noexcept
   if ( this->is_subscribed ) /* subscribing multiple times is allowed, */
     return;                  /* but must unsub multiple times as well */
 
-  this->subj_ht = UIntHashTab::resize( NULL );
-  this->coll_ht = UIntHashTab::resize( NULL );
   size_t n   = this->sub_count * this->num_subs;
   size_t sz  = sizeof( this->msg_recv[ 0 ] ) * n,
          sz2 = sizeof( this->msg_recv_bytes[ 0 ] ) * n;
@@ -223,33 +239,7 @@ RvDataCallback::start_subscriptions( void ) noexcept
               (int) subject_len, subject, (int) inbox_len, inbox );
       /* subscribe with inbox reply */
       this->client.subscribe( subject, subject_len, inbox, inbox_len );
-
-      uint32_t h = kv_crc_c( subject, subject_len, 0 ), val;
-      size_t   pos;
-      if ( this->subj_ht->find( h, pos, val ) ) {
-        const char * coll_sub;
-        size_t       coll_sublen;
-        this->subj_ht->remove( pos );
-
-        this->make_subject( val, coll_sub, coll_sublen );
-        h = kv_djb( coll_sub, coll_sublen );
-        if ( ! this->coll_ht->find( h, pos ) )
-          this->coll_ht->set_rsz( this->coll_ht, h, pos, val );
-        else {
-          printf( "HT collision \"%.*s\", no update tracking\n",
-                  (int) coll_sublen, coll_sub );
-        }
-        h = kv_djb( subject, subject_len );
-        if ( ! this->coll_ht->find( h, pos ) )
-          this->coll_ht->set_rsz( this->coll_ht, h, pos, n );
-        else {
-          printf( "HT collision \"%.*s\", no update tracking\n",
-                  (int) subject_len, subject );
-        }
-      }
-      else {
-        this->subj_ht->set_rsz( this->subj_ht, h, pos, n );
-      }
+      this->subj_ht.upsert( subject, subject_len, n );
     }
     if ( n >= this->num_subs * this->sub_count )
       break;
@@ -376,7 +366,7 @@ RvDataCallback::on_shutdown( EvSocket &conn,  const char *err,
 }
 
 bool
-RvDataCallback::on_msg( EvPublish &pub ) noexcept
+RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
 {
   const char * subject     = pub.subject;
   size_t       subject_len = pub.subject_len,
@@ -402,11 +392,8 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
   }
   if ( which == 0 || which >= SUB_INBOX_BASE ) {
     if ( which == 0 ) {
-      size_t pos;
       uint32_t val;
-      if ( this->subj_ht->find( pub.subj_hash, pos, val ) )
-        this->add_update( val, pub_len );
-      else if ( this->coll_ht->find( kv_djb( subject, subject_len ), pos, val ) )
+      if ( this->subj_ht.find( pub.subject, pub.subject_len, val ) )
         this->add_update( val, pub_len );
     }
     if ( this->show_rate ) {
@@ -415,7 +402,7 @@ RvDataCallback::on_msg( EvPublish &pub ) noexcept
       return true;
     }
   }
-  m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, mem );
+  m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, pub.msg_enc, this->dict, mem );
   MDFieldIter * iter = NULL;
   if ( m != NULL && m->get_field_iter( iter ) == 0 && iter->first() == 0 ) {
     MDName nm;

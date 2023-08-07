@@ -94,6 +94,26 @@ struct TimerCB {
     cb( c ), tm( 0 ), timer_id( tid ), event_id( 0 ) {}
 };
 
+struct SubjHT {
+  UInt64HashTab * ht;
+  SubjHT() : ht( 0 ) {
+    this->ht = UInt64HashTab::resize( NULL );
+  }
+
+  bool find( const char *sub,  size_t sublen,  uint32_t &val ) {
+    uint64_t h = kv_hash_murmur64( sub, sublen, 0 ), val64;
+    size_t pos;
+    if ( ! this->ht->find( h, pos, val64 ) )
+      return false;
+    val = val64;
+    return true;
+  }
+  void upsert( const char *sub,  size_t sublen,  uint32_t val ) {
+    uint64_t h = kv_hash_murmur64( sub, sublen, 0 );
+    this->ht->upsert_rsz( this->ht, h, val );
+  }
+};
+
 static const double histogram[] = {
   0.0001, 0.001, 0.01, 0.1, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0
 };
@@ -121,9 +141,8 @@ struct RvDataCallback {
   uint32_t    * rand_schedule,
               * msg_recv;
   size_t      * msg_recv_bytes;
-  UIntHashTab * subj_ht,
-              * coll_ht,
-              * ibx_ht;
+  UIntHashTab * ibx_ht;
+  SubjHT        subj_ht;
   size_t        rand_range;
   uint32_t      max_time_secs,
                 msg_type_cnt[ 32 ];
@@ -159,7 +178,7 @@ struct RvDataCallback {
       last_count( 0 ), last_time( 0 ), msg_bytes( 0 ), last_bytes( 0 ),
       no_dictionary( nodict ), is_subscribed( false ), have_dictionary( false ), dump_hex( hex ),
       show_rate( rate ), subj_buf( 0 ), rand_schedule( 0 ), msg_recv( 0 ),
-      msg_recv_bytes( 0 ), subj_ht( 0 ), coll_ht( 0 ), ibx_ht( 0 ),
+      msg_recv_bytes( 0 ), ibx_ht( 0 ),
       rand_range( rng ), max_time_secs( secs ), use_random( rng > cnt ),
       use_zipf( zipf ), quiet( q ), track_time( ts ),
       total_latency( 0 ), miss_latency( 0 ), trail_latency( 0 ),
@@ -403,8 +422,6 @@ RvDataCallback::start_subscriptions( void ) noexcept
     return;                  /* but must unsub multiple times as well */
 
   this->start_time = current_realtime_s();
-  this->subj_ht = UIntHashTab::resize( NULL );
-  this->coll_ht = UIntHashTab::resize( NULL );
   size_t n   = this->sub_count * this->num_subs;
   size_t sz  = sizeof( this->msg_recv[ 0 ] ) * n,
          sz2 = sizeof( this->msg_recv_bytes[ 0 ] ) * n;
@@ -426,33 +443,7 @@ RvDataCallback::start_subscriptions( void ) noexcept
                        subject, inbox );
       /* subscribe with inbox reply */
       MsgCB *cb = this->subscribe( subject, inbox );
-
-      uint32_t h = kv_crc_c( subject, subject_len, 0 ), val;
-      size_t   pos;
-      if ( this->subj_ht->find( h, pos, val ) ) {
-        const char * coll_sub;
-        size_t       coll_sublen;
-        this->subj_ht->remove( pos );
-
-        this->make_subject( val, coll_sub, coll_sublen );
-        h = kv_djb( coll_sub, coll_sublen );
-        if ( ! this->coll_ht->find( h, pos ) )
-          this->coll_ht->set_rsz( this->coll_ht, h, pos, val );
-        else {
-          out.ts().printf( "HT collision \"%.*s\", no update tracking\n",
-                           (int) coll_sublen, coll_sub );
-        }
-        h = kv_djb( subject, subject_len );
-        if ( ! this->coll_ht->find( h, pos ) )
-          this->coll_ht->set_rsz( this->coll_ht, h, pos, n );
-        else {
-          out.ts().printf( "HT collision \"%.*s\", no update tracking\n",
-                           (int) subject_len, subject );
-        }
-      }
-      else {
-        this->subj_ht->set_rsz( this->subj_ht, h, pos, n );
-      }
+      this->subj_ht.upsert( subject, subject_len, n );
       this->sub_cb[ n ] = cb;
     }
     if ( n >= this->num_subs * this->sub_count )
@@ -609,14 +600,7 @@ RvDataCallback::on_msg( const char *subject,  size_t subject_len,
   }
   if ( which == 0 || which >= SUB_INBOX_BASE ) {
     if ( which == 0 ) {
-      size_t pos;
-      if ( this->subj_ht->find( kv_crc_c( subject, subject_len, 0 ), pos,
-                                sub_idx ) ) {
-        this->add_update( sub_idx, pub_len );
-        have_sub = true;
-      }
-      else if ( this->coll_ht->find( kv_djb( subject, subject_len ), pos,
-                                     sub_idx ) ) {
+      if ( this->subj_ht.find( subject, subject_len, sub_idx ) ) {
         this->add_update( sub_idx, pub_len );
         have_sub = true;
       }
