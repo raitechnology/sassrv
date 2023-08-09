@@ -120,12 +120,24 @@ static inline char * host_id_to_string( uint32_t host_id,  char *str ) {
 SubscriptionDB::SubscriptionDB( EvRvClient &c,
                                 SubscriptionListener *sl ) noexcept
               : client( c ), cb( sl ), host_ht( 0 ), sess_ht( 0 ),
-                cur_mono( 0 ), next_session_id( 0 ), next_subject_id( 0 ),
+                cur_mono( 0 ), next_session_ctr( 0 ), next_subject_ctr( 0 ),
                 soft_host_query( 0 ), first_free_host( 0 ), next_gc( 0 ),
                 is_subscribed( false ), is_all_subscribed( false ), mout( 0 )
 {
   this->host_ht = kv::UIntHashTab::resize( NULL );
   this->sess_ht = kv::UIntHashTab::resize( NULL );
+}
+
+uint32_t
+SubscriptionDB::next_session_id( void ) noexcept
+{
+  return kv_ll_hash_uint( ++this->next_session_ctr );
+}
+
+uint32_t
+SubscriptionDB::next_subject_id( void ) noexcept
+{
+  return kv_ll_hash_uint( ++this->next_subject_ctr );
 }
 
 void SubscriptionListener::on_listen_start( StartListener & ) noexcept {}
@@ -143,9 +155,9 @@ SubscriptionDB::add_wildcard( const char *wildcard ) noexcept
   f.wild_len = len;
 }
 
-static bool
-match_rv_wildcard( const char *wild,  size_t wild_len,
-                   const char *sub,  size_t sub_len )
+bool
+SubscriptionDB::match_rv_wildcard( const char *wild,  size_t wild_len,
+                                   const char *sub,  size_t sub_len ) noexcept
 {
   const char * w   = wild,
              * end = &wild[ wild_len ];
@@ -175,6 +187,26 @@ match_rv_wildcard( const char *wild,  size_t wild_len,
       return false; /* no match */
     w++;
     k++;
+  }
+}
+
+const char *
+SubscriptionDB::is_rv_wildcard( const char *wild,  size_t wild_len ) noexcept
+{
+  const char * w   = wild,
+             * end = &wild[ wild_len ];
+
+  for ( ; ; w++ ) {
+    if ( w == end )
+      return NULL;
+    if ( *w == '>' &&
+         ( ( w == wild || *(w-1) == '.' ) && w+1 == end ) )
+      return w;
+    else if ( *w == '*' &&
+              ( ( w   == wild || *(w-1) == '.' ) && /* * || *. || .* || .*. */
+                ( w+1 == end  || *(w+1) == '.' ) ) ) {
+      return w;
+    }
   }
 }
 
@@ -405,7 +437,7 @@ SubscriptionDB::session_start( uint32_t host_id,  const char *session_name,
       this->rem_session( host, *entry ); /* no stop session */
     }
   }
-  entry->start( host_id, ++this->next_session_id, this->cur_mono, true );
+  entry->start( host_id, this->next_session_id(), this->cur_mono, true );
   if ( old_state != RV_SESSION_STOP ) {
     entry->state = RV_SESSION_QUERY;
     if ( this->mout != NULL )
@@ -448,7 +480,7 @@ SubscriptionDB::session_ref( const char *session_name,
   if ( loc.is_new || entry->state == RV_SESSION_STOP ) {
     uint32_t host_id = string_to_host_id( session_name );
     Host   & host    = this->host_ref( host_id, false );
-    entry->start( host_id, ++this->next_session_id, this->cur_mono, false );
+    entry->start( host_id, this->next_session_id(), this->cur_mono, false );
     this->add_session( host, *entry );
   }
   entry->ref_mono = this->cur_mono;
@@ -496,7 +528,7 @@ SubscriptionDB::listen_ref( Session & session,  const char *sub,
 
   script = this->sub_tab.upsert( subj_hash, sub, sub_len, loc );
   if ( loc.is_new )
-    script->start( ++this->next_subject_id, this->cur_mono );
+    script->start( this->next_subject_id(), this->cur_mono );
   else
     script->ref( this->cur_mono );
   is_added = session.add_subject( *script );
@@ -532,7 +564,7 @@ SubscriptionDB::listen_stop( Session &session,  const char *sub,
   }
   else {
     script = this->sub_tab.insert( subj_hash, sub, sub_len, loc );
-    script->start( ++this->next_subject_id, this->cur_mono );
+    script->start( this->next_subject_id(), this->cur_mono );
   }
   if ( is_orphan ) {
     if ( this->mout != NULL )
@@ -556,7 +588,7 @@ SubscriptionDB::snapshot( const char *sub,  size_t sub_len ) noexcept
   script = this->sub_tab.find( subj_hash, sub, sub_len, loc );
   if ( script == NULL ) {
     script = this->sub_tab.insert( subj_hash, sub, sub_len, loc );
-    script->start( ++this->next_subject_id, this->cur_mono );
+    script->start( this->next_subject_id(), this->cur_mono );
   }
   return *script;
 }

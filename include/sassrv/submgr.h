@@ -259,8 +259,8 @@ struct SubscriptionDB {
   kv::RouteVec<Subscription> sub_tab;     /* hash, subject -> Subscription */
   kv::ArrayCount<Filter, 4>  filters;     /* listen wildcards, eg: RSF.> */
   uint32_t                   cur_mono,    /* monotonic time in seconds */
-                             next_session_id, /* unique id for sessions */
-                             next_subject_id, /* unique id for subjscts */
+                             next_session_ctr, /* unique counter for sessions */
+                             next_subject_ctr, /* unique counter for subjscts */
                              soft_host_query, /* = host_tab.count, refresh all */
                              first_free_host; /* reuse stopped Host[] */
   GCCounters                 subscriptions, /* track how many active/removed */
@@ -273,6 +273,10 @@ struct SubscriptionDB {
 
   SubscriptionDB( EvRvClient &c,  SubscriptionListener *sl ) noexcept;
 
+  static bool match_rv_wildcard( const char *wild,  size_t wild_len,
+                                 const char *sub,  size_t sub_len ) noexcept;
+  static const char * is_rv_wildcard( const char *wild,
+                                      size_t wild_len ) noexcept;
   void add_wildcard( const char *wildcard ) noexcept;
   bool is_matched( const char *sub,  size_t sub_len ) noexcept;
   void start_subscriptions( bool all ) noexcept;
@@ -280,6 +284,8 @@ struct SubscriptionDB {
   void do_subscriptions( bool is_subscribe ) noexcept;
   void do_wild_subscription( Filter &f,  bool is_subscribe,
                              int k ) noexcept;
+  uint32_t next_session_id( void ) noexcept;
+  uint32_t next_subject_id( void ) noexcept;
 
   void process_events( void ) noexcept;
   bool process_pub( kv::EvPublish &pub ) noexcept;
