@@ -477,9 +477,10 @@ EvRvService::respond_info( void ) noexcept
   MDReference   mref;
   char          net[ MAX_RV_NETWORK_LEN ],
                 svc[ MAX_RV_SERVICE_LEN ];
-  uint8_t       buf[ 8 * 1024 ];
-  RvMsgWriter   rvmsg( buf, sizeof( buf ) ),
-                submsg( NULL, 0 );
+  uint8_t       buf[ 2 * 1024 ];
+  MDMsgMem      mem;
+  RvMsgWriter   rvmsg( mem, buf, sizeof( buf ) ),
+                submsg( mem, NULL, 0 );
   size_t        size;
   uint32_t      net_len = 0, svc_len = 0;
   int           status = HOST_OK;
@@ -581,7 +582,7 @@ EvRvService::respond_info( void ) noexcept
     size = rvmsg.update_hdr( submsg );
   }
   /* send the result */
-  char *m = this->append( buf, size );
+  char *m = this->append( rvmsg.buf, size );
   if ( is_rv_debug )
     this->print_out( m, size );
 
@@ -1031,9 +1032,6 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
                replen = pub.reply_len,
                prelen = this->msg_in.prefix_len;
 
-  uint8_t buf[ 2 * 1024 ], * b = buf;
-  size_t  buf_len = sizeof( buf );
-
   if ( sublen < prelen ) {
     fprintf( stderr, "sub %.*s is less than prefix (%u)\n", (int) sublen, sub,
              (int) prelen );
@@ -1056,14 +1054,13 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
     }
   }
 
-  if ( sublen + pub.reply_len > 2 * 1024 - 512 ) {
+  size_t buf_len = 1024;
+  if ( sublen + pub.reply_len > 1024 - 512 )
     buf_len = sublen + pub.reply_len + 512;
-    b = (uint8_t *) this->alloc_temp( buf_len );
-    if ( b == NULL )
-      return true;
-  }
 
-  RvMsgWriter rvmsg( b, buf_len );
+  MDMsgMem    mem;
+  RvMsgWriter rvmsg( mem, mem.make( buf_len ), buf_len );
+
   rvmsg.append_subject( SARG( "sub" ), sub, sublen );
   /* some subjects may not encode */
   if ( rvmsg.err == 0 ) {
@@ -1084,13 +1081,13 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
   }
   if ( rvmsg.err == 0 && replen > 0 ) {
     rvmsg.append_string( SARG( "return" ), reply, replen + 1 );
-    b[ rvmsg.off - 1 ] = '\0';
+    rvmsg.buf[ rvmsg.off - 1 ] = '\0';
   }
   if ( rvmsg.err == 0 ) {
-    RvMsgWriter submsg( NULL, 0 );
+    RvMsgWriter submsg( rvmsg.mem, NULL, 0 );
     uint32_t msg_enc = pub.msg_enc,
              suf_len = pub.suf_len;
-    size_t   msg_off,
+    size_t   msg_off = 0,
              msg_len = pub.msg_len - suf_len;
     void   * msg     = (void *) pub.msg;
     /* depending on message type, encode the hdr to send to the client */
@@ -1131,34 +1128,40 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       case MARKETFEED_TYPE_ID:
       do_tibmsg:;
         if ( suf_len == 0 ) {
-          rvmsg.off += append_rv_field_hdr( &buf[ rvmsg.off ], SARG( "data" ),
-                                            msg_len, msg_enc );
-          msg_off    = rvmsg.off;
-          rvmsg.off += msg_len;
-          rvmsg.update_hdr();
+          if ( rvmsg.has_space( 20 ) ) {
+            rvmsg.off += append_rv_field_hdr( &rvmsg.buf[ rvmsg.off ],
+                                            SARG( "data" ), msg_len, msg_enc );
+            msg_off    = rvmsg.off;
+            rvmsg.off += msg_len;
+            rvmsg.update_hdr();
+          }
           break;
         }
         rvmsg.append_msg( SARG( "data" ), submsg );
-        msg_off     = rvmsg.off + submsg.off;
-        msg_off     = append_rv_field_hdr( &buf[ msg_off ], SARG( "_data_" ),
-                                           msg_len, msg_enc );
-        submsg.off += msg_off;
-        msg_off     = rvmsg.off + submsg.off;
-        submsg.off += msg_len;
-        rvmsg.update_hdr( submsg, suf_len );
-        msg_len    += suf_len;
+        msg_off = rvmsg.off + submsg.off;
+        if ( rvmsg.has_space( 20 ) ) {
+          msg_off     = append_rv_field_hdr( &rvmsg.buf[ msg_off ],
+                                           SARG( "_data_" ), msg_len, msg_enc );
+          submsg.off += msg_off;
+          msg_off     = rvmsg.off + submsg.off;
+          submsg.off += msg_len;
+          rvmsg.update_hdr( submsg, suf_len );
+          msg_len    += suf_len;
+        }
         break;
 
       case RWF_MSG_TYPE_ID:
         rvmsg.append_msg( SARG( "data" ), submsg );
-
-        msg_off     = rvmsg.off + submsg.off;
-        msg_off     = append_rv_field_hdr( &buf[ msg_off ], SARG( "_RWFMSG" ),
-                                           msg_len, msg_enc );
-        submsg.off += msg_off;
-        msg_off     = rvmsg.off + submsg.off;
-        submsg.off += msg_len;
-        rvmsg.update_hdr( submsg );
+        msg_off = rvmsg.off + submsg.off;
+        if ( rvmsg.has_space( 20 ) ) {
+          msg_off     = append_rv_field_hdr( &rvmsg.buf[ msg_off ],
+                                             SARG( "_RWFMSG" ), msg_len,
+                                             msg_enc );
+          submsg.off += msg_off;
+          msg_off     = rvmsg.off + submsg.off;
+          submsg.off += msg_len;
+          rvmsg.update_hdr( submsg );
+        }
         break;
 
       case MD_MESSAGE:
@@ -1179,15 +1182,15 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
         msg_len = 0;
         break;
     }
-    if ( msg_off > 0 ) {
+    if ( rvmsg.err == 0 && msg_off > 0 ) {
       uint32_t idx = 0;
       if ( msg_len > this->recv_highwater ) {
         idx = this->poll.zero_copy_ref( pub.src_route.fd, msg, msg_len );
         if ( idx != 0 )
-          this->append_ref_iov( buf, msg_off, msg, msg_len, idx );
+          this->append_ref_iov( rvmsg.buf, msg_off, msg, msg_len, idx );
       }
       if ( idx == 0 ) {
-        char *m = this->append2( buf, msg_off, msg, msg_len );
+        char *m = this->append2( rvmsg.buf, msg_off, msg, msg_len );
         if ( is_rv_debug )
           this->print_out( m, msg_off + msg_len );
       }
@@ -1198,8 +1201,14 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
       return this->idle_push_write();
     }
     else {
-      fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %u\n",
-               msg_enc, (int) sublen, sub, (uint32_t) off );
+      if ( rvmsg.err != 0 ) {
+        fprintf( stderr, "rv msg error %d subject: %.*s %u\n",
+                 rvmsg.err, (int) sublen, sub, (uint32_t) off );
+      }
+      else {
+        fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %u\n",
+                 msg_enc, (int) sublen, sub, (uint32_t) msg_off );
+      }
     }
   }
   return true;
@@ -1216,7 +1225,7 @@ EvRvService::convert_json( MDMsgMem &spc,  void *&msg,
     return false;
   spc.reuse();
   size_t max_len = ( ( msg_len | 15 ) + 1 ) * 16;
-  RvMsgWriter rvmsg( spc.reuse_make( max_len ), max_len );
+  RvMsgWriter rvmsg( spc, spc.reuse_make( max_len ), max_len );
 
   if ( rvmsg.convert_msg( *ctx.msg, false ) != 0 )
     return false;

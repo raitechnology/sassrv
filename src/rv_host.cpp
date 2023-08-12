@@ -263,10 +263,10 @@ RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
 {
   const char * subj   = this->dataloss_outbound_sub;
   const size_t sublen = this->dataloss_outbound_len;
-  uint8_t     buf[ 8192 ];
+  MDMsgMem    mem;
   char        str[ 256 ];
   size_t      size;
-  RvMsgWriter msg( buf, sizeof( buf ) );
+  RvMsgWriter msg( mem, mem.make( 1024 ), 1024 );
 
   msg.append_string( SARG( _ADV_CLASS ), SARG( _ERROR ) );
   msg.append_string( SARG( _ADV_SOURCE ), SARG( _SYSTEM ) );
@@ -287,7 +287,7 @@ RvHost::data_loss_error( uint64_t bytes_lost,  const char *err,
     msg.append_ipdata( SARG( "scid" ), this->ipport );
   size = msg.update_hdr();
 
-  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, *this,
+  EvPublish pub( subj, sublen, NULL, 0, msg.buf, size, this->sub_route, *this,
                  this->dataloss_outbound_hash, RVMSG_TYPE_ID );
   PeerMatchArgs ka( "rv", 2 );
   PeerMatchIter iter( *this, ka );
@@ -304,11 +304,11 @@ RvHost::send_outbound_data_loss( uint32_t msg_loss,  bool is_restart,
 {
   const char * subj   = this->dataloss_outbound_sub;
   const size_t sublen = this->dataloss_outbound_len;
-  uint8_t      buf[ 8192 ];
+  MDMsgMem     mem;
   char         pub_host_ip[ 32 ];
   size_t       pub_host_ip_len = 0;
   size_t       pub_host_id_len = 0;
-  RvMsgWriter  rvmsg( buf, sizeof( buf ) );
+  RvMsgWriter  rvmsg( mem, mem.make( 1024 ), 1024 );
 
   if ( msg_loss <= EV_MAX_LOSS )
     this->stat.odl += msg_loss;
@@ -331,7 +331,7 @@ RvHost::send_outbound_data_loss( uint32_t msg_loss,  bool is_restart,
     rvmsg.append_ipdata( SARG( "scid" ), this->ipport );
   size_t size = rvmsg.update_hdr();
 
-  EvPublish pub( subj, sublen, NULL, 0, buf, size, this->sub_route, *this,
+  EvPublish pub( subj, sublen, NULL, 0, rvmsg.buf, size, this->sub_route, *this,
                  this->dataloss_outbound_hash, RVMSG_TYPE_ID );
   PeerMatchArgs ka( "tcp", 3 );
   PeerMatchIter iter( *this, ka );
@@ -520,15 +520,11 @@ RvHost::send_inbound_data_loss( RvPubLoss &loss ) noexcept
   const char * sys_sub    = this->dataloss_inbound_sub;
   const size_t sys_sublen = this->dataloss_inbound_len;
   MDMsgMem  mem;
-  uint8_t * b;
-  size_t    size,
-            blen;
+  size_t    blen;
   uint32_t  extra_sub = ( sub_cnt < 9 ? sub_cnt : 9 );
 
   blen = extra_sublen + extra_sub * 32 + pub_host_id_len + 512;
-  b    = (uint8_t *) mem.make( blen );
-
-  RvMsgWriter rvmsg( b, blen );
+  RvMsgWriter rvmsg( mem, mem.make( blen ), blen );
 
   rvmsg.append_string( SARG( _ADV_CLASS ), SARG( _ERROR ) );
   rvmsg.append_string( SARG( _ADV_SOURCE ), SARG( _SYSTEM ) );
@@ -553,9 +549,9 @@ RvHost::send_inbound_data_loss( RvPubLoss &loss ) noexcept
   }
   if ( this->ipport != 0 )
     rvmsg.append_ipdata( SARG( "scid" ), this->ipport );
-  size = rvmsg.update_hdr();
+  blen = rvmsg.update_hdr();
 
-  EvPublish pub( sys_sub, sys_sublen, NULL, 0, rvmsg.buf, size,
+  EvPublish pub( sys_sub, sys_sublen, NULL, 0, rvmsg.buf, blen,
                  this->sub_route, *this, this->dataloss_inbound_hash,
                  RVMSG_TYPE_ID );
   this->sub_route.forward_to( pub, loss.sock->fd );
@@ -871,7 +867,7 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
     class_len = 4;
   }
 
-  RvMsgWriter msg( mem.make( sublen + 1024 ), sublen + 1024 );
+  RvMsgWriter msg( mem, mem.make( sublen + 1024 ), sublen + 1024 );
 
   msg.append_string( SARG( _ADV_CLASS ), class_str, class_len + 1 );
   msg.append_string( SARG( _ADV_SOURCE ), SARG( _SYSTEM ) );
@@ -1490,7 +1486,6 @@ RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
   EvSocket    * p;
   MDMsgMem      mem;
   size_t        buflen = 8; /* header of rvmsg */
-  uint8_t     * buf = NULL;
   RouteLoc      loc;
 
   ka.skipme = true;
@@ -1504,8 +1499,7 @@ RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
         buflen += n + 8; /* field + type + session str */
     }
   }
-  mem.alloc( buflen, &buf );
-  RvMsgWriter msg( buf, buflen );
+  RvMsgWriter msg( mem, mem.make( buflen ), buflen );
 
   for ( RouteSub *s = sess_db.first( loc ); s != NULL;
         s = sess_db.next( loc ) ) {
@@ -1514,7 +1508,7 @@ RvDaemonRpc::send_sessions( const void *reply,  size_t reply_len ) noexcept
   buflen = msg.update_hdr();
   if ( is_rv_debug )
     printf( "pub sessions reply %.*s\n", (int) reply_len, (char *) reply );
-  EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
+  EvPublish pub( (const char *) reply, reply_len, NULL, 0, msg.buf, buflen,
                  this->sub_route, *this, kv_crc_c( reply, reply_len, 0 ),
                  RVMSG_TYPE_ID );
   this->sub_route.forward_msg( pub );
@@ -1529,7 +1523,6 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
   MDMsgMem      mem;
   SubRouteDB    subs, pats;
   char          user[ MAX_USERID_LEN ];
-  void        * buf     = NULL;
   size_t        buflen  = 0,
                 subcnt  = 0,
                 patcnt  = 0,
@@ -1575,8 +1568,7 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
     }
   }
   /* create the message with unique subjects */
-  mem.alloc( buflen, &buf );
-  RvMsgWriter msg( buf, buflen );
+  RvMsgWriter msg( mem, mem.make( buflen ), buflen );
 
   if ( userlen == 0 )
     msg.append_string( SARG( "user" ), SARG( "nobody" ) );
@@ -1599,7 +1591,7 @@ RvDaemonRpc::send_subscriptions( const char *session,  size_t session_len,
   buflen = msg.update_hdr();
   if ( is_rv_debug )
     printf( "pub subs reply %.*s\n", (int) reply_len, (char *) reply );
-  EvPublish pub( (const char *) reply, reply_len, NULL, 0, buf, buflen,
+  EvPublish pub( (const char *) reply, reply_len, NULL, 0, msg.buf, buflen,
                  this->sub_route, *this, kv_crc_c( reply, reply_len, 0 ),
                  RVMSG_TYPE_ID );
   this->sub_route.forward_msg( pub );

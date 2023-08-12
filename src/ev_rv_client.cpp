@@ -219,8 +219,8 @@ EvRvClient::send_init_rec( void ) noexcept
   size_t       svclen = ::strlen( svc ) + 1,
                netlen = ::strlen( net ) + 1,
                size;
-  uint8_t      buf[ 8 * 1024 ];
-  RvMsgWriter  rvmsg( buf, sizeof( buf ) );
+  MDMsgMem     mem;
+  RvMsgWriter  rvmsg( mem, mem.make( 1024 ), 1024 );
 
   rvmsg.append_string( SARG( "mtype" ), SARG( "I" ) );
   rvmsg.append_string( SARG( "userid" ), SARG( "nobody" ) );
@@ -237,8 +237,8 @@ EvRvClient::send_init_rec( void ) noexcept
   rvmsg.append_int<int32_t>( SARG( "vupd" ), 2 );
   size = rvmsg.update_hdr();
   if ( rv_client_pub_verbose )
-    this->trace_msg( '>', buf, size );
-  this->append( buf, size );
+    this->trace_msg( '>', rvmsg.buf, size );
+  this->append( rvmsg.buf, size );
 }
 
 static bool
@@ -336,9 +336,9 @@ EvRvClient::recv_conn( void ) noexcept
        ::memcmp( this->msg_in.sub, conn, sizeof( conn ) - 1 ) != 0 )
     return ERR_START_HOST_FAILED;
 
-  uint8_t      buf[ 1024 ];
   char         inbox[ 64 ];
-  RvMsgWriter  rvmsg( buf, sizeof( buf ) );
+  MDMsgMem     mem;
+  RvMsgWriter  rvmsg( mem, mem.make( 1024 ), 1024 );
   size_t       size;
 
   rvmsg.append_string( SARG( "mtype" ), SARG( "L" ) );
@@ -348,8 +348,8 @@ EvRvClient::recv_conn( void ) noexcept
   rvmsg.append_subject( SARG( "sub" ), inbox, this->control_len );
   size = rvmsg.update_hdr();
   if ( rv_client_pub_verbose )
-    this->trace_msg( '>', buf, size );
-  this->append( buf, size );
+    this->trace_msg( '>', rvmsg.buf, size );
+  this->append( rvmsg.buf, size );
   this->rv_state = DATA_RECV;
 
   /* if all subs are forwarded to RV */
@@ -457,29 +457,24 @@ EvRvClient::on_msg( EvPublish &pub ) noexcept
 bool
 EvRvClient::publish( EvPublish &pub ) noexcept
 {
-  uint8_t buf[ 2 * 1024 ], * b = buf;
-  size_t  buf_len = sizeof( buf );
-
-  if ( pub.subject_len + pub.reply_len > 2 * 1024 - 512 ) {
+  size_t buf_len = 1024;
+  if ( pub.subject_len + pub.reply_len > 1024 - 512 )
     buf_len = pub.subject_len + pub.reply_len + 512;
-    b = (uint8_t *) this->alloc_temp( buf_len );
-    if ( b == NULL )
-      return true;
-  }
 
-  RvMsgWriter rvmsg( b, buf_len );
+  MDMsgMem    mem;
+  RvMsgWriter rvmsg( mem, mem.make( buf_len ), buf_len );
   /* some subjects may not encode */
   rvmsg.append_subject( SARG( "sub" ), pub.subject, pub.subject_len )
        .append_string( SARG( "mtype" ), SARG( "D" ) );
   if ( rvmsg.err == 0 && pub.reply_len > 0 ) {
     rvmsg.append_string( SARG( "return" ), (const char *) pub.reply,
                          pub.reply_len + 1 );
-    buf[ rvmsg.off - 1 ] = '\0';
+    rvmsg.buf[ rvmsg.off - 1 ] = '\0';
   }
   if ( rvmsg.err == 0 ) {
-    RvMsgWriter  submsg( NULL, 0 );
+    RvMsgWriter  submsg( rvmsg.mem, NULL, 0 );
     uint32_t     msg_enc = pub.msg_enc;
-    size_t       msg_off,
+    size_t       msg_off = 0,
                  msg_len = pub.msg_len;
     void       * msg     = (void *) pub.msg;
     /* depending on message type, encode the hdr to send to the client */
@@ -516,23 +511,27 @@ EvRvClient::publish( EvPublish &pub ) noexcept
       case TIB_SASS_FORM_TYPE_ID:
       case MARKETFEED_TYPE_ID:
       do_tibmsg:;
-        rvmsg.off += append_rv_field_hdr( &buf[ rvmsg.off ], SARG( "data" ),
-                                          msg_len, msg_enc );
-        msg_off    = rvmsg.off;
-        rvmsg.off += msg_len;
-        rvmsg.update_hdr();
+        if ( rvmsg.has_space( 20 ) ) {
+          rvmsg.off += append_rv_field_hdr( &rvmsg.buf[ rvmsg.off ],
+                                            SARG( "data" ), msg_len, msg_enc );
+          msg_off    = rvmsg.off;
+          rvmsg.off += msg_len;
+          rvmsg.update_hdr();
+        }
         break;
 
       case RWF_MSG_TYPE_ID:
-        rvmsg.append_msg( SARG( "data" ), submsg );
+        if ( rvmsg.has_space( 20 ) ) {
+          rvmsg.append_msg( SARG( "data" ), submsg );
 
-        msg_off     = rvmsg.off + submsg.off;
-        msg_off     = append_rv_field_hdr( &buf[ msg_off ], SARG( "_RWFMSG" ),
-                                           msg_len, msg_enc );
-        submsg.off += msg_off;
-        msg_off     = rvmsg.off + submsg.off;
-        submsg.off += msg_len;
-        rvmsg.update_hdr( submsg );
+          msg_off     = rvmsg.off + submsg.off;
+          msg_off     = append_rv_field_hdr( &rvmsg.buf[ msg_off ],
+                                          SARG( "_RWFMSG" ), msg_len, msg_enc );
+          submsg.off += msg_off;
+          msg_off     = rvmsg.off + submsg.off;
+          submsg.off += msg_len;
+          rvmsg.update_hdr( submsg );
+        }
         break;
 
       case MD_MESSAGE:
@@ -553,10 +552,18 @@ EvRvClient::publish( EvPublish &pub ) noexcept
         msg_len = 0;
         break;
     }
-    if ( msg_off > 0 )
-      return this->queue_send( buf, msg_off, msg, msg_len );
-    fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %u\n",
-             msg_enc, (int) pub.subject_len, pub.subject, (uint32_t) msg_off );
+    if ( rvmsg.err != 0 ) {
+      fprintf( stderr, "rv msg error %d subject: %.*s %u\n",
+               rvmsg.err, (int) pub.subject_len, pub.subject,
+               (uint32_t) msg_off );
+    }
+    else {
+      if ( msg_off > 0 )
+        return this->queue_send( rvmsg.buf, msg_off, msg, msg_len );
+      fprintf( stderr, "rv unknown msg_enc %u subject: %.*s %u\n",
+               msg_enc, (int) pub.subject_len, pub.subject,
+               (uint32_t) msg_off );
+    }
   }
   return true;
 }
@@ -616,17 +623,14 @@ void
 EvRvClient::subscribe( const char *sub,  size_t sublen,
                        const char *rep,  size_t replen ) noexcept
 {
-  uint8_t buf[ 2 * 1024 ], * b = buf;
   size_t  len    = sublen + replen,
-          buflen = sizeof( buf );
+          buflen = 1024;
 
-  if ( buflen < len * 2 + 32 ) {
-    b = (uint8_t *) this->alloc_temp( len * 2 + 32 );
+  if ( buflen < len * 2 + 32 )
     buflen = sublen * 2 + 32;
-    if ( b == NULL )
-      return;
-  }
-  RvMsgWriter msg( b, buflen );
+
+  MDMsgMem    mem;
+  RvMsgWriter msg( mem, mem.make( buflen ), buflen );
   msg.append_string( SARG( "mtype" ), SARG( "L" ) );
   if ( sublen > 0 && sub[ sublen - 1 ] == '\0' )
     sublen--;
@@ -635,35 +639,32 @@ EvRvClient::subscribe( const char *sub,  size_t sublen,
     if ( rep[ replen - 1 ] == '\0' )
       replen--;
     msg.append_string( SARG( "return" ), rep, replen + 1 );
-    b[ msg.off - 1 ] = '\0';
+    msg.buf[ msg.off - 1 ] = '\0';
   }
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )
-    this->trace_msg( '>', buf, size );
-  this->queue_send( buf, size );
+    this->trace_msg( '>', msg.buf, size );
+  this->queue_send( msg.buf, size );
 }
 
 void
 EvRvClient::unsubscribe( const char *sub,  size_t sublen ) noexcept
 {
-  uint8_t buf[ 2 * 1024 ], * b = buf;
-  size_t  buflen = sizeof( buf );
+  size_t  buflen = 1024;
 
-  if ( buflen < (size_t) sublen * 2 + 32 ) {
-    b = (uint8_t *) this->alloc_temp( sublen * 2 + 32 );
+  if ( buflen < (size_t) sublen * 2 + 32 )
     buflen = (size_t) sublen * 2 + 32;
-    if ( b == NULL )
-      return;
-  }
-  RvMsgWriter msg( b, buflen );
+
+  MDMsgMem    mem;
+  RvMsgWriter msg( mem, mem.make( buflen ), buflen );
   msg.append_string( SARG( "mtype" ), SARG( "C" ) );
   if ( sublen > 0 && sub[ sublen - 1 ] == '\0' )
     sublen--;
   msg.append_subject( SARG( "sub" ), sub, sublen );
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )
-    this->trace_msg( '>', buf, size );
-  this->queue_send( buf, size );
+    this->trace_msg( '>', msg.buf, size );
+  this->queue_send( msg.buf, size );
 }
 
 void
@@ -685,7 +686,6 @@ EvRvClient::on_unsub( NotifySub &sub ) noexcept
 void
 EvRvClient::do_psub( const char *prefix,  uint8_t prefix_len ) noexcept
 {
-  uint8_t buf[ 2 * 1024 ];
   char    sub[ 1024 ];
   size_t  sublen = prefix_len;
 
@@ -695,13 +695,14 @@ EvRvClient::do_psub( const char *prefix,  uint8_t prefix_len ) noexcept
   sub[ sublen++ ] = '>';
   sub[ sublen ] = '\0';
 
-  RvMsgWriter msg( buf, sizeof( buf ) );
+  MDMsgMem    mem;
+  RvMsgWriter msg( mem, mem.make( 1024 ), 1024 );
   msg.append_string( SARG( "mtype" ), SARG( "L" ) );
   msg.append_subject( SARG( "sub" ), sub, sublen );
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )
-    this->trace_msg( '>', buf, size );
-  this->queue_send( buf, size );
+    this->trace_msg( '>', msg.buf, size );
+  this->queue_send( msg.buf, size );
 }
 
 void
@@ -727,9 +728,8 @@ EvRvClient::on_punsub( NotifyPattern &pat ) noexcept
   if ( ! fwd )
     return;
 
-  uint8_t buf[ 2 * 1024 ];
-  char    sub[ 1024 ];
-  size_t  sublen = prefix_len;
+  char   sub[ 1024 ];
+  size_t sublen = prefix_len;
 
   ::memcpy( sub, prefix, sublen );
   if ( sublen != 0 ) {
@@ -738,13 +738,14 @@ EvRvClient::on_punsub( NotifyPattern &pat ) noexcept
   sub[ sublen++ ] = '>';
   sub[ sublen ] = '\0';
 
-  RvMsgWriter msg( buf, sizeof( buf ) );
+  MDMsgMem    mem;
+  RvMsgWriter msg( mem, mem.make( 1024 ), 1024 );
   msg.append_string( SARG( "mtype" ), SARG( "C" ) );
   msg.append_subject( SARG( "sub" ), sub, sublen );
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )
-    this->trace_msg( '>', buf, size );
-  this->queue_send( buf, size );
+    this->trace_msg( '>', msg.buf, size );
+  this->queue_send( msg.buf, size );
 }
 /* reassert subs after reconnect */
 void

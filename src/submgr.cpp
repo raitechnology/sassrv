@@ -14,8 +14,6 @@ using namespace kv;
 using namespace sassrv;
 using namespace md;
 
-int rai::sassrv::subdb_debug;
-#define is_subdb_debug kv_unlikely( subdb_debug != 0 )
 static const uint64_t NS = 1000 * 1000 * 1000;
 
 namespace {
@@ -122,6 +120,7 @@ SubscriptionDB::SubscriptionDB( EvRvClient &c,
               : client( c ), cb( sl ), host_ht( 0 ), sess_ht( 0 ),
                 cur_mono( 0 ), next_session_ctr( 0 ), next_subject_ctr( 0 ),
                 soft_host_query( 0 ), first_free_host( 0 ), next_gc( 0 ),
+                host_inbox_base( 1000000 ), session_inbox_base( 1000 ),
                 is_subscribed( false ), is_all_subscribed( false ), mout( 0 )
 {
   this->host_ht = kv::UIntHashTab::resize( NULL );
@@ -131,13 +130,13 @@ SubscriptionDB::SubscriptionDB( EvRvClient &c,
 uint32_t
 SubscriptionDB::next_session_id( void ) noexcept
 {
-  return kv_ll_hash_uint( ++this->next_session_ctr );
+  return ++this->next_session_ctr;
 }
 
 uint32_t
 SubscriptionDB::next_subject_id( void ) noexcept
 {
-  return kv_ll_hash_uint( ++this->next_subject_ctr );
+  return kv_hash_uint( ++this->next_subject_ctr );
 }
 
 void SubscriptionListener::on_listen_start( StartListener & ) noexcept {}
@@ -399,7 +398,8 @@ void
 SubscriptionDB::unsub_session( Session &sess ) noexcept
 {
   if ( this->mout != NULL )
-    this->mout->printf( "> unsub session %08X.%u\n", sess.host_id, sess.session_id );
+    this->mout->printf( "> unsub session %08X.%u\n", sess.host_id,
+                        sess.session_id );
   size_t pos;
   for ( Subscription * sub = this->first_subject( sess, pos ); sub != NULL;
         sub = this->next_subject( sess, pos ) ) {
@@ -798,14 +798,14 @@ SubscriptionDB::send_host_query( uint32_t i ) noexcept
     return;
   }
 
-  uint8_t  buf[ 128 ];
-  char     daemon_inbox[ MAX_RV_INBOX_LEN ],
-           inbox[ MAX_RV_INBOX_LEN ],
-           host_id_buf[ 16 ];
-  size_t   inbox_len;
+  char   daemon_inbox[ MAX_RV_INBOX_LEN ],
+         inbox[ MAX_RV_INBOX_LEN ],
+         host_id_buf[ 16 ];
+  size_t inbox_len;
 
-  inbox_len = this->client.make_inbox( inbox, i * 2 + 2 ); /* even */
-  RvMsgWriter msg( buf, sizeof( buf ) );
+  inbox_len = this->client.make_inbox( inbox, i + this->host_inbox_base );
+  MDMsgMem    mem;
+  RvMsgWriter msg( mem, mem.make( 256 ), 256 );
   msg.append_string( "op", "get" )
      .append_string( "what", "sessions" )
      .update_hdr();
@@ -837,20 +837,20 @@ SubscriptionDB::send_session_query( Host &host,  Session &session ) noexcept
     host.state = RV_HOST_QUERY;
     return;
   }
-  uint8_t  buf[ 128 + EvConnection::MAX_SESSION_LEN ];
   char     daemon_inbox[ MAX_RV_INBOX_LEN ],
            inbox[ MAX_RV_INBOX_LEN ],
            host_id_buf[ 16 ];
   size_t   inbox_len;
   uint32_t i = session.session_id;
 
-  inbox_len = this->client.make_inbox( inbox, i * 2 + 3 ); /* odd */
+  inbox_len = this->client.make_inbox( inbox, i + this->session_inbox_base );
   if ( session.len == this->client.session_len &&
        ::memcmp( session.value, this->client.session, session.len ) == 0 ) {
     session.state = RV_SESSION_SELF;
   }
   else {
-    RvMsgWriter msg( buf, sizeof( buf ) );
+    MDMsgMem    mem;
+    RvMsgWriter msg( mem, mem.make( 256 ), 256 );
     msg.append_string( "op", "get" )
        .append_string( "what", "subscriptions" )
        .append_string( "session", session.value )
@@ -944,7 +944,7 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
 
   if ( match == NULL ) {
     which = this->client.is_inbox( subject, subject_len );
-    if ( which < 2 )
+    if ( which == 0 )
       return false;
   }
   this->cur_mono = this->client.poll.mono_ns / NS;
@@ -1089,16 +1089,20 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
     }
   }
   else {
-    bool     is_sessions = ( ( which & 1 ) == 0 );
-    uint32_t i = ( is_sessions ? ( which - 2 ) : ( which - 3 ) ) / 2;
+    bool     is_host_query = ( which >= this->host_inbox_base );
+    uint32_t i;
     MDName   nm;
-
     MDFieldReader rd( *m );
+
+    if ( is_host_query )
+      i = which - this->host_inbox_base;
+    else
+      i = which - this->session_inbox_base;
    /* session message:
     * ## _INBOX.C0A80010.601FB1D31D6DE.2
     * null : string  45 : "C0A80010.DAEMON.152AAF64CB09BA0X7F5B5806F680"
     * null : string  23 : "C0A80010.601FB1D31D6DE" */
-    if ( is_sessions ) {
+    if ( is_host_query ) {
       if ( i < this->host_tab.count ) {
         Host & host = this->host_tab.ptr[ i ];
         if ( host.state == RV_HOST_QUERY ) {

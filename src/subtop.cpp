@@ -224,10 +224,12 @@ main( int argc, const char *argv[] )
 
   if ( help != NULL ) {
     fprintf( stderr,
- "%s [-d daemon] [-n network] [-s service] [-c cfile_path] [-x] [-e] subject ...\n"
+ "%s [-d daemon] [-n network] [-s service] [-l log] [-t] subject ...\n"
              "  -d daemon  = daemon port to connect\n"
              "  -n network = network\n"
              "  -s service = service\n"
+             "  -l log     = write to debug log\n"
+             "  -t         = update with top format\n"
              "  subject    = subject to subscribe\n", argv[ 0 ] );
     return 1;
   }

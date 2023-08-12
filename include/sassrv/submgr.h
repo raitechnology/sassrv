@@ -6,7 +6,6 @@
 namespace rai {
 namespace sassrv {
 
-extern int subdb_debug;
 static const uint32_t HOST_QUERY_INTERVAL      = 30,
                       HOST_TIMEOUT_INTERVAL    = 120;
 static const uint32_t SESSION_QUERY_INTERVAL   = 30,
@@ -266,7 +265,9 @@ struct SubscriptionDB {
   GCCounters                 subscriptions, /* track how many active/removed */
                              sessions,
                              hosts;
-  uint32_t                   next_gc;
+  uint32_t                   next_gc,
+                             host_inbox_base,
+                             session_inbox_base;
   bool                       is_subscribed, /* start_subscriptions() called */
                              is_all_subscribed; /* no filtering */
   md::MDOutput             * mout; /* debug log output */

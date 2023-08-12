@@ -425,9 +425,10 @@ RvDataCallback::make_subject( size_t sub_idx,  size_t sub_num,
 void
 RvDataCallback::run_publishers( void ) noexcept
 {
-  size_t   msg_len;
-  uint32_t msg_enc = 0;
-  bool     is_rate_limited;
+  uint8_t * buf_ptr;
+  size_t    msg_len;
+  uint32_t  msg_enc = 0;
+  bool      is_rate_limited;
 
   if ( this->poll.quit != 0 )
     return;
@@ -466,24 +467,30 @@ RvDataCallback::run_publishers( void ) noexcept
     WriteParam param( subject, subject_len, seqno, cur_time, delta,
                       this->payload, this->payload_bytes,
                       this->rectype, this->track_time );
+    MDMsgMem mem;
     if ( this->use_json ) {
-      JsonMsgWriter jsonmsg( this->msg_buf, this->msg_buf_len );
+      JsonMsgWriter jsonmsg( mem, this->msg_buf, this->msg_buf_len );
       msg_len = write_msg<JsonMsgWriter>( jsonmsg, param );
+      buf_ptr = jsonmsg.buf;
       msg_enc = JSON_TYPE_ID;
     }
     else if ( this->use_rv ) {
-      RvMsgWriter rvmsg( this->msg_buf, this->msg_buf_len );
+      RvMsgWriter rvmsg( mem, this->msg_buf, this->msg_buf_len );
       msg_len = write_msg<RvMsgWriter>( rvmsg, param );
+      buf_ptr = rvmsg.buf;
       msg_enc = RVMSG_TYPE_ID;
     }
     else if ( this->use_tibmsg || ! this->have_dictionary ) {
-      TibMsgWriter tibmsg( this->msg_buf, this->msg_buf_len );
+      TibMsgWriter tibmsg( mem, this->msg_buf, this->msg_buf_len );
       msg_len = write_msg<TibMsgWriter>( tibmsg, param );
+      buf_ptr = tibmsg.buf;
       msg_enc = TIBMSG_TYPE_ID;
     }
     else {
-      TibSassMsgWriter tibmsg( this->dict, this->msg_buf, this->msg_buf_len );
+      TibSassMsgWriter tibmsg( mem, this->dict, this->msg_buf,
+                               this->msg_buf_len );
       msg_len = write_msg<TibSassMsgWriter>( tibmsg, param );
+      buf_ptr = tibmsg.buf;
       msg_enc = TIB_SASS_TYPE_ID;
     }
     if ( ++this->i == this->sub_n ) {
@@ -495,10 +502,9 @@ RvDataCallback::run_publishers( void ) noexcept
     }
     if ( this->verbose ) {
       MDMsg *m;
-      MDMsgMem mem;
       MDOutput mout;
       mout.printf( "## %s seqno=%u\n", subject, seqno );
-      m = MDMsg::unpack( this->msg_buf, 0, msg_len, 0, this->dict, mem );
+      m = MDMsg::unpack( buf_ptr, 0, msg_len, 0, this->dict, mem );
       /* print message */
       if ( m != NULL ) {
         printf( "## format: %s, length %u\n", m->get_proto_string(),
@@ -506,11 +512,11 @@ RvDataCallback::run_publishers( void ) noexcept
         m->print( &mout );
       }
       if ( this->dump_hex ) {
-        mout.print_hex( this->msg_buf, msg_len );
+        mout.print_hex( buf_ptr, msg_len );
       }
       fflush( stdout );
     }
-    EvPublish pub( subject, subject_len, NULL, 0, this->msg_buf, msg_len,
+    EvPublish pub( subject, subject_len, NULL, 0, buf_ptr, msg_len,
                    this->client.sub_route, this->client, 0, msg_enc );
     if ( ! this->client.publish( pub ) ) {
       /* wait for ready */
