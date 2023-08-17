@@ -15,19 +15,18 @@ using namespace md;
 
 /* rv client callback closure */
 struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
-                        public EvTimerCallback,  public SubscriptionListener {
-  EvPoll       & poll;            /* poll loop data */
-  EvRvClient   & client;          /* connection to rv */
-  SubscriptionDB sub_db;
-  const char  ** sub;             /* subject strings */
-  size_t         sub_count;       /* count of sub[] */
-  bool           is_subscribed,   /* sub[] are subscribed */
-                 top;
+                        public EvTimerCallback,  public RvSubscriptionListener {
+  EvPoll         & poll;            /* poll loop data */
+  EvRvClient     & client;          /* connection to rv */
+  RvSubscriptionDB sub_db;
+  const char    ** sub;             /* subject strings */
+  size_t           sub_count;       /* count of sub[] */
+  bool             top;
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t cnt,
                   bool t )
     : poll( p ), client( c ), sub_db( c, this ), sub( s ), sub_count( cnt ),
-      is_subscribed( false ), top( t ) {}
+      top( t ) {}
 
   /* after CONNECTED message */
   virtual void on_connect( EvSocket &conn ) noexcept;
@@ -38,14 +37,14 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   /* when disconnected */
   virtual void on_shutdown( EvSocket &conn,  const char *err,
                             size_t err_len ) noexcept;
-  /* dict timeout */
+  /* process events timer */
   virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
   /* message from network */
   virtual bool on_rv_msg( EvPublish &pub ) noexcept;
   /* new listen start */
-  virtual void on_listen_start( StartListener &add ) noexcept;
-  virtual void on_listen_stop ( StopListener  &rem ) noexcept;
-  virtual void on_snapshot    ( SnapListener  &snp ) noexcept;
+  virtual void on_listen_start( Start &add ) noexcept;
+  virtual void on_listen_stop ( Stop  &rem ) noexcept;
+  virtual void on_snapshot    ( Snap  &snp ) noexcept;
   const char * ts( uint32_t mono,  const char *str,  char *buf ) noexcept;
 };
 
@@ -95,14 +94,14 @@ RvDataCallback::ts( uint32_t mono,  const char *str,  char *buf ) noexcept
 bool
 RvDataCallback::timer_cb( uint64_t ,  uint64_t ) noexcept
 {
-  SubscriptionDB & db = this->sub_db;
+  RvSubscriptionDB & db = this->sub_db;
   uint32_t i;
   db.process_events();
 
   if ( this->top ) {
     printf( "\033[H\033[J" );
     for ( i = 0; i < db.host_tab.count; i++ ) {
-      Host & host = db.host_tab.ptr[ i ];
+      RvHostEntry & host = db.host_tab.ptr[ i ];
 
       char b1[ 32 ], b2[ 32 ], b3[ 32 ], b4[ 32 ];
       const char * ref_str     = this->ts( host.ref_mono   , ", ref: "   , b1 ),
@@ -111,23 +110,24 @@ RvDataCallback::timer_cb( uint64_t ,  uint64_t ) noexcept
                  * stop_str    = this->ts( host.stop_mono  , ", stop: "  , b4 );
 
       printf( "host[%u] %08X  state:%s%s%s%s%s%s%s%s%s, age:%u\n", i,
-              host.host_id, get_host_state_str( host.state ), ref_str, b1,
-              status_str, b2, start_str, b3, stop_str, b4,
-              db.cur_mono - host.ref_mono );
+            host.host_id, RvHostEntry::get_host_state_str( host.state ),
+            ref_str, b1, status_str, b2, start_str, b3, stop_str, b4,
+            db.cur_mono - host.ref_mono );
 
       if ( host.sess_ht != NULL ) {
-        Session      * entry;
-        Subscription * script;
-        size_t         pos, pos2;
+        RvSessionEntry * entry;
+        RvSubscription * script;
+        size_t           pos, pos2;
 
         if ( (entry = db.first_session( host, pos )) != NULL ) {
           do {
             status_str  = this->ts( entry->ref_mono   , ", ref: "   , b1 );
             start_str   = this->ts( entry->start_mono , ", start: " , b2 );
             stop_str    = this->ts( entry->stop_mono  , ", stop: "  , b3 );
-            printf( "  id %.*s  state:%s%s%s%s%s%s%s\n", entry->len, entry->value,
-                    get_session_state_str( entry->state ), status_str, b1,
-                    start_str, b2, stop_str, b3 );
+            printf( "  id %.*s  state:%s%s%s%s%s%s%s\n",
+                entry->len, entry->value,
+                RvSessionEntry::get_session_state_str( entry->state ),
+                status_str, b1, start_str, b2, stop_str, b3 );
             if ( (script = db.first_subject( *entry, pos2 )) != NULL ) {
               do {
                 printf( "    - %.*s\n", script->len, script->value );
@@ -143,7 +143,7 @@ RvDataCallback::timer_cb( uint64_t ,  uint64_t ) noexcept
 }
 
 void
-RvDataCallback::on_listen_start( StartListener &add ) noexcept
+RvDataCallback::on_listen_start( Start &add ) noexcept
 {
   if ( add.reply_len == 0 ) {
     printf( "%sstart %.*s refs %u from %.*s\n",
@@ -160,7 +160,7 @@ RvDataCallback::on_listen_start( StartListener &add ) noexcept
 }
 
 void
-RvDataCallback::on_listen_stop( StopListener &rem ) noexcept
+RvDataCallback::on_listen_stop( Stop &rem ) noexcept
 {
   printf( "%sstop %.*s refs %u from %.*s%s\n",
     rem.is_listen_stop ? "listen_" : "assert_",
@@ -169,7 +169,7 @@ RvDataCallback::on_listen_stop( StopListener &rem ) noexcept
 }
 
 void
-RvDataCallback::on_snapshot( SnapListener &snp ) noexcept
+RvDataCallback::on_snapshot( Snap &snp ) noexcept
 {
   printf( "snap %.*s reply %.*s refs %u flags %u\n",
     snp.sub.len, snp.sub.value, snp.reply_len, snp.reply, snp.sub.refcnt,

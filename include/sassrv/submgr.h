@@ -6,33 +6,7 @@
 namespace rai {
 namespace sassrv {
 
-static const uint32_t HOST_QUERY_INTERVAL      = 30,
-                      HOST_TIMEOUT_INTERVAL    = 120;
-static const uint32_t SESSION_QUERY_INTERVAL   = 30,
-                      SESSION_TIMEOUT_INTERVAL = 60;
-
-enum HostState {
-  RV_HOST_UNKNOWN = 0,
-  RV_HOST_START   = 1,
-  RV_HOST_STATUS  = 2,
-  RV_HOST_QUERY   = 3,
-  RV_HOST_STOP    = 4,
-};
-#define MAX_HOST_STATE 5
-const char *get_host_state_str( HostState s ) noexcept;
-
-enum SessionState {
-  RV_SESSION_UNKNOWN = 0,
-  RV_SESSION_RV5     = 1,
-  RV_SESSION_QUERY   = 2,
-  RV_SESSION_STOP    = 3,
-  RV_SESSION_RV7     = 4,
-  RV_SESSION_SELF    = 5
-};
-#define MAX_SESSION_STATE 6
-const char *get_session_state_str( SessionState s ) noexcept;
-
-struct Subscription {
+struct RvSubscription {
   uint32_t subject_id,
            refcnt,
            start_mono,
@@ -52,7 +26,18 @@ struct Subscription {
   }
 };
 
-struct Session {
+struct RvSessionEntry {
+  enum SessionState {
+    RV_SESSION_UNKNOWN = 0,
+    RV_SESSION_RV5     = 1,
+    RV_SESSION_QUERY   = 2,
+    RV_SESSION_STOP    = 3,
+    RV_SESSION_RV7     = 4,
+    RV_SESSION_SELF    = 5
+  };
+  #define MAX_SESSION_STATE 6
+  static const char *get_session_state_str( SessionState s ) noexcept;
+
   kv::UIntHashTab * sub_ht; /* subject_id -> subj_hash */
   uint32_t          host_id,
                     session_id,
@@ -85,7 +70,7 @@ struct Session {
       this->sub_ht = NULL;
     }
   }
-  bool add_subject( Subscription &script ) {
+  bool add_subject( RvSubscription &script ) {
     size_t pos;
     if ( ! this->sub_ht->find( script.subject_id, pos ) ) {
       this->sub_ht->set_rsz( this->sub_ht, script.subject_id, pos,
@@ -95,7 +80,7 @@ struct Session {
     }
     return false;
   }
-  bool rem_subject( Subscription &script ) {
+  bool rem_subject( RvSubscription &script ) {
     if ( script.refcnt > 0 ) {
       size_t pos;
       if ( this->sub_ht->find( script.subject_id, pos ) ) {
@@ -117,7 +102,17 @@ struct Session {
   }
 };
 
-struct Host {
+struct RvHostEntry {
+  enum HostState {
+    RV_HOST_UNKNOWN = 0,
+    RV_HOST_START   = 1,
+    RV_HOST_STATUS  = 2,
+    RV_HOST_QUERY   = 3,
+    RV_HOST_STOP    = 4,
+  };
+  #define MAX_HOST_STATE 5
+  static const char *get_host_state_str( HostState s ) noexcept;
+
   kv::UIntHashTab * sess_ht; /* session_id -> session_hash */
   uint32_t  host_id,
             start_mono,
@@ -177,7 +172,7 @@ struct Host {
     return 0;
   }
 
-  bool add_session( Session &sess ) {
+  bool add_session( RvSessionEntry &sess ) {
     size_t pos;
     if ( ! this->sess_ht->find( sess.session_id, pos ) ) {
       this->sess_ht->set_rsz( this->sess_ht, sess.session_id, pos, sess.hash );
@@ -185,7 +180,7 @@ struct Host {
     }
     return false;
   }
-  bool rem_session( Session &sess ) {
+  bool rem_session( RvSessionEntry &sess ) {
     size_t pos;
     if ( this->sess_ht->find( sess.session_id, pos ) ) {
       this->sess_ht->remove( pos );
@@ -195,73 +190,81 @@ struct Host {
   }
 };
 
-struct StartListener {
-  Session      & session;
-  Subscription & sub;
-  const char   * reply;
-  uint16_t       reply_len;
-  bool           is_listen_start;
+struct RvSubscriptionListener {
+  struct Start {
+    RvSessionEntry & session;
+    RvSubscription & sub;
+    const char     * reply;
+    uint16_t         reply_len;
+    bool             is_listen_start;
 
-  StartListener( Session &sess,  Subscription &script,  const char *rep,
-                 size_t len,  bool is_listen )
-    : session( sess ), sub( script ), reply( rep ), reply_len( len ),
-      is_listen_start( is_listen ) {}
+    Start( RvSessionEntry &sess,  RvSubscription &script,  const char *rep,
+           size_t len,  bool is_listen )
+      : session( sess ), sub( script ), reply( rep ), reply_len( len ),
+        is_listen_start( is_listen ) {}
+  };
+
+  struct Stop {
+    RvSessionEntry & session;
+    RvSubscription & sub;
+    bool             is_orphan,
+                     is_listen_stop;
+
+    Stop( RvSessionEntry &sess,  RvSubscription &script,  bool is_orph,
+          bool is_listen )
+      : session( sess ), sub( script ), is_orphan( is_orph ),
+        is_listen_stop( is_listen ) {}
+  };
+
+  struct Snap {
+    RvSubscription & sub;
+    const char     * reply;
+    uint16_t         reply_len,
+                     flags;
+
+    Snap( RvSubscription &script,  const char *rep,  size_t len,  uint16_t fl )
+      : sub( script ), reply( rep ), reply_len( len ), flags( fl ) {}
+  };
+
+  virtual void on_listen_start( Start &add ) noexcept;
+  virtual void on_listen_stop ( Stop  &rem ) noexcept;
+  virtual void on_snapshot    ( Snap  &snp ) noexcept;
 };
 
-struct StopListener {
-  Session      & session;
-  Subscription & sub;
-  bool           is_orphan,
-                 is_listen_stop;
+struct RvSubscriptionDB {
+  static const uint32_t HOST_QUERY_INTERVAL      = 30,
+                        HOST_TIMEOUT_INTERVAL    = 120;
+  static const uint32_t SESSION_QUERY_INTERVAL   = 30,
+                        SESSION_TIMEOUT_INTERVAL = 60;
+  struct GCCounters {
+    uint32_t active,
+             removed;
+    GCCounters() : active( 0 ), removed( 0 ) {}
+  };
 
-  StopListener( Session &sess,  Subscription &script,  bool is_orph,
-                bool is_listen )
-    : session( sess ), sub( script ), is_orphan( is_orph ),
-      is_listen_stop( is_listen ) {}
-};
+  struct Filter {
+    char * wild;     /* listen for _RV.INFO.LISTEN.START.wild */
+    size_t wild_len;
+  };
 
-struct SnapListener {
-  Subscription & sub;
-  const char   * reply;
-  uint16_t       reply_len,
-                 flags;
+  typedef kv::ArrayCount< RvHostEntry, 8 > HostTab;
+  typedef kv::RouteVec< RvSessionEntry >   SessionTab;
+  typedef kv::RouteVec< RvSubscription >   SubscriptionTab;
+  typedef kv::ArrayCount< Filter, 4 >      ListenFilterTab;
 
-  SnapListener( Subscription &script,  const char *rep,  size_t len,
-                uint16_t fl )
-    : sub( script ), reply( rep ), reply_len( len ), flags( fl ) {}
-};
-
-struct SubscriptionListener {
-  virtual void on_listen_start( StartListener &add ) noexcept;
-  virtual void on_listen_stop ( StopListener  &rem ) noexcept;
-  virtual void on_snapshot    ( SnapListener  &snp ) noexcept;
-};
-
-struct GCCounters {
-  uint32_t active,
-           removed;
-  GCCounters() : active( 0 ), removed( 0 ) {}
-};
-
-struct Filter {
-  char * wild;
-  size_t wild_len;
-};
-
-struct SubscriptionDB {
   EvRvClient               & client;   /* monitor this network */
-  SubscriptionListener     * cb;       /* on_listen_start() */
+  RvSubscriptionListener   * cb;       /* on_listen_start() */
   kv::UIntHashTab          * host_ht,  /* host_id -> host_tab[ index ] */
                            * sess_ht;  /* session_id -> session_tab[ hash ] */
-  kv::ArrayCount<Host, 8>    host_tab;    /* array of Host */
-  kv::RouteVec<Session>      session_tab; /* hash, session -> Session */
-  kv::RouteVec<Subscription> sub_tab;     /* hash, subject -> Subscription */
-  kv::ArrayCount<Filter, 4>  filters;     /* listen wildcards, eg: RSF.> */
+  HostTab                    host_tab;    /* array of discovered hosts */
+  SessionTab                 session_tab; /* hash, session -> RvSessionEntry */
+  SubscriptionTab            sub_tab;     /* hash, subject -> RvSubscription */
+  ListenFilterTab            filters;     /* listen wildcards, eg: RSF.> */
   uint32_t                   cur_mono,    /* monotonic time in seconds */
                              next_session_ctr, /* unique counter for sessions */
                              next_subject_ctr, /* unique counter for subjscts */
                              soft_host_query, /* = host_tab.count, refresh all */
-                             first_free_host; /* reuse stopped Host[] */
+                             first_free_host; /* reuse stopped Host_tab[] */
   GCCounters                 subscriptions, /* track how many active/removed */
                              sessions,
                              hosts;
@@ -272,7 +275,7 @@ struct SubscriptionDB {
                              is_all_subscribed; /* no filtering */
   md::MDOutput             * mout; /* debug log output */
 
-  SubscriptionDB( EvRvClient &c,  SubscriptionListener *sl ) noexcept;
+  RvSubscriptionDB( EvRvClient &c,  RvSubscriptionListener *sl ) noexcept;
 
   static bool match_rv_wildcard( const char *wild,  size_t wild_len,
                                  const char *sub,  size_t sub_len ) noexcept;
@@ -283,8 +286,7 @@ struct SubscriptionDB {
   void start_subscriptions( bool all ) noexcept;
   void stop_subscriptions( void ) noexcept;
   void do_subscriptions( bool is_subscribe ) noexcept;
-  void do_wild_subscription( Filter &f,  bool is_subscribe,
-                             int k ) noexcept;
+  void do_wild_subscription( Filter &f,  bool is_subscribe,  int k ) noexcept;
   uint32_t next_session_id( void ) noexcept;
   uint32_t next_subject_id( void ) noexcept;
 
@@ -293,47 +295,49 @@ struct SubscriptionDB {
   void gc( void ) noexcept;
 
   void send_host_query( uint32_t i ) noexcept;
-  void send_session_query( Host &host,  Session &session ) noexcept;
-
-  void mark_sessions( Host &host ) noexcept;
-  void stop_marked_sessions( Host &host ) noexcept;
+  void send_session_query( RvHostEntry &host,
+                           RvSessionEntry &session ) noexcept;
+  void mark_sessions( RvHostEntry &host ) noexcept;
+  void stop_marked_sessions( RvHostEntry &host ) noexcept;
 
   void host_start( uint32_t host_id ) noexcept;
   void host_stop( uint32_t host_id ) noexcept;
-  Host & host_ref( uint32_t host_id,  bool is_status ) noexcept;
+  RvHostEntry & host_ref( uint32_t host_id,  bool is_status ) noexcept;
 
-  Session * first_session( Host &host,  size_t &pos ) noexcept;
-  Session * next_session( Host &host,  size_t &pos ) noexcept;
-  Session * get_session( uint32_t sess_id,  uint32_t sess_hash ) noexcept;
-  Session * get_session( uint32_t sess_id ) noexcept;
+  RvSessionEntry * first_session( RvHostEntry &host,  size_t &pos ) noexcept;
+  RvSessionEntry * next_session( RvHostEntry &host,  size_t &pos ) noexcept;
+  RvSessionEntry * get_session( uint32_t sess_id, uint32_t sess_hash ) noexcept;
+  RvSessionEntry * get_session( uint32_t sess_id ) noexcept;
 
-  void unsub_host( Host &host ) noexcept;
-  void unsub_session( Session &sess ) noexcept;
+  void unsub_host( RvHostEntry &host ) noexcept;
+  void unsub_session( RvSessionEntry &sess ) noexcept;
 
-  Session & session_start( uint32_t host_id,  const char *session_name,
+  RvSessionEntry & session_start( uint32_t host_id,  const char *session_name,
                            size_t session_len ) noexcept;
   void session_stop( uint32_t host_id,  const char *session_name,
                      size_t session_len ) noexcept;
-  Session & session_ref( const char *session_name,
+  RvSessionEntry & session_ref( const char *session_name,
                          size_t session_len ) noexcept;
 
-  void add_session( Host &host,  Session &sess ) noexcept;
-  void rem_session( Host &host,  Session &sess ) noexcept;
+  void add_session( RvHostEntry &host,  RvSessionEntry &sess ) noexcept;
+  void rem_session( RvHostEntry &host,  RvSessionEntry &sess ) noexcept;
 
-  void mark_subscriptions( Session &session ) noexcept;
-  void stop_marked_subscriptions( Session &session ) noexcept;
+  void mark_subscriptions( RvSessionEntry &session ) noexcept;
+  void stop_marked_subscriptions( RvSessionEntry &session ) noexcept;
 
-  Subscription * first_subject( Session &session,  size_t &pos ) noexcept;
-  Subscription * next_subject( Session &session,  size_t &pos ) noexcept;
-  Subscription * get_subject( uint32_t sub_id,  uint32_t sub_hash ) noexcept;
+  RvSubscription * first_subject( RvSessionEntry &session,
+                                  size_t &pos ) noexcept;
+  RvSubscription * next_subject( RvSessionEntry &session,
+                                 size_t &pos ) noexcept;
+  RvSubscription * get_subject( uint32_t sub_id,  uint32_t sub_hash ) noexcept;
 
-  Subscription & listen_start( Session &session,  const char *sub,
-                               size_t sub_len, bool &is_added ) noexcept;
-  Subscription & listen_ref( Session &session,  const char *sub,
-                             size_t sub_len,  bool &is_added ) noexcept;
-  Subscription & listen_stop( Session &session,  const char *sub,
-                              size_t sub_len,  bool &is_orphan ) noexcept;
-  Subscription & snapshot( const char *sub,  size_t sub_len ) noexcept;
+  RvSubscription & listen_start( RvSessionEntry &session,  const char *sub,
+                                 size_t sub_len, bool &is_added ) noexcept;
+  RvSubscription & listen_ref( RvSessionEntry &session,  const char *sub,
+                               size_t sub_len,  bool &is_added ) noexcept;
+  RvSubscription & listen_stop( RvSessionEntry &session,  const char *sub,
+                                size_t sub_len,  bool &is_orphan ) noexcept;
+  RvSubscription & snapshot( const char *sub,  size_t sub_len ) noexcept;
 };
 
 /*

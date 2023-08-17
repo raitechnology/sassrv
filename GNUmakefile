@@ -219,7 +219,7 @@ gen_files   :=
 ev_rv_defines  := -DSASSRV_VER=$(ver_build)
 $(objd)/ev_rv.o : .copr/Makefile
 $(objd)/ev_rv.fpic.o : .copr/Makefile
-libsassrv_files := ev_rv rv_host ev_rv_client submgr
+libsassrv_files := ev_rv rv_host ev_rv_client submgr ft
 libsassrv_cfile := $(addprefix src/, $(addsuffix .cpp, $(libsassrv_files)))
 libsassrv_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libsassrv_files)))
 libsassrv_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libsassrv_files)))
@@ -306,6 +306,18 @@ $(bind)/subtop$(exe): $(subtop_objs) $(subtop_libs) $(lnk_dep)
 
 all_exes    += $(bind)/subtop$(exe)
 all_depends += $(subtop_deps)
+
+ftmon_files := ftmon
+ftmon_cfile := $(addprefix src/, $(addsuffix .cpp, $(ftmon_files)))
+ftmon_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(ftmon_files)))
+ftmon_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(ftmon_files)))
+ftmon_libs  := $(sassrv_lib)
+ftmon_lnk   := $(sassrv_lib) $(lnk_lib)
+
+$(bind)/ftmon$(exe): $(ftmon_objs) $(ftmon_libs) $(lnk_dep)
+
+all_exes    += $(bind)/ftmon$(exe)
+all_depends += $(ftmon_deps)
 
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 

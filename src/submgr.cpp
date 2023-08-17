@@ -6,7 +6,6 @@
 #include <netinet/in.h>
 #include <sassrv/ev_rv_client.h>
 #include <sassrv/submgr.h>
-#include <raimd/md_msg.h>
 #include <raikv/ev_publish.h>
 
 using namespace rai;
@@ -90,9 +89,9 @@ static_assert( MAX_HOST_STATE == ( sizeof( host_state_str ) / sizeof( host_state
 static_assert( MAX_SESSION_STATE == ( sizeof( session_state_str ) / sizeof( session_state_str[ 0 ] ) ), "session_state_str" );
 #endif
 }
-const char *rai::sassrv::get_host_state_str( HostState s ) noexcept {
+const char *rai::sassrv::RvHostEntry::get_host_state_str( HostState s ) noexcept {
   return s < MAX_HOST_STATE ? host_state_str[ s ] : "bad host state"; }
-const char *rai::sassrv::get_session_state_str( SessionState s ) noexcept {
+const char *rai::sassrv::RvSessionEntry::get_session_state_str( SessionState s ) noexcept {
   return s < MAX_SESSION_STATE ? session_state_str[ s ] : "bad session state"; }
 
 static inline uint32_t hexval( char c ) {
@@ -115,8 +114,8 @@ static inline char * host_id_to_string( uint32_t host_id,  char *str ) {
   return str;
 }
 
-SubscriptionDB::SubscriptionDB( EvRvClient &c,
-                                SubscriptionListener *sl ) noexcept
+RvSubscriptionDB::RvSubscriptionDB( EvRvClient &c,
+                                    RvSubscriptionListener *sl ) noexcept
               : client( c ), cb( sl ), host_ht( 0 ), sess_ht( 0 ),
                 cur_mono( 0 ), next_session_ctr( 0 ), next_subject_ctr( 0 ),
                 soft_host_query( 0 ), first_free_host( 0 ), next_gc( 0 ),
@@ -128,23 +127,23 @@ SubscriptionDB::SubscriptionDB( EvRvClient &c,
 }
 
 uint32_t
-SubscriptionDB::next_session_id( void ) noexcept
+RvSubscriptionDB::next_session_id( void ) noexcept
 {
   return ++this->next_session_ctr;
 }
 
 uint32_t
-SubscriptionDB::next_subject_id( void ) noexcept
+RvSubscriptionDB::next_subject_id( void ) noexcept
 {
   return kv_hash_uint( ++this->next_subject_ctr );
 }
 
-void SubscriptionListener::on_listen_start( StartListener & ) noexcept {}
-void SubscriptionListener::on_listen_stop ( StopListener  & ) noexcept {}
-void SubscriptionListener::on_snapshot    ( SnapListener  & ) noexcept {}
+void RvSubscriptionListener::on_listen_start( Start & ) noexcept {}
+void RvSubscriptionListener::on_listen_stop ( Stop  & ) noexcept {}
+void RvSubscriptionListener::on_snapshot    ( Snap  & ) noexcept {}
 
 void
-SubscriptionDB::add_wildcard( const char *wildcard ) noexcept
+RvSubscriptionDB::add_wildcard( const char *wildcard ) noexcept
 {
   size_t len = ::strlen( wildcard );
   char * s   = (char *) ::malloc( len + 1 );
@@ -155,8 +154,8 @@ SubscriptionDB::add_wildcard( const char *wildcard ) noexcept
 }
 
 bool
-SubscriptionDB::match_rv_wildcard( const char *wild,  size_t wild_len,
-                                   const char *sub,  size_t sub_len ) noexcept
+RvSubscriptionDB::match_rv_wildcard( const char *wild,  size_t wild_len,
+                                     const char *sub,  size_t sub_len ) noexcept
 {
   const char * w   = wild,
              * end = &wild[ wild_len ];
@@ -190,7 +189,7 @@ SubscriptionDB::match_rv_wildcard( const char *wild,  size_t wild_len,
 }
 
 const char *
-SubscriptionDB::is_rv_wildcard( const char *wild,  size_t wild_len ) noexcept
+RvSubscriptionDB::is_rv_wildcard( const char *wild,  size_t wild_len ) noexcept
 {
   const char * w   = wild,
              * end = &wild[ wild_len ];
@@ -210,7 +209,7 @@ SubscriptionDB::is_rv_wildcard( const char *wild,  size_t wild_len ) noexcept
 }
 
 bool
-SubscriptionDB::is_matched( const char *sub,  size_t sub_len ) noexcept
+RvSubscriptionDB::is_matched( const char *sub,  size_t sub_len ) noexcept
 {
   if ( this->filters.count == 0 )
     return true;
@@ -224,24 +223,27 @@ SubscriptionDB::is_matched( const char *sub,  size_t sub_len ) noexcept
 }
 
 void
-SubscriptionDB::start_subscriptions( bool all ) noexcept
+RvSubscriptionDB::start_subscriptions( bool all ) noexcept
 {
   if ( this->is_subscribed )
     return;
-  this->is_subscribed = true;
+  this->is_subscribed     = true;
   this->is_all_subscribed = all;
-  this->cur_mono = this->client.poll.mono_ns / NS;
-  this->next_gc  = this->cur_mono + 131;
+  this->cur_mono          = this->client.poll.mono_ns / NS;
+  this->next_gc           = this->cur_mono + 131;
   this->do_subscriptions( true );
-  Host &host = this->host_ref( ntohl( this->client.ipaddr ), true );
-  host.state = RV_HOST_QUERY;
-  Session &session = this->session_start( host.host_id, this->client.session,
-                                          this->client.session_len );
-  session.state = RV_SESSION_SELF;
+
+  RvHostEntry &host = this->host_ref( ntohl( this->client.ipaddr ), true );
+  host.state = RvHostEntry::RV_HOST_QUERY;
+
+  RvSessionEntry &session =
+    this->session_start( host.host_id, this->client.session,
+                         this->client.session_len );
+  session.state = RvSessionEntry::RV_SESSION_SELF;
 }
 
 void
-SubscriptionDB::stop_subscriptions( void ) noexcept
+RvSubscriptionDB::stop_subscriptions( void ) noexcept
 {
   if ( ! this->is_subscribed )
     return;
@@ -250,7 +252,7 @@ SubscriptionDB::stop_subscriptions( void ) noexcept
 }
 
 void
-SubscriptionDB::do_subscriptions( bool is_subscribe ) noexcept
+RvSubscriptionDB::do_subscriptions( bool is_subscribe ) noexcept
 {
   const char * un = ( is_subscribe ? "" : "un" );
   for ( int i = 0; i < MAX_SUB_KIND; i++ ) {
@@ -273,10 +275,10 @@ SubscriptionDB::do_subscriptions( bool is_subscribe ) noexcept
 }
 
 void
-SubscriptionDB::do_wild_subscription( Filter &f,  bool is_subscribe,
-                                      int k ) noexcept
+RvSubscriptionDB::do_wild_subscription( Filter &f,  bool is_subscribe,
+                                        int k ) noexcept
 {
-  const char * un = ( is_subscribe ? "" : "un" );
+  const char     * un    = ( is_subscribe ? "" : "un" );
   const SubMatch & match = rv_info_sub[ k ];
   size_t           len   = f.wild_len + match.len;
   CatMalloc        sub( len );
@@ -293,8 +295,8 @@ SubscriptionDB::do_wild_subscription( Filter &f,  bool is_subscribe,
     this->client.unsubscribe( sub.start, sub.len() );
 }
 
-Host &
-SubscriptionDB::host_ref( uint32_t host_id,  bool is_status ) noexcept
+RvHostEntry &
+RvSubscriptionDB::host_ref( uint32_t host_id,  bool is_status ) noexcept
 {
   uint32_t i;
   size_t   pos;
@@ -306,25 +308,26 @@ SubscriptionDB::host_ref( uint32_t host_id,  bool is_status ) noexcept
   if ( ! this->host_ht->find( host_id, pos, i ) ) {
     for (;;) {
       if ( this->first_free_host == this->host_tab.count ||
-           this->host_tab.ptr[ this->first_free_host ].state == RV_HOST_STOP )
+           this->host_tab.ptr[
+             this->first_free_host ].state == RvHostEntry::RV_HOST_STOP )
         break;
     }
     i = this->first_free_host++;
     this->hosts.active++;
     this->host_ht->set_rsz( this->host_ht, host_id, pos, i );
-    Host & host = ( i < this->host_tab.count ? this->host_tab.ptr[ i ] :
-                    this->host_tab.push() );
+    RvHostEntry & host = ( i < this->host_tab.count ? this->host_tab.ptr[ i ] :
+                           this->host_tab.push() );
     host.start( host_id, this->cur_mono, false, is_status );
     if ( this->mout != NULL ) {
-      if ( host.state == RV_HOST_QUERY )
+      if ( host.state == RvHostEntry::RV_HOST_QUERY )
         this->mout->printf( "! host %08X query, no start\n", host_id );
     }
     return host;
   }
+  RvHostEntry          & host      = this->host_tab.ptr[ i ];
+  RvHostEntry::HostState old_state = host.state;
 
-  Host    & host = this->host_tab.ptr[ i ];
-  HostState old_state = host.state;
-  if ( host.state == RV_HOST_STOP ) {
+  if ( host.state == RvHostEntry::RV_HOST_STOP ) {
     this->hosts.active++;
     host.start( host_id, this->cur_mono, false, is_status );
   }
@@ -333,14 +336,14 @@ SubscriptionDB::host_ref( uint32_t host_id,  bool is_status ) noexcept
   else
     host.ref( this->cur_mono );
   if ( this->mout != NULL ) {
-    if ( old_state != host.state && host.state == RV_HOST_QUERY )
+    if ( old_state != host.state && host.state == RvHostEntry::RV_HOST_QUERY )
       this->mout->printf( "! host %08X query, no start\n", host_id );
   }
   return host;
 }
 
 void
-SubscriptionDB::host_start( uint32_t host_id ) noexcept
+RvSubscriptionDB::host_start( uint32_t host_id ) noexcept
 {
   uint32_t i;
   size_t   pos;
@@ -351,15 +354,16 @@ SubscriptionDB::host_start( uint32_t host_id ) noexcept
   if ( ! this->host_ht->find( host_id, pos, i ) ) {
     i = this->host_tab.count;
     this->host_ht->set_rsz( this->host_ht, host_id, pos, i );
-    Host & host = this->host_tab.push();
+    RvHostEntry & host = this->host_tab.push();
     host.start( host_id, this->cur_mono, true, false );
   }
   else {
-    Host   & host = this->host_tab.ptr[ i ];
-    HostState old_state = host.state;
+    RvHostEntry          & host      = this->host_tab.ptr[ i ];
+    RvHostEntry::HostState old_state = host.state;
+
     host.start( host_id, this->cur_mono, true, false );
-    if ( old_state != RV_HOST_STOP ) {
-      host.state = RV_HOST_QUERY;
+    if ( old_state != RvHostEntry::RV_HOST_STOP ) {
+      host.state = RvHostEntry::RV_HOST_QUERY;
       if ( this->mout != NULL )
         this->mout->printf( "! query %08X, start with no host stop\n", host_id );
     }
@@ -367,26 +371,26 @@ SubscriptionDB::host_start( uint32_t host_id ) noexcept
 }
 
 void
-SubscriptionDB::host_stop( uint32_t host_id ) noexcept
+RvSubscriptionDB::host_stop( uint32_t host_id ) noexcept
 {
   uint32_t i;
   size_t   pos;
   if ( this->mout != NULL )
     this->mout->printf( "> host stop %08X\n", host_id );
   if ( this->host_ht->find( host_id, pos, i ) ) {
-    Host &host = this->host_tab.ptr[ i ];
+    RvHostEntry &host = this->host_tab.ptr[ i ];
     this->unsub_host( host );
   }
 }
 
 void
-SubscriptionDB::unsub_host( Host &host ) noexcept
+RvSubscriptionDB::unsub_host( RvHostEntry &host ) noexcept
 {
   if ( this->mout != NULL )
     this->mout->printf( "> unsub host %08X\n", host.host_id );
   size_t pos;
-  for ( Session * entry = this->first_session( host, pos ); entry != NULL;
-        entry = this->next_session( host, pos ) ) {
+  for ( RvSessionEntry * entry = this->first_session( host, pos );
+        entry != NULL; entry = this->next_session( host, pos ) ) {
     this->unsub_session( *entry );
   }
   host.stop( this->cur_mono );
@@ -395,20 +399,20 @@ SubscriptionDB::unsub_host( Host &host ) noexcept
 }
 
 void
-SubscriptionDB::unsub_session( Session &sess ) noexcept
+RvSubscriptionDB::unsub_session( RvSessionEntry &sess ) noexcept
 {
   if ( this->mout != NULL )
     this->mout->printf( "> unsub session %08X.%u\n", sess.host_id,
                         sess.session_id );
   size_t pos;
-  for ( Subscription * sub = this->first_subject( sess, pos ); sub != NULL;
+  for ( RvSubscription * sub = this->first_subject( sess, pos ); sub != NULL;
         sub = this->next_subject( sess, pos ) ) {
     if ( --sub->refcnt == 0 ) {
       this->subscriptions.active--;
       this->subscriptions.removed++;
     }
     if ( this->cb != NULL ) {
-      StopListener op( sess, *sub, false, false );
+      RvSubscriptionListener::Stop op( sess, *sub, false, false );
       this->cb->on_listen_stop( op );
     }
   }
@@ -417,29 +421,29 @@ SubscriptionDB::unsub_session( Session &sess ) noexcept
   sess.stop( this->cur_mono );
 }
 
-Session &
-SubscriptionDB::session_start( uint32_t host_id,  const char *session_name,
-                               size_t session_len ) noexcept
+RvSessionEntry &
+RvSubscriptionDB::session_start( uint32_t host_id,  const char *session_name,
+                                 size_t session_len ) noexcept
 {
   if ( this->mout != NULL )
     this->mout->printf( "> session start %08X %.*s\n", host_id,
                         (int) session_len, session_name );
-  Host       & host = this->host_ref( host_id, false );
-  uint32_t     hash = kv_crc_c( session_name, session_len, 0 );
-  RouteLoc     loc;
-  Session    * entry;
-  SessionState old_state = RV_SESSION_STOP;
+  RvHostEntry    & host = this->host_ref( host_id, false );
+  uint32_t         hash = kv_crc_c( session_name, session_len, 0 );
+  RouteLoc         loc;
+  RvSessionEntry * entry;
+  RvSessionEntry::SessionState old_state = RvSessionEntry::RV_SESSION_STOP;
 
   entry = this->session_tab.upsert( hash, session_name, session_len, loc );
   if ( ! loc.is_new ) {
-    if ( entry->state != RV_SESSION_STOP ) {
+    if ( entry->state != RvSessionEntry::RV_SESSION_STOP ) {
       old_state = entry->state;
       this->rem_session( host, *entry ); /* no stop session */
     }
   }
   entry->start( host_id, this->next_session_id(), this->cur_mono, true );
-  if ( old_state != RV_SESSION_STOP ) {
-    entry->state = RV_SESSION_QUERY;
+  if ( old_state != RvSessionEntry::RV_SESSION_STOP ) {
+    entry->state = RvSessionEntry::RV_SESSION_QUERY;
     if ( this->mout != NULL )
       this->mout->printf( "! query %08X %.*s, start with no sesion stop\n",
                           host_id, entry->len, entry->value );
@@ -449,37 +453,37 @@ SubscriptionDB::session_start( uint32_t host_id,  const char *session_name,
 }
 
 void
-SubscriptionDB::session_stop( uint32_t host_id,  const char *session_name,
-                              size_t session_len ) noexcept
+RvSubscriptionDB::session_stop( uint32_t host_id,  const char *session_name,
+                                size_t session_len ) noexcept
 {
   if ( this->mout != NULL )
     this->mout->printf( "> session stop %08X %.*s\n", host_id,
                        (int) session_len, session_name );
-  Host    & host = this->host_ref( host_id, false );
-  uint32_t  hash = kv_crc_c( session_name, session_len, 0 );
-  RouteLoc  loc;
-  Session * entry;
+  RvHostEntry    & host = this->host_ref( host_id, false );
+  uint32_t         hash = kv_crc_c( session_name, session_len, 0 );
+  RouteLoc         loc;
+  RvSessionEntry * entry;
 
   entry = this->session_tab.find( hash, session_name, session_len, loc );
   if ( entry != NULL )
     this->rem_session( host, *entry );
 }
 
-Session &
-SubscriptionDB::session_ref( const char *session_name,
-                             size_t session_len ) noexcept
+RvSessionEntry &
+RvSubscriptionDB::session_ref( const char *session_name,
+                               size_t session_len ) noexcept
 {
   if ( this->mout != NULL )
     this->mout->printf( "> session ref %.*s\n",
                        (int) session_len, session_name );
-  uint32_t  hash = kv_crc_c( session_name, session_len, 0 );
-  RouteLoc  loc;
-  Session * entry;
+  uint32_t         hash = kv_crc_c( session_name, session_len, 0 );
+  RouteLoc         loc;
+  RvSessionEntry * entry;
 
   entry = this->session_tab.upsert( hash, session_name, session_len, loc );
-  if ( loc.is_new || entry->state == RV_SESSION_STOP ) {
-    uint32_t host_id = string_to_host_id( session_name );
-    Host   & host    = this->host_ref( host_id, false );
+  if ( loc.is_new || entry->state == RvSessionEntry::RV_SESSION_STOP ) {
+    uint32_t      host_id = string_to_host_id( session_name );
+    RvHostEntry & host    = this->host_ref( host_id, false );
     entry->start( host_id, this->next_session_id(), this->cur_mono, false );
     this->add_session( host, *entry );
   }
@@ -488,7 +492,8 @@ SubscriptionDB::session_ref( const char *session_name,
 }
 
 void
-SubscriptionDB::add_session( Host &host,  Session &sess ) noexcept
+RvSubscriptionDB::add_session( RvHostEntry &host,
+                               RvSessionEntry &sess ) noexcept
 {
   if ( host.add_session( sess ) ) {
     this->sess_ht->upsert_rsz( this->sess_ht, sess.session_id, sess.hash );
@@ -497,7 +502,8 @@ SubscriptionDB::add_session( Host &host,  Session &sess ) noexcept
 }
 
 void
-SubscriptionDB::rem_session( Host &host,  Session &sess ) noexcept
+RvSubscriptionDB::rem_session( RvHostEntry &host,
+                               RvSessionEntry &sess ) noexcept
 {
   this->unsub_session( sess );
   if ( host.rem_session( sess ) ) {
@@ -506,9 +512,9 @@ SubscriptionDB::rem_session( Host &host,  Session &sess ) noexcept
   }
 }
 
-Subscription &
-SubscriptionDB::listen_start( Session &session,  const char *sub,
-                              size_t sub_len,  bool &is_added ) noexcept
+RvSubscription &
+RvSubscriptionDB::listen_start( RvSessionEntry &session,  const char *sub,
+                                size_t sub_len,  bool &is_added ) noexcept
 {
   if ( this->mout != NULL )
     this->mout->printf( "> listen start %.*s %.*s\n",
@@ -516,15 +522,15 @@ SubscriptionDB::listen_start( Session &session,  const char *sub,
   return this->listen_ref( session, sub, sub_len, is_added );
 }
 
-Subscription &
-SubscriptionDB::listen_ref( Session & session,  const char *sub,
-                            size_t sub_len,  bool &is_added ) noexcept
+RvSubscription &
+RvSubscriptionDB::listen_ref( RvSessionEntry & session,  const char *sub,
+                              size_t sub_len,  bool &is_added ) noexcept
 {
   if ( sub_len > 0 && sub[ sub_len - 1 ] == '\0' )
     sub_len--;
-  RouteLoc       loc;
-  uint32_t       subj_hash = kv_crc_c( sub, sub_len, 0 );
-  Subscription * script;
+  RouteLoc         loc;
+  uint32_t         subj_hash = kv_crc_c( sub, sub_len, 0 );
+  RvSubscription * script;
 
   script = this->sub_tab.upsert( subj_hash, sub, sub_len, loc );
   if ( loc.is_new )
@@ -537,16 +543,16 @@ SubscriptionDB::listen_ref( Session & session,  const char *sub,
   return *script;
 }
 
-Subscription &
-SubscriptionDB::listen_stop( Session &session,  const char *sub,
-                             size_t sub_len,  bool &is_orphan ) noexcept
+RvSubscription &
+RvSubscriptionDB::listen_stop( RvSessionEntry &session,  const char *sub,
+                               size_t sub_len,  bool &is_orphan ) noexcept
 {
   if ( this->mout != NULL )
     this->mout->printf( "> listen stop %.*s %.*s\n",
                         session.len, session.value, (int) sub_len, sub );
-  RouteLoc       loc;
-  uint32_t       subj_hash = kv_crc_c( sub, sub_len, 0 );
-  Subscription * script;
+  RouteLoc         loc;
+  uint32_t         subj_hash = kv_crc_c( sub, sub_len, 0 );
+  RvSubscription * script;
 
   script    = this->sub_tab.find( subj_hash, sub, sub_len, loc );
   is_orphan = ( script == NULL );
@@ -570,20 +576,20 @@ SubscriptionDB::listen_stop( Session &session,  const char *sub,
     if ( this->mout != NULL )
       this->mout->printf( "! listen stop without start %.*s %.*s\n",
                         session.len, session.value, (int) sub_len, sub );
-    if ( session.state != RV_SESSION_SELF )
-      session.state = RV_SESSION_QUERY;
+    if ( session.state != RvSessionEntry::RV_SESSION_SELF )
+      session.state = RvSessionEntry::RV_SESSION_QUERY;
   }
   return *script;
 }
 
-Subscription &
-SubscriptionDB::snapshot( const char *sub,  size_t sub_len ) noexcept
+RvSubscription &
+RvSubscriptionDB::snapshot( const char *sub,  size_t sub_len ) noexcept
 {
   if ( this->mout != NULL )
     this->mout->printf( "> snapshot %.*s\n", (int) sub_len, sub );
-  RouteLoc       loc;
-  uint32_t       subj_hash = kv_crc_c( sub, sub_len, 0 );
-  Subscription * script;
+  RouteLoc         loc;
+  uint32_t         subj_hash = kv_crc_c( sub, sub_len, 0 );
+  RvSubscription * script;
 
   script = this->sub_tab.find( subj_hash, sub, sub_len, loc );
   if ( script == NULL ) {
@@ -593,8 +599,8 @@ SubscriptionDB::snapshot( const char *sub,  size_t sub_len ) noexcept
   return *script;
 }
 
-Session *
-SubscriptionDB::first_session( Host &host,  size_t &pos ) noexcept
+RvSessionEntry *
+RvSubscriptionDB::first_session( RvHostEntry &host,  size_t &pos ) noexcept
 {
   uint32_t sess_id, sess_hash;
   if ( host.sess_ht == NULL )
@@ -605,8 +611,8 @@ SubscriptionDB::first_session( Host &host,  size_t &pos ) noexcept
   return this->get_session( sess_id, sess_hash );
 }
 
-Session *
-SubscriptionDB::next_session( Host &host,  size_t &pos ) noexcept
+RvSessionEntry *
+RvSubscriptionDB::next_session( RvHostEntry &host,  size_t &pos ) noexcept
 {
   uint32_t sess_id, sess_hash;
   if ( ! host.sess_ht->next( pos ) )
@@ -615,11 +621,11 @@ SubscriptionDB::next_session( Host &host,  size_t &pos ) noexcept
   return this->get_session( sess_id, sess_hash );
 }
 
-Session *
-SubscriptionDB::get_session( uint32_t sess_id,  uint32_t sess_hash ) noexcept
+RvSessionEntry *
+RvSubscriptionDB::get_session( uint32_t sess_id,  uint32_t sess_hash ) noexcept
 {
-  RouteLoc  loc;
-  Session * session = this->session_tab.find_by_hash( sess_hash, loc );
+  RouteLoc         loc;
+  RvSessionEntry * session = this->session_tab.find_by_hash( sess_hash, loc );
   for (;;) {
     if ( session == NULL || session->session_id == sess_id )
       return session;
@@ -627,10 +633,10 @@ SubscriptionDB::get_session( uint32_t sess_id,  uint32_t sess_hash ) noexcept
   }
 }
 
-Session *
-SubscriptionDB::get_session( uint32_t sess_id ) noexcept
+RvSessionEntry *
+RvSubscriptionDB::get_session( uint32_t sess_id ) noexcept
 {
-  size_t pos;
+  size_t   pos;
   uint32_t sess_hash;
   if ( this->sess_ht->find( sess_id, pos, sess_hash ) )
     return this->get_session( sess_id, sess_hash );
@@ -638,10 +644,10 @@ SubscriptionDB::get_session( uint32_t sess_id ) noexcept
 }
 
 void
-SubscriptionDB::mark_sessions( Host &host ) noexcept
+RvSubscriptionDB::mark_sessions( RvHostEntry &host ) noexcept
 {
-  Session * entry;
-  size_t pos;
+  RvSessionEntry * entry;
+  size_t           pos;
   if ( (entry = this->first_session( host, pos )) != NULL ) {
     do {
       if ( entry->ref_mono < host.query_mono )
@@ -651,13 +657,13 @@ SubscriptionDB::mark_sessions( Host &host ) noexcept
 }
 
 void
-SubscriptionDB::stop_marked_sessions( Host &host ) noexcept
+RvSubscriptionDB::stop_marked_sessions( RvHostEntry &host ) noexcept
 {
-  Session * entry;
-  size_t    pos;
-  uint32_t  end_sess_hash[ 256 ],
-            end_sess_id[ 256 ];
-  uint32_t  i = 0;
+  RvSessionEntry * entry;
+  size_t           pos;
+  uint32_t         end_sess_hash[ 256 ],
+                   end_sess_id[ 256 ];
+  uint32_t         i = 0;
 
   for (;;) {
     if ( (entry = this->first_session( host, pos )) != NULL ) {
@@ -673,8 +679,8 @@ SubscriptionDB::stop_marked_sessions( Host &host ) noexcept
             break;
         }
         else {
-          if ( entry->state != RV_SESSION_SELF ) {
-            entry->state = RV_SESSION_QUERY;
+          if ( entry->state != RvSessionEntry::RV_SESSION_SELF ) {
+            entry->state = RvSessionEntry::RV_SESSION_QUERY;
             if ( this->mout != NULL ) {
               this->mout->printf( "! query %08X %.*s, marked\n", host.host_id,
                                   (int) entry->len, entry->value );
@@ -692,8 +698,8 @@ SubscriptionDB::stop_marked_sessions( Host &host ) noexcept
   }
 }
 
-Subscription *
-SubscriptionDB::first_subject( Session &session,  size_t &pos ) noexcept
+RvSubscription *
+RvSubscriptionDB::first_subject( RvSessionEntry &session, size_t &pos ) noexcept
 {
   uint32_t sub_id, sub_hash;
   if ( session.sub_ht == NULL )
@@ -704,8 +710,8 @@ SubscriptionDB::first_subject( Session &session,  size_t &pos ) noexcept
   return this->get_subject( sub_id, sub_hash );
 }
 
-Subscription *
-SubscriptionDB::next_subject( Session &session,  size_t &pos ) noexcept
+RvSubscription *
+RvSubscriptionDB::next_subject( RvSessionEntry &session,  size_t &pos ) noexcept
 {
   uint32_t sub_id, sub_hash;
   if ( ! session.sub_ht->next( pos ) )
@@ -714,11 +720,11 @@ SubscriptionDB::next_subject( Session &session,  size_t &pos ) noexcept
   return this->get_subject( sub_id, sub_hash );
 }
 
-Subscription *
-SubscriptionDB::get_subject( uint32_t sub_id,  uint32_t sub_hash ) noexcept
+RvSubscription *
+RvSubscriptionDB::get_subject( uint32_t sub_id,  uint32_t sub_hash ) noexcept
 {
-  RouteLoc       loc;
-  Subscription * sub = this->sub_tab.find_by_hash( sub_hash, loc );
+  RouteLoc         loc;
+  RvSubscription * sub = this->sub_tab.find_by_hash( sub_hash, loc );
   for (;;) {
     if ( sub == NULL || sub->subject_id == sub_id )
       return sub;
@@ -727,9 +733,9 @@ SubscriptionDB::get_subject( uint32_t sub_id,  uint32_t sub_hash ) noexcept
 }
 
 void
-SubscriptionDB::mark_subscriptions( Session &session ) noexcept
+RvSubscriptionDB::mark_subscriptions( RvSessionEntry &session ) noexcept
 {
-  Subscription * sub;
+  RvSubscription * sub;
   size_t pos;
   if ( (sub = this->first_subject( session, pos )) != NULL ) {
     do {
@@ -740,13 +746,13 @@ SubscriptionDB::mark_subscriptions( Session &session ) noexcept
 }
 
 void
-SubscriptionDB::stop_marked_subscriptions( Session &session ) noexcept
+RvSubscriptionDB::stop_marked_subscriptions( RvSessionEntry &session ) noexcept
 {
-  Subscription * sub;
-  size_t         pos;
-  uint32_t       end_sub_hash[ 256 ],
-                 end_sub_id[ 256 ];
-  uint32_t       i = 0;
+  RvSubscription * sub;
+  size_t           pos;
+  uint32_t         end_sub_hash[ 256 ],
+                   end_sub_id[ 256 ];
+  uint32_t         i = 0;
 
   for (;;) {
     if ( (sub = this->first_subject( session, pos )) != NULL ) {
@@ -772,7 +778,7 @@ SubscriptionDB::stop_marked_subscriptions( Session &session ) noexcept
           this->subscriptions.removed++;
         }
         if ( this->cb != NULL ) {
-          StopListener op( session, *sub, false, false );
+          RvSubscriptionListener::Stop op( session, *sub, false, false );
           this->cb->on_listen_stop( op );
         }
       }
@@ -783,9 +789,9 @@ SubscriptionDB::stop_marked_subscriptions( Session &session ) noexcept
 }
 
 void
-SubscriptionDB::send_host_query( uint32_t i ) noexcept
+RvSubscriptionDB::send_host_query( uint32_t i ) noexcept
 {
-  Host & host = this->host_tab.ptr[ i ];
+  RvHostEntry & host = this->host_tab.ptr[ i ];
 
   if ( host.query_mono + HOST_QUERY_INTERVAL > this->cur_mono )
     return;
@@ -817,6 +823,7 @@ SubscriptionDB::send_host_query( uint32_t i ) noexcept
                  msg.buf, msg.off, this->client.sub_route, this->client,
                  0, RVMSG_TYPE_ID );
   this->client.publish( pub );
+  this->client.idle_push_write();
   host.query_mono = this->cur_mono;
 
   if ( this->mout != NULL ) {
@@ -825,7 +832,8 @@ SubscriptionDB::send_host_query( uint32_t i ) noexcept
 }
 
 void
-SubscriptionDB::send_session_query( Host &host,  Session &session ) noexcept
+RvSubscriptionDB::send_session_query( RvHostEntry &host,
+                                      RvSessionEntry &session ) noexcept
 {
   if ( session.query_mono + SESSION_QUERY_INTERVAL > this->cur_mono )
     return;
@@ -834,7 +842,7 @@ SubscriptionDB::send_session_query( Host &host,  Session &session ) noexcept
       this->mout->printf( "! session %.*s timeout intval reached, query host %08X\n",
                           session.len, session.value, host.host_id );
     }
-    host.state = RV_HOST_QUERY;
+    host.state = RvHostEntry::RV_HOST_QUERY;
     return;
   }
   char     daemon_inbox[ MAX_RV_INBOX_LEN ],
@@ -846,7 +854,7 @@ SubscriptionDB::send_session_query( Host &host,  Session &session ) noexcept
   inbox_len = this->client.make_inbox( inbox, i + this->session_inbox_base );
   if ( session.len == this->client.session_len &&
        ::memcmp( session.value, this->client.session, session.len ) == 0 ) {
-    session.state = RV_SESSION_SELF;
+    session.state = RvSessionEntry::RV_SESSION_SELF;
   }
   else {
     MDMsgMem    mem;
@@ -863,6 +871,7 @@ SubscriptionDB::send_session_query( Host &host,  Session &session ) noexcept
                    msg.buf, msg.off, this->client.sub_route, this->client,
                    0, RVMSG_TYPE_ID );
     this->client.publish( pub );
+    this->client.idle_push_write();
     session.query_mono = this->cur_mono;
 
     if ( this->mout != NULL ) {
@@ -873,24 +882,25 @@ SubscriptionDB::send_session_query( Host &host,  Session &session ) noexcept
 }
 
 void
-SubscriptionDB::process_events( void ) noexcept
+RvSubscriptionDB::process_events( void ) noexcept
 {
   this->cur_mono = this->client.poll.mono_ns / NS;
 
   while ( this->soft_host_query > 0 ) {
     if ( this->soft_host_query < this->host_tab.count &&
-         this->host_tab.ptr[ this->soft_host_query ].state == RV_HOST_QUERY )
+         this->host_tab.ptr[
+           this->soft_host_query ].state == RvHostEntry::RV_HOST_QUERY )
       break;
-    Host & host = this->host_tab.ptr[ --this->soft_host_query ];
-    if ( host.state != RV_HOST_STOP ) {
-      host.state = RV_HOST_QUERY;
+    RvHostEntry & host = this->host_tab.ptr[ --this->soft_host_query ];
+    if ( host.state != RvHostEntry::RV_HOST_STOP ) {
+      host.state = RvHostEntry::RV_HOST_QUERY;
       break;
     }
   }
   for ( uint32_t i = 0; i < this->host_tab.count; i++ ) {
-    Host & host = this->host_tab.ptr[ i ];
+    RvHostEntry & host = this->host_tab.ptr[ i ];
     uint32_t secs;
-    if ( host.state == RV_HOST_STOP )
+    if ( host.state == RvHostEntry::RV_HOST_STOP )
       continue;
     if ( (secs = host.check_query_needed( this->cur_mono )) > 0 ) {
       char buf[ 32 ];
@@ -907,17 +917,17 @@ SubscriptionDB::process_events( void ) noexcept
           this->mout->printf( "! status time %s\n", hms( sta, buf) );
       }
     }
-    if ( host.state == RV_HOST_QUERY )
+    if ( host.state == RvHostEntry::RV_HOST_QUERY )
       this->send_host_query( i );
-    if ( host.state < RV_HOST_QUERY && host.sess_ht != NULL ) {
-      Session * entry;
-      size_t    pos;
+    if ( host.state < RvHostEntry::RV_HOST_QUERY && host.sess_ht != NULL ) {
+      RvSessionEntry * entry;
+      size_t           pos;
 
       if ( (entry = this->first_session( host, pos )) != NULL ) {
         do {
-          if ( entry->state == RV_SESSION_QUERY ) {
+          if ( entry->state == RvSessionEntry::RV_SESSION_QUERY ) {
             this->send_session_query( host, *entry );
-            if ( host.state == RV_HOST_QUERY ) {
+            if ( host.state == RvHostEntry::RV_HOST_QUERY ) {
               this->send_host_query( i );
               break;
             }
@@ -935,7 +945,7 @@ SubscriptionDB::process_events( void ) noexcept
 }
 
 bool
-SubscriptionDB::process_pub( EvPublish &pub ) noexcept
+RvSubscriptionDB::process_pub( EvPublish &pub ) noexcept
 {
   const char     * subject     = pub.subject;
   size_t           subject_len = pub.subject_len;
@@ -1029,13 +1039,13 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
 
     switch ( match->kind ) {
       case IS_HOST_STATUS  : {
-        Host &host = this->host_ref( id, true );
+        RvHostEntry &host = this->host_ref( id, true );
         if ( host.data_loss != idl + odl ) {
           if ( this->mout != NULL ) {
             this->mout->printf( "! query host %08X dataloss %u -> %u\n",
                                 host.host_id, host.data_loss, idl + odl );
           }
-          host.state = RV_HOST_QUERY;
+          host.state = RvHostEntry::RV_HOST_QUERY;
           host.data_loss = idl + odl;
           if ( host.host_id == ntohl( this->client.ipaddr ) )
             this->soft_host_query = this->host_tab.count;
@@ -1047,28 +1057,29 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
       case IS_SESSION_START: this->session_start( id, x, xlen ); break;
       case IS_SESSION_STOP : this->session_stop( id, x, xlen ); break;
       case IS_LISTEN_START : {
-        Session & session  = this->session_ref( x, xlen );
-        if ( session.state == RV_SESSION_SELF )
+        RvSessionEntry & session  = this->session_ref( x, xlen );
+        if ( session.state == RvSessionEntry::RV_SESSION_SELF )
           break;
-        bool           is_added = false;
-        Subscription & script   = this->listen_start( session, s, slen,
-                                                      is_added );
+        bool             is_added = false;
+        RvSubscription & script   = this->listen_start( session, s, slen,
+                                                        is_added );
         if ( this->cb != NULL ) {
-          StartListener op( session, script, (const char *) pub.reply,
-                            pub.reply_len, true );
+          RvSubscriptionListener::Start
+            op( session, script, (const char *) pub.reply,
+                pub.reply_len, true );
           this->cb->on_listen_start( op );
         }
         break;
       }
       case IS_LISTEN_STOP: {
-        Session & session = this->session_ref( x, xlen );
-        if ( session.state == RV_SESSION_SELF )
+        RvSessionEntry & session = this->session_ref( x, xlen );
+        if ( session.state == RvSessionEntry::RV_SESSION_SELF )
           break;
-        bool           is_orphan = false;
-        Subscription & script    = this->listen_stop( session, s, slen,
-                                                      is_orphan );
+        bool             is_orphan = false;
+        RvSubscription & script    = this->listen_stop( session, s, slen,
+                                                        is_orphan );
         if ( this->cb != NULL ) {
-          StopListener op( session, script, is_orphan, true );
+          RvSubscriptionListener::Stop op( session, script, is_orphan, true );
           this->cb->on_listen_stop( op );
         }
         break;
@@ -1076,10 +1087,10 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
       /* _SNAP.<subject> = strip 6 char prefix */
       case IS_SNAP:
         if ( this->cb != NULL && subject_len > 6 ) {
-          Subscription & script =
+          RvSubscription & script =
             this->snapshot( &subject[ 6 ], subject_len - 6 );
-          SnapListener op( script, (const char *) pub.reply, pub.reply_len,
-                           flags );
+          RvSubscriptionListener::Snap
+            op( script, (const char *) pub.reply, pub.reply_len, flags );
           this->cb->on_snapshot( op );
         }
         break;
@@ -1104,8 +1115,8 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
     * null : string  23 : "C0A80010.601FB1D31D6DE" */
     if ( is_host_query ) {
       if ( i < this->host_tab.count ) {
-        Host & host = this->host_tab.ptr[ i ];
-        if ( host.state == RV_HOST_QUERY ) {
+        RvHostEntry & host = this->host_tab.ptr[ i ];
+        if ( host.state == RvHostEntry::RV_HOST_QUERY ) {
           this->mark_sessions( host );
           for ( bool b = rd.first( nm ); b; b = rd.next( nm ) ) {
             char * x    = NULL;
@@ -1114,7 +1125,7 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
               this->session_ref( x, xlen );
           }
           this->stop_marked_sessions( host );
-          host.state = RV_HOST_STATUS;
+          host.state = RvHostEntry::RV_HOST_STATUS;
         }
       }
     }
@@ -1128,8 +1139,9 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
     * null : subject  19 : RSF.EQITY.5.N
     * end  : int       4 : 1 */
     else {
-      Session * session = this->get_session( i );
-      if ( session != NULL && session->state == RV_SESSION_QUERY ) {
+      RvSessionEntry * session = this->get_session( i );
+      if ( session != NULL &&
+           session->state == RvSessionEntry::RV_SESSION_QUERY ) {
         this->mark_subscriptions( *session );
         for ( bool b = rd.first( nm ); b; b = rd.next( nm ) ) {
           char * sub    = NULL;
@@ -1137,19 +1149,20 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
           if ( nm.fnamelen == 0 && rd.get_string( sub, sub_len ) &&
                this->is_matched( sub, sub_len ) ) {
             bool is_added;
-            Subscription & script = this->listen_ref( *session, sub, sub_len,
-                                                      is_added );
+            RvSubscription & script = this->listen_ref( *session, sub, sub_len,
+                                                        is_added );
             if ( is_added ) {
               if ( this->cb != NULL ) {
-                StartListener op( *session, script, NULL, 0, false );
+                RvSubscriptionListener::Start
+                  op( *session, script, NULL, 0, false );
                 this->cb->on_listen_start( op );
               }
             }
           }
         }
-        session->state = RV_SESSION_RV5;
+        session->state = RvSessionEntry::RV_SESSION_RV5;
         if ( session->has_daemon() )
-          session->state = RV_SESSION_RV7;
+          session->state = RvSessionEntry::RV_SESSION_RV7;
         this->stop_marked_subscriptions( *session );
       }
     }
@@ -1158,13 +1171,13 @@ SubscriptionDB::process_pub( EvPublish &pub ) noexcept
 }
 
 void
-SubscriptionDB::gc( void ) noexcept
+RvSubscriptionDB::gc( void ) noexcept
 {
   RouteLoc loc;
   uint32_t sub_rem = 0, sess_rem = 0;
   if ( this->subscriptions.removed > this->subscriptions.active ) {
     this->subscriptions.removed = 0;
-    for ( Subscription *sub = this->sub_tab.first( loc ); sub != NULL; ) {
+    for ( RvSubscription *sub = this->sub_tab.first( loc ); sub != NULL; ) {
       if ( sub->refcnt == 0 ) {
         sub = this->sub_tab.remove_and_next( sub, loc );
         sub_rem++;
@@ -1175,8 +1188,9 @@ SubscriptionDB::gc( void ) noexcept
   }
   if ( this->sessions.removed > this->sessions.active ) {
     this->sessions.removed = 0;
-    for ( Session *entry = this->session_tab.first( loc ); entry != NULL; ) {
-      if ( entry->state == RV_SESSION_STOP ) {
+    for ( RvSessionEntry *entry = this->session_tab.first( loc );
+          entry != NULL; ) {
+      if ( entry->state == RvSessionEntry::RV_SESSION_STOP ) {
         entry = this->session_tab.remove_and_next( entry, loc );
         sess_rem++;
       }
@@ -1188,7 +1202,7 @@ SubscriptionDB::gc( void ) noexcept
        this->first_free_host == this->host_tab.count ) {
     this->hosts.removed = 0;
     for ( uint32_t i = 0; i < this->host_tab.count; i++ ) {
-      if ( this->host_tab.ptr[ i ].state == RV_HOST_STOP ) {
+      if ( this->host_tab.ptr[ i ].state == RvHostEntry::RV_HOST_STOP ) {
         this->first_free_host = i;
         break;
       }
@@ -1201,7 +1215,8 @@ SubscriptionDB::gc( void ) noexcept
         if ( this->host_tab.ptr[ i ].sess_ht != NULL )
           sz += this->host_tab.ptr[ i ].sess_ht->mem_size();
       }
-      for ( Session *entry = this->session_tab.first( loc ); entry != NULL; ) {
+      for ( RvSessionEntry *entry = this->session_tab.first( loc );
+            entry != NULL; ) {
         if ( entry->sub_ht != NULL )
           sz += entry->sub_ht->mem_size();
         entry = this->session_tab.next( loc );
@@ -1211,7 +1226,7 @@ SubscriptionDB::gc( void ) noexcept
                           "other %lu bytes used\n",
                           sub_rem, this->sub_tab.mem_size(), sess_rem, 
                           this->sub_tab.mem_size(),
-                          this->host_tab.size * sizeof( Host ) +
+                          this->host_tab.size * sizeof( RvHostEntry ) +
                           this->host_ht->mem_size() +
                           this->sess_ht->mem_size() + sz );
     }
