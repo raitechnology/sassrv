@@ -295,29 +295,29 @@ $(bind)/api_client$(exe): $(api_client_objs) $(api_client_libs) $(lnk_dep)
 #all_exes    += $(bind)/api_client$(exe)
 #all_depends += $(api_client_deps)
 
-subtop_files := subtop
-subtop_cfile := $(addprefix src/, $(addsuffix .cpp, $(subtop_files)))
-subtop_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(subtop_files)))
-subtop_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(subtop_files)))
-subtop_libs  := $(sassrv_lib)
-subtop_lnk   := $(sassrv_lib) $(lnk_lib)
+rv_subtop_files := subtop
+rv_subtop_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv_subtop_files)))
+rv_subtop_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_subtop_files)))
+rv_subtop_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_subtop_files)))
+rv_subtop_libs  := $(sassrv_lib)
+rv_subtop_lnk   := $(sassrv_lib) $(lnk_lib)
 
-$(bind)/subtop$(exe): $(subtop_objs) $(subtop_libs) $(lnk_dep)
+$(bind)/rv_subtop$(exe): $(rv_subtop_objs) $(rv_subtop_libs) $(lnk_dep)
 
-all_exes    += $(bind)/subtop$(exe)
-all_depends += $(subtop_deps)
+all_exes    += $(bind)/rv_subtop$(exe)
+all_depends += $(rv_subtop_deps)
 
-ftmon_files := ftmon
-ftmon_cfile := $(addprefix src/, $(addsuffix .cpp, $(ftmon_files)))
-ftmon_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(ftmon_files)))
-ftmon_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(ftmon_files)))
-ftmon_libs  := $(sassrv_lib)
-ftmon_lnk   := $(sassrv_lib) $(lnk_lib)
+rv_ftmon_files := ftmon
+rv_ftmon_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv_ftmon_files)))
+rv_ftmon_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv_ftmon_files)))
+rv_ftmon_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv_ftmon_files)))
+rv_ftmon_libs  := $(sassrv_lib)
+rv_ftmon_lnk   := $(sassrv_lib) $(lnk_lib)
 
-$(bind)/ftmon$(exe): $(ftmon_objs) $(ftmon_libs) $(lnk_dep)
+$(bind)/rv_ftmon$(exe): $(rv_ftmon_objs) $(rv_ftmon_libs) $(lnk_dep)
 
-all_exes    += $(bind)/ftmon$(exe)
-all_depends += $(ftmon_deps)
+all_exes    += $(bind)/rv_ftmon$(exe)
+all_depends += $(rv_ftmon_deps)
 
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
@@ -445,11 +445,13 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server$(exe) $(bind)/rv_client$(exe) $(bind)/rv_pub$(exe)
+dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server$(exe) $(bind)/rv_client$(exe) $(bind)/rv_pub$(exe) $(bind)/rv_subtop $(bind)/rv_ftmon
 	chrpath -d $(libd)/libsassrv.$(dll)
 	chrpath -d $(bind)/rv_server$(exe)
 	chrpath -d $(bind)/rv_client$(exe)
 	chrpath -d $(bind)/rv_pub$(exe)
+	chrpath -d $(bind)/rv_subtop$(exe)
+	chrpath -d $(bind)/rv_ftmon$(exe)
 
 .PHONY: dist_rpm
 dist_rpm: srpm
@@ -479,6 +481,8 @@ install: dist_bins
 	install -m 755 $(bind)/rv_server$(exe) $(install_prefix)/bin
 	install -m 755 $(bind)/rv_client$(exe) $(install_prefix)/bin
 	install -m 755 $(bind)/rv_pub$(exe) $(install_prefix)/bin
+	install -m 755 $(bind)/rv_subtop$(exe) $(install_prefix)/bin
+	install -m 755 $(bind)/rv_ftmon$(exe) $(install_prefix)/bin
 	install -m 644 include/sassrv/*.h $(install_prefix)/include/sassrv
 
 $(objd)/%.o: src/%.cpp

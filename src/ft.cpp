@@ -670,6 +670,11 @@ RvFt::process_pub( EvPublish &pub ) noexcept
   const char * subject     = pub.subject;
   size_t       subject_len = pub.subject_len;
 
+  if ( ( subject_len != this->ft_sub_len ||
+         ::memcmp( subject, this->ft_sub, subject_len ) != 0 ) &&
+       this->client.is_inbox( subject, subject_len ) != this->inbox_num )
+    return false;
+
   MDMsgMem mem;
   RvMsg  * m = NULL;
   uint64_t cur_time = this->poll.now_ns;
@@ -679,7 +684,9 @@ RvFt::process_pub( EvPublish &pub ) noexcept
     if ( m != NULL ) {
       FtPeerMsg peer( (const char *) pub.reply, pub.reply_len );
       MDIterMap map[ FT_MAX_FIELDS ];
-      if ( MDIterMap::get_map( *m, map, peer.iter_map( map ) ) > 0 ) {
+      if ( MDIterMap::get_map( *m, map, peer.iter_map( map ) ) > 0 &&
+           peer.type < RVFT_MSG_TYPE_COUNT && peer.state < RVFT_STATE_COUNT &&
+           peer.start_ns != 0 ) {
 
         if ( peer.start_ns == this->me.start_ns )
           return true;
@@ -691,17 +698,19 @@ RvFt::process_pub( EvPublish &pub ) noexcept
                               msg_type_str[ peer.type ], peer.type );
         }
         this->on_peer_msg( peer );
+        return true;
       }
       else {
         this->warn( "not parsed %.*s\n", (int) subject_len, subject );
+        return false;
       }
     }
     else {
       this->warn( "unpack_rv error %.*s\n", (int) subject_len, subject );
-      return true;
+      return false;
     }
   }
-  return true;
+  return false;
 }
 
 void

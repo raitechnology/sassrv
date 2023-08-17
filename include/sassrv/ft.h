@@ -79,6 +79,8 @@ struct FtPeerMsg {
 
   FtPeerMsg( const char *rep,  size_t rep_len ) {
     ::memset( (void *) this, 0, sizeof( *this ) );
+    this->type      = 0xff;
+    this->state     = 0xff;
     this->reply     = rep;
     this->reply_len = rep_len;
   }

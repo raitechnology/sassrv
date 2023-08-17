@@ -230,7 +230,7 @@ main( int argc, const char *argv[] )
              "  -s service = service\n"
              "  -l log     = write to debug log\n"
              "  -t         = update with top format\n"
-             "  subject    = subject to subscribe\n", argv[ 0 ] );
+             "  subject    = subject wildcards to monitor\n", argv[ 0 ] );
     return 1;
   }
   EvPoll poll;
