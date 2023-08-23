@@ -33,7 +33,7 @@ EvRvClient::EvRvClient( EvPoll &p ) noexcept
   : EvConnection( p, p.register_type( "rvclient" ) ),
     RouteNotify( p.sub_route ), sub_route( p.sub_route ),
     cb( 0 ), rv_state( VERS_RECV ), fwd_all_msgs( 1 ), fwd_all_subs( 1 ),
-    network( 0 ), service( 0 ), save_buf( 0 ), save_len( 0 )
+    network( 0 ), service( 0 ), save_buf( 0 ), param_buf( 0 ), save_len( 0 )
 {
   if ( ! rv_client_init ) {
     rv_client_init = 1;
@@ -94,10 +94,32 @@ EvRvClient::connect( EvRvClientParameters &p,
   this->initialize_state();
   if ( EvTcpConnection::connect( *this, daemon, port, p.opts ) != 0 )
     return false;
-  this->network = p.network;
-  this->service = p.service;
-  this->notify  = n;
-  this->cb      = c;
+
+  if ( p.network != NULL || p.service != NULL ) {
+    size_t net_len = ( p.network != NULL ? ::strlen( p.network ) + 1 : 0 );
+    size_t svc_len = ( p.service != NULL ? ::strlen( p.service ) + 1 : 0 );
+    this->param_buf = ::malloc( net_len + svc_len );
+    char * s = (char *) this->param_buf;
+    if ( net_len > 0 ) {
+      ::memcpy( s, p.network, net_len );
+      this->network = s;
+      s = &s[ net_len ];
+    }
+    if ( svc_len > 0 ) {
+      ::memcpy( s, p.service, svc_len );
+      this->service = s;
+    }
+  }
+  if ( p.userid != NULL ) {
+    size_t user_len = ::strlen( p.userid ) + 1;
+    if ( user_len > sizeof( this->userid ) )
+      user_len = sizeof( this->userid );
+    ::memcpy( this->userid, p.userid, user_len );
+    this->userid[ user_len - 1 ] = '\0';
+    this->userid_len = user_len;
+  }
+  this->notify = n;
+  this->cb     = c;
   return true;
 }
 
@@ -223,7 +245,10 @@ EvRvClient::send_init_rec( void ) noexcept
   RvMsgWriter  rvmsg( mem, mem.make( 1024 ), 1024 );
 
   rvmsg.append_string( SARG( "mtype" ), SARG( "I" ) );
-  rvmsg.append_string( SARG( "userid" ), SARG( "nobody" ) );
+  if ( this->userid_len == 0 )
+    rvmsg.append_string( SARG( "userid" ), SARG( "nobody" ) );
+  else
+    rvmsg.append_string( SARG( "userid" ), this->userid, this->userid_len );
   if ( this->session_len != 0 )
     rvmsg.append_string( SARG( "session" ), this->session,
                                             this->session_len + 1 );
@@ -616,6 +641,15 @@ EvRvClient::release( void ) noexcept
     this->sub_route.remove_route_notify( *this );
   if ( this->notify != NULL )
     this->notify->on_shutdown( *this, NULL, 0 );
+  if ( this->save_buf != NULL ) {
+    ::free( this->save_buf );
+    this->save_buf = NULL;
+    this->save_len = 0;
+  }
+  if ( this->param_buf != NULL ) {
+    ::free( this->param_buf );
+    this->param_buf = NULL;
+  }
   this->EvConnection::release_buffers();
 }
 /* a new subscription */

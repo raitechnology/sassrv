@@ -34,6 +34,7 @@ RvFt::RvFt( EvRvClient &c,  RvFtListener *ftl ) noexcept
 }
 
 void RvFtListener::on_ft_change( uint8_t ) noexcept {}
+void RvFtListener::on_ft_sync( EvPublish & ) noexcept {}
 
 static char * hms( uint64_t now,  char *buf ) noexcept {
   struct tm tm;
@@ -80,6 +81,8 @@ RvFt::start( FtParameters &param ) noexcept
   this->prepare_ms     = param.prepare_ms;
   this->finish_ms      = param.finish_ms;
   this->inbox_num      = param.inbox_num;
+  this->sync_inbox_num = param.sync_inbox_num;
+  this->client.make_inbox( this->sync_inbox, param.sync_inbox_num );
   this->ft_sub         = param.ft_sub;
   this->ft_sub_len     = param.ft_sub_len;
   this->accuracy_warn  = 100;
@@ -320,8 +323,10 @@ RvFt::prepare_takeover( uint8_t action,  uint64_t deadline ) noexcept
 }
 
 bool
-RvFt::timer_cb( uint64_t /*tid*/,  uint64_t action ) noexcept
+RvFt::timer_cb( uint64_t id,  uint64_t action ) noexcept
 {
+  if ( id != this->tid )
+    return false;
   switch ( action ) {
     case ACTION_ACTIVATE:
     case ACTION_PREPARE: {
@@ -670,11 +675,17 @@ RvFt::process_pub( EvPublish &pub ) noexcept
   const char * subject     = pub.subject;
   size_t       subject_len = pub.subject_len;
 
-  if ( ( subject_len != this->ft_sub_len ||
-         ::memcmp( subject, this->ft_sub, subject_len ) != 0 ) &&
-       this->client.is_inbox( subject, subject_len ) != this->inbox_num )
-    return false;
-
+  if ( subject_len != this->ft_sub_len ||
+       ::memcmp( subject, this->ft_sub, subject_len ) != 0 ) {
+    uint32_t i = this->client.is_inbox( subject, subject_len );
+    if ( i != this->inbox_num ) {
+      if ( i == this->sync_inbox_num ) {
+        this->cb->on_ft_sync( pub );
+        return true;
+      }
+      return false;
+    }
+  }
   MDMsgMem mem;
   RvMsg  * m = NULL;
   uint64_t cur_time = this->poll.now_ns;
@@ -738,7 +749,8 @@ RvFt::send_msg( FtMsgType type,  const char *dest,  size_t dest_len ) noexcept
 
   if ( type == FINISH )
     msg.append_uint( FT_FIN_TIME   , cur_time + this->finish_ms * 1000000 );
-  msg.append_uint  ( FT_MEMBER_CNT , (uint32_t) this->ft_queue.count )
+  msg.append_string( FT_SYNC_INBOX , this->sync_inbox )
+     .append_uint  ( FT_MEMBER_CNT , (uint32_t) this->ft_queue.count )
      .append_string( FT_USER       , this->me.user )
      .update_hdr();
 

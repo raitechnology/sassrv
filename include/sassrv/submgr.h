@@ -293,6 +293,9 @@ struct RvSubscriptionDB {
   void process_events( void ) noexcept;
   bool process_pub( kv::EvPublish &pub ) noexcept;
   void gc( void ) noexcept;
+  void make_sync( md::RvMsgWriter &w ) noexcept;
+  bool make_host_sync( md::RvMsgWriter &w,  uint32_t i ) noexcept;
+  void update_sync( md::RvMsg &msg ) noexcept;
 
   void send_host_query( uint32_t i ) noexcept;
   void send_session_query( RvHostEntry &host,

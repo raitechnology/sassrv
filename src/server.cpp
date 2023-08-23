@@ -46,15 +46,15 @@ struct MyListener : public EvRvListen {
 };
 
 struct Loop : public MainLoop<Args> {
-  Loop( EvShm &m,  Args &args,  size_t num, bool (*ini)( void * ) ) :
-    MainLoop<Args>( m, args, num, ini ) {}
+  Loop( EvShm &m,  Args &args,  size_t num ) :
+    MainLoop<Args>( m, args, num ) {}
 
  MyListener * rv_sv;
   bool rv_init( void ) {
     return Listen<MyListener>( 0, this->r.rv_port, this->rv_sv,
                                this->r.tcp_opts ); }
 
-  bool init( void ) {
+  virtual bool initialize( void ) noexcept {
     if ( this->thr_num == 0 )
       printf( "rv_daemon:            %d\n", this->r.rv_port );
     int cnt = this->rv_init();
@@ -62,15 +62,10 @@ struct Loop : public MainLoop<Args> {
       fflush( stdout );
     return cnt > 0;
   }
-
-  static bool initialize( void *me ) noexcept;
+  virtual bool finish( void ) noexcept {
+    return true;
+  }
 };
-
-bool
-Loop::initialize( void *me ) noexcept
-{
-  return ((Loop *) me)->init();
-}
 
 int
 main( int argc, const char *argv[] )
@@ -91,7 +86,7 @@ main( int argc, const char *argv[] )
   printf( "rv_version:           " kv_stringify( SASSRV_VER ) "\n" );
   shm.print();
   r.rv_port = r.parse_port( argc, argv, "-r", "7500" );
-  Runner<Args, Loop> runner( r, shm, Loop::initialize );
+  Runner<Args, Loop> runner( r, shm );
   if ( r.thr_error == 0 )
     return 0;
   return 1;

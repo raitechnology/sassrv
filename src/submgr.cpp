@@ -829,6 +829,7 @@ RvSubscriptionDB::send_host_query( uint32_t i ) noexcept
   if ( this->mout != NULL ) {
     this->mout->printf( "> pub get session to %08X\n", host.host_id );
   }
+  printf( "SDB: host %08X, get session\n", host.host_id );
 }
 
 void
@@ -861,7 +862,7 @@ RvSubscriptionDB::send_session_query( RvHostEntry &host,
     RvMsgWriter msg( mem, mem.make( 256 ), 256 );
     msg.append_string( "op", "get" )
        .append_string( "what", "subscriptions" )
-       .append_string( "session", session.value )
+       .append_string( SARG( "session" ), session.value, session.len )
        .update_hdr();
 
     host_id_to_string( host.host_id, host_id_buf );
@@ -878,6 +879,8 @@ RvSubscriptionDB::send_session_query( RvHostEntry &host,
       this->mout->printf( "> pub get subscriptions to %08X %.*s\n", host.host_id,
                            session.len, session.value );
     }
+    printf( "SDB: session %.*s, get subscriptions\n",
+            session.len, session.value );
   }
 }
 
@@ -955,6 +958,9 @@ RvSubscriptionDB::process_pub( EvPublish &pub ) noexcept
   if ( match == NULL ) {
     which = this->client.is_inbox( subject, subject_len );
     if ( which == 0 )
+      return false;
+    if ( which < this->session_inbox_base && 
+         which < this->host_inbox_base )
       return false;
   }
   this->cur_mono = this->client.poll.mono_ns / NS;
@@ -1168,6 +1174,117 @@ RvSubscriptionDB::process_pub( EvPublish &pub ) noexcept
     }
   }
   return true;
+}
+
+void
+RvSubscriptionDB::make_sync( RvMsgWriter &w ) noexcept
+{
+  for ( uint32_t i = 0; i < this->host_tab.count; i++ )
+    this->make_host_sync( w, i );
+}
+
+bool
+RvSubscriptionDB::make_host_sync( RvMsgWriter &w,  uint32_t i ) noexcept
+{
+  if ( i >= this->host_tab.count )
+    return false;
+
+  RvHostEntry &host = this->host_tab.ptr[ i ];
+  if ( host.state == RvHostEntry::RV_HOST_UNKNOWN ||
+       host.state == RvHostEntry::RV_HOST_STOP )
+    return false;
+
+  RvMsgWriter      host_sub( w.mem, NULL, 0 ),
+                   sess_sub( w.mem, NULL, 0 ),
+                   subs_sub( w.mem, NULL, 0 );
+  RvSessionEntry * session;
+  RvSubscription * script;
+  size_t           pos, pos2;
+
+  w.append_msg( SARG( "host" ), host_sub );
+  host_sub.append_uint( SARG( "id" ), host.host_id );
+  if ( host.data_loss != 0 )
+    host_sub.append_uint( SARG( "data_loss" ), host.data_loss );
+
+  if ( (session = this->first_session( host, pos )) != NULL ) {
+    host_sub.append_msg ( SARG( "sessions" ), sess_sub );
+    do {
+      if ( (script = this->first_subject( *session, pos2 )) != NULL ) {
+        sess_sub.append_msg( session->value, session->len, subs_sub );
+        do {
+          subs_sub.append_string( NULL, 0, script->value, script->len );
+        } while ( (script = this->next_subject( *session, pos2 )) != NULL );
+        sess_sub.update_hdr( subs_sub );
+      }
+      else {
+        sess_sub.append_uint( session->value, session->len, (uint8_t) 0 );
+      }
+    } while ( (session = this->next_session( host, pos )) != NULL );
+    host_sub.update_hdr( sess_sub );
+  }
+  w.update_hdr( host_sub );
+  return true;
+}
+
+void
+RvSubscriptionDB::update_sync( RvMsg &msg ) noexcept
+{
+  /*MDOutput mout;
+  msg.print( &mout );
+  mout.print_hex( &msg );*/
+
+  MDName   nm, snm;
+  MDFieldReader rd( msg );
+  MDMsg * host_sub,
+        * sess_sub,
+        * subs_sub;
+
+  for ( bool b = rd.first( nm ); b; b = rd.next( nm ) ) {
+    if ( nm.equals( SARG( "host" ) ) && rd.get_sub_msg( host_sub ) ) {
+      MDFieldReader hrd( *host_sub );
+      uint32_t host_id = 0;
+
+      for ( bool c = hrd.first( nm ); c; c = hrd.next( nm ) ) {
+        if ( nm.equals( SARG( "id" ) ) )
+          hrd.get_uint( host_id );
+
+        else if ( nm.equals( SARG( "sessions" ) ) && host_id != 0 &&
+                  hrd.get_sub_msg( sess_sub ) ) {
+          this->host_ref( host_id, true );
+          MDFieldReader srd( *sess_sub );
+
+          for ( bool d = srd.first( snm ); d; d = srd.next( snm ) ) {
+            RvSessionEntry & session =
+              this->session_ref( snm.fname, snm.fnamelen - 1 );
+            if ( session.state == RvSessionEntry::RV_SESSION_SELF )
+              continue;
+
+            if ( srd.type() == MD_MESSAGE && srd.get_sub_msg( subs_sub ) ) {
+              MDFieldReader xrd( *subs_sub );
+
+              for ( bool e = xrd.first( nm ); e; e = xrd.next( nm ) ) {
+                char * sub    = NULL;
+                size_t sublen = 0;
+
+                if ( xrd.get_string( sub, sublen ) ) {
+                  bool is_added;
+                  RvSubscription & script =
+                    this->listen_ref( session, sub, sublen, is_added );
+                  if ( is_added ) {
+                    if ( this->cb != NULL ) {
+                      RvSubscriptionListener::Start
+                        op( session, script, NULL, 0, false );
+                      this->cb->on_listen_start( op );
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 void

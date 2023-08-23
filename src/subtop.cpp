@@ -217,6 +217,7 @@ main( int argc, const char *argv[] )
   const char * daemon  = get_arg( x, argc, argv, 1, "-d", "-daemon", "tcp:7500" ),
              * network = get_arg( x, argc, argv, 1, "-n", "-network", ""),
              * service = get_arg( x, argc, argv, 1, "-s", "-service", "7500" ),
+             * user    = get_arg( x, argc, argv, 1, "-u", "-user", "rv_subtop"),
              * log     = get_arg( x, argc, argv, 1, "-l", "-log", NULL ),
              * top     = get_arg( x, argc, argv, 0, "-t", "-top", NULL ),
              * help    = get_arg( x, argc, argv, 0, "-h", "-help", 0 );
@@ -228,6 +229,7 @@ main( int argc, const char *argv[] )
              "  -d daemon  = daemon port to connect\n"
              "  -n network = network\n"
              "  -s service = service\n"
+             "  -u user    = user name\n"
              "  -l log     = write to debug log\n"
              "  -t         = update with top format\n"
              "  subject    = subject wildcards to monitor\n", argv[ 0 ] );
@@ -236,7 +238,7 @@ main( int argc, const char *argv[] )
   EvPoll poll;
   poll.init( 5, false );
 
-  EvRvClientParameters parm( daemon, network, service, 0 );
+  EvRvClientParameters parm( daemon, network, service, user, 0 );
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, &argv[ first_sub ], argc - first_sub,
                              top != NULL );

@@ -42,6 +42,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   virtual bool timer_cb( uint64_t,  uint64_t ) noexcept;
   /* new listen start */
   virtual void on_ft_change( uint8_t action ) noexcept;
+  virtual void on_ft_sync( EvPublish &pub ) noexcept;
   const char * ts( uint64_t mono,  const char *str,  char *buf ) noexcept;
 };
 
@@ -145,6 +146,12 @@ RvDataCallback::on_ft_change( uint8_t action ) noexcept
   }
 }
 
+void
+RvDataCallback::on_ft_sync( EvPublish &pub ) noexcept
+{
+  printf( "sync %.*s\n", (int) pub.subject_len, pub.subject );
+}
+
 /* when client connection stops */
 void
 RvDataCallback::on_shutdown( EvSocket &conn,  const char *err,
@@ -186,8 +193,8 @@ main( int argc, const char *argv[] )
   const char * daemon  = get_arg( x, argc, argv, 1, "-d", "-daemon", "tcp:7500" ),
              * network = get_arg( x, argc, argv, 1, "-n", "-network", ""),
              * service = get_arg( x, argc, argv, 1, "-s", "-service", "7500" ),
+             * user    = get_arg( x, argc, argv, 1, "-u", "-user", "rv_ftmon" ),
              * weight  = get_arg( x, argc, argv, 1, "-w", "-weight", NULL ),
-             * user    = get_arg( x, argc, argv, 1, "-u", "-user", NULL ),
              * cluster = get_arg( x, argc, argv, 1, "-c", "-cluster", "GRP" ),
              * hb      = get_arg( x, argc, argv, 1, "-b", "-heartbeat", NULL ),
              * act     = get_arg( x, argc, argv, 1, "-a", "-activate", NULL ),
@@ -205,8 +212,8 @@ main( int argc, const char *argv[] )
              "  -d daemon  = daemon port to connect\n"
              "  -n network = network\n"
              "  -s service = service\n"
+             "  -u user    = user name\n"
              "  -w weight  = weight of ft member, more has priority\n"
-             "  -u user    = user name to advertise\n"
              "  -c cluster = ft cluster to join (GRP)\n"
              "  -b hb      = heartbeat millisecs\n"
              "  -a act     = activate millisecs\n"
@@ -221,7 +228,7 @@ main( int argc, const char *argv[] )
   char   ft_sub[ 128 ], user_buf[ 128 ];
   poll.init( 5, false );
 
-  EvRvClientParameters parm( daemon, network, service, 0 );
+  EvRvClientParameters parm( daemon, network, service, user, 0 );
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, top != NULL );
   MDOutput             mout;

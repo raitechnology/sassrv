@@ -667,6 +667,7 @@ main( int argc, const char *argv[] )
   const char * daemon     = get_arg( x, argc, argv, 1, "-d", "-daemon", "tcp:7500" ),
              * network    = get_arg( x, argc, argv, 1, "-n", "-network", ""),
              * service    = get_arg( x, argc, argv, 1, "-s", "-service", "7500" ),
+             * user       = get_arg( x, argc, argv, 1, "-u", "-user", "rv_pub" ),
              * path       = get_arg( x, argc, argv, 1, "-c", "-cfile", NULL ),
              * pub_count  = get_arg( x, argc, argv, 1, "-p", "-pub", "1" ),
              * sub_count  = get_arg( x, argc, argv, 1, "-k", "-sub", "1" ),
@@ -693,6 +694,7 @@ main( int argc, const char *argv[] )
              "  -d daemon  = daemon port to connect (tcp:7500)\n"
              "  -n network = network\n"
              "  -s service = service (7500)\n"
+             "  -u user    = user name\n"
              "  -c cfile   = if loading dictionary from files\n"
              "  -p count   = number of times to publish a record (1)\n"
              "  -k count   = number of subjects to publish (1)\n"
@@ -747,7 +749,7 @@ main( int argc, const char *argv[] )
   if ( msg_rate != NULL )
     rate = string_to_uint64( msg_rate, ::strlen( msg_rate ) );
 
-  EvRvClientParameters parm( daemon, network, service, 0 );
+  EvRvClientParameters parm( daemon, network, service, user, 0 );
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, &argv[ first_sub ], n,
                          sub_cnt, pub_cnt, pay_siz, nd || uj || ur || ut,

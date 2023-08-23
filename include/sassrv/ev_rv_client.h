@@ -9,13 +9,15 @@ namespace sassrv {
 struct EvRvClientParameters {
   const char * daemon,
              * network,
-             * service;
+             * service,
+             * userid;
   int          port,
                opts;
   EvRvClientParameters( const char *d = NULL,  const char *n = NULL,
-                        const char *s = "7500",  int p = 7500,
-                        int o = kv::DEFAULT_TCP_CONNECT_OPTS )
-    : daemon( d ), network( n ), service( s ), port( p ), opts( o ) {}
+                        const char *s = "7500",  const char *u = NULL,
+                        int p = 7500,  int o = kv::DEFAULT_TCP_CONNECT_OPTS )
+    : daemon( d ), network( n ), service( s ),
+      userid( u ), port( p ), opts( o ) {}
 };
 
 struct EvRvClient;
@@ -58,7 +60,8 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
   uint32_t     ipaddr;
   const char * network,
              * service;
-  void       * save_buf;
+  void       * save_buf,
+             * param_buf;
   size_t       save_len;
   md::MDMsgMem spc;
 
@@ -88,6 +91,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
     this->service     = NULL;
     this->notify      = NULL;
     this->save_buf    = NULL;
+    this->param_buf   = NULL;
     this->save_len    = 0;
   }
   uint16_t make_inbox( char *inbox, uint32_t num ) noexcept;

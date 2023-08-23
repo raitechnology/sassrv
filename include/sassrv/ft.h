@@ -28,6 +28,7 @@ namespace sassrv {
 
 struct RvFtListener {
   virtual void on_ft_change( uint8_t action ) noexcept;
+  virtual void on_ft_sync( kv::EvPublish &pub ) noexcept;
 };
 
 static const char     FT_MSG_TYPE[]   = "FT_MSG_TYPE",  /* enum FtMsgType */
@@ -40,8 +41,9 @@ static const char     FT_MSG_TYPE[]   = "FT_MSG_TYPE",  /* enum FtMsgType */
                       FT_MEMBER_CNT[] = "FT_MEMBER_CNT",/* how many in grp */
                       FT_HB_IVAL[]    = "FT_HB_IVAL",   /* the heartbeat ms */
                       FT_ACT_IVAL[]   = "FT_ACT_IVAL",  /* the activation ms */
-                      FT_PREP_IVAL[]  = "FT_PREP_IVAL"; /* the prepare ms */
-static const size_t   FT_MAX_FIELDS   = 11;
+                      FT_PREP_IVAL[]  = "FT_PREP_IVAL", /* the prepare ms */
+                      FT_SYNC_INBOX[] = "FT_SYNC_INBOX";/* sync msgs */
+static const size_t   FT_MAX_FIELDS   = 12;
 
 struct FtParameters {
   uint64_t     weight;       /* initial weight setting, could change later */
@@ -50,7 +52,8 @@ struct FtParameters {
                activate_ms,  /* when a peer is considered dead */
                prepare_ms,   /* when a peer should prepare to become primary */
                finish_ms,    /* how long in the finish state, then exit */
-               inbox_num;    /* what inbox number to use for ACK msgs */
+               inbox_num,    /* what inbox number to use for ACK msgs */
+               sync_inbox_num;/* inbox number for sync msgs */
   const char * ft_sub,       /* subject all messaes are sent, except ACK */
              * user;         /* arbitrary string, not used in the algo */
   size_t       ft_sub_len,   /* len of ft_sub */
@@ -58,8 +61,8 @@ struct FtParameters {
   FtParameters()
     : weight( 20 ), join_ms( 500 ), heartbeat_ms( 3000 ), activate_ms( 7000 ),
       prepare_ms( 6500 ), finish_ms( 500 ),
-      inbox_num( 10 ), ft_sub( "_FT.GRP" ), user( "none" ),
-      ft_sub_len( 7 ), user_len( 4 ) {}
+      inbox_num( 10 ), sync_inbox_num( 11 ), ft_sub( "_FT.GRP" ),
+      user( "none" ), ft_sub_len( 7 ), user_len( 4 ) {}
 };
 
 struct FtPeerMsg {
@@ -75,7 +78,8 @@ struct FtPeerMsg {
                fin_time;   /* utc time peer will exit */
   const char * reply;      /* if ANNOUNCE type, will have reply for ACK */
   size_t       reply_len;
-  char         user[ 64 ]; /* name of peer */
+  char         user[ 64 ], /* name of peer */
+               sync_inbox[ MAX_RV_INBOX_LEN ];
 
   FtPeerMsg( const char *rep,  size_t rep_len ) {
     ::memset( (void *) this, 0, sizeof( *this ) );
@@ -86,17 +90,19 @@ struct FtPeerMsg {
   }
   size_t iter_map( md::MDIterMap *mp ) {
     size_t n = 0;
-    mp[ n++ ].uint( FT_MSG_TYPE   , this->type );
-    mp[ n++ ].uint( FT_STATE      , this->state );
-    mp[ n++ ].uint( FT_START_NS   , this->start_ns );
-    mp[ n++ ].uint( FT_WEIGHT     , this->weight );
-    mp[ n++ ].uint( FT_CUR_TIME   , this->cur_time );
-    mp[ n++ ].uint( FT_FIN_TIME   , this->fin_time );
-    mp[ n++ ].uint( FT_MEMBER_CNT , this->member_cnt );
-    mp[ n++ ].uint( FT_HB_IVAL    , this->hb_ival );
-    mp[ n++ ].uint( FT_ACT_IVAL   , this->act_ival );
-    mp[ n++ ].uint( FT_PREP_IVAL  , this->prep_ival );
-    mp[ n++ ].string( FT_USER     , this->user, sizeof( this->user ) );
+    mp[ n++ ].uint  ( FT_MSG_TYPE   , this->type );
+    mp[ n++ ].uint  ( FT_STATE      , this->state );
+    mp[ n++ ].uint  ( FT_START_NS   , this->start_ns );
+    mp[ n++ ].uint  ( FT_WEIGHT     , this->weight );
+    mp[ n++ ].uint  ( FT_CUR_TIME   , this->cur_time );
+    mp[ n++ ].uint  ( FT_FIN_TIME   , this->fin_time );
+    mp[ n++ ].uint  ( FT_MEMBER_CNT , this->member_cnt );
+    mp[ n++ ].uint  ( FT_HB_IVAL    , this->hb_ival );
+    mp[ n++ ].uint  ( FT_ACT_IVAL   , this->act_ival );
+    mp[ n++ ].uint  ( FT_PREP_IVAL  , this->prep_ival );
+    mp[ n++ ].string( FT_USER       , this->user, sizeof( this->user ) );
+    mp[ n++ ].string( FT_SYNC_INBOX , this->sync_inbox,
+                                      sizeof( this->sync_inbox ) );
     return n;
   }
 };
@@ -109,7 +115,8 @@ struct FtPeer {
   uint32_t pos,           /* current rank 1 -> N, primary = 1 */
            latency_cnt;   /* how many sample latenceies */
   uint8_t  state;         /* advertised state, PRIMARY, SECONDARY, JOINED */
-  char     user[ 64 ];
+  char     user[ 64 ],
+           sync_inbox[ MAX_RV_INBOX_LEN ];
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   void operator delete( void *ptr ) { ::free( ptr ); }
@@ -127,6 +134,7 @@ struct FtPeer {
     this->weight   = m.weight;
     this->state    = m.state;
     ::memcpy( this->user, m.user, sizeof( this->user ) );
+    ::memcpy( this->sync_inbox, m.sync_inbox, sizeof( this->sync_inbox ) );
   }
   int64_t latency( void ) const {
     if ( ( this->latency_cnt % 256 ) == 0 )
@@ -240,10 +248,12 @@ struct RvFt : public kv::EvTimerCallback {
                  prepare_ms,      /* millis after primary hb to prepare */
                  finish_ms,       /* millis to linger in finish state b4 exit */
                  inbox_num,       /* which inbox to use for ACK replies */
+                 sync_inbox_num,  /* ft where sync msgs are sent */
                  timer_mask;      /* 1 << ACTION bits, set when timer active */
   FtPeerFree   * ft_free;         /* unused peer mem */
   const char   * ft_sub;          /* subject to publish */
   size_t         ft_sub_len;
+  char           sync_inbox[ MAX_RV_INBOX_LEN ];
   md::MDOutput * mout;            /* debug log output */
 
   RvFt( EvRvClient &c,  RvFtListener *ftl ) noexcept;
