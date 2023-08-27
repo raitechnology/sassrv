@@ -26,9 +26,9 @@ RvFt::RvFt( EvRvClient &c,  RvFtListener *ftl ) noexcept
     : poll( c.poll ), client( c ), peer_ht( 0 ), cb( ftl )
 {
   this->me.zero();
-  this->me.state = STATE_LISTEN;
+  this->me.update_state( STATE_LISTEN, this->state_count );
   this->peer_ht  = FtPeerHT::resize( NULL );
-  uint8_t * x = (uint8_t *) (void *) &this->state_ns,
+  uint8_t * x = (uint8_t *) (void *) &this->tid,
           * y = (uint8_t *) (void *) &this[ 1 ];
   ::memset( x, 0, y - x );
 }
@@ -54,13 +54,15 @@ RvFt::notify_change( uint8_t action ) noexcept
   this->last_seqno = this->ft_queue.seqno;
 }
 
-void
+bool
 RvFt::notify_update( void ) noexcept
 {
   if ( this->last_seqno != this->ft_queue.seqno ) {
     this->cb->on_ft_change( ACTION_UPDATE );
     this->last_seqno = this->ft_queue.seqno;
+    return true;
   }
+  return false;
 }
 
 void
@@ -70,7 +72,7 @@ RvFt::start( FtParameters &param ) noexcept
   this->me.start_ns    = this->poll.now_ns;
   this->me.last_rcv_ns = 0;
   this->me.weight      = param.weight;
-  this->me.state       = STATE_LISTEN;
+  this->me.update_state( STATE_LISTEN, this->state_count );
 
   this->tid            = this->poll.now_ns;
   this->state_ns       = this->poll.mono_ns;
@@ -101,7 +103,7 @@ RvFt::start( FtParameters &param ) noexcept
   }
   this->start_hb( param.heartbeat_ms, param.activate_ms, param.prepare_ms );
   this->set_state( STATE_LISTEN );
-  this->notify_change( ACTION_INIT );
+  this->notify_change( ACTION_LISTEN );
 }
 
 uint32_t
@@ -120,24 +122,68 @@ RvFt::stop( void ) noexcept
 }
 
 void
+RvFt::activate( void ) noexcept
+{
+  if ( this->me.state == STATE_LISTEN ) {
+    this->start_mono = this->poll.mono_ns;
+    if ( this->timer_clear( ACTION_JOIN ) )
+      this->poll.timer.remove_timer_cb( *this, this->tid, ACTION_JOIN );
+    this->set_state( STATE_JOIN );
+  }
+}
+
+void
+RvFt::deactivate( void ) noexcept
+{
+  if ( this->me.state != STATE_LISTEN ) {
+    this->ft_queue.remove( &this->me );
+    this->stop_timers();
+    this->set_state( STATE_LISTEN );
+    this->notify_change( ACTION_LISTEN );
+  }
+}
+
+void
 RvFt::finish( void ) noexcept
 {
-  TimerQueue & timer = this->poll.timer;
   if ( this->me.state != STATE_LISTEN )
     this->send_msg( EXITING );
+  if ( this->timer_clear( ACTION_HEARTBEAT ) )
+    this->poll.timer.remove_timer_cb( *this, this->tid, ACTION_HEARTBEAT );
+  this->stop_timers();
+  this->client.unsubscribe( this->ft_sub, this->ft_sub_len );
+  this->notify_change( ACTION_FINISH );
+}
+
+void
+RvFt::stop_timers( void ) noexcept
+{
+  TimerQueue & timer = this->poll.timer;
   if ( this->timer_clear( ACTION_JOIN ) )
     timer.remove_timer_cb( *this, this->tid, ACTION_JOIN );
   if ( this->timer_clear( ACTION_ACTIVATE ) )
     timer.remove_timer_cb( *this, this->tid, ACTION_ACTIVATE );
   if ( this->timer_clear( ACTION_PREPARE ) )
     timer.remove_timer_cb( *this, this->tid, ACTION_PREPARE );
-  if ( this->timer_clear( ACTION_HEARTBEAT ) )
-    timer.remove_timer_cb( *this, this->tid, ACTION_HEARTBEAT );
   if ( this->timer_clear( ACTION_FINISH ) )
     timer.remove_timer_cb( *this, this->tid, ACTION_FINISH );
+}
 
-  this->client.unsubscribe( this->ft_sub, this->ft_sub_len );
-  this->notify_change( ACTION_FINISH );
+void
+FtStateCount::update( uint8_t old_state,  uint8_t new_state ) noexcept
+{
+  switch ( old_state ) {
+    default: break;
+    case RvFt::STATE_JOIN:      this->join--;      break;
+    case RvFt::STATE_PRIMARY:   this->primary--;   break;
+    case RvFt::STATE_SECONDARY: this->secondary--; break;
+  }
+  switch ( new_state ) {
+    default: break;
+    case RvFt::STATE_JOIN:      this->join++;      break;
+    case RvFt::STATE_PRIMARY:   this->primary++;   break;
+    case RvFt::STATE_SECONDARY: this->secondary++; break;
+  }
 }
 
 void
@@ -145,7 +191,7 @@ RvFt::set_state( FtState state ) noexcept
 {
   uint8_t old_state = this->me.state;
   if ( state != this->me.state ) {
-    this->me.state = state;
+    this->me.update_state( state, this->state_count );
     this->state_ns = this->poll.mono_ns;
 
     if ( old_state == STATE_JOIN && state > STATE_JOIN &&
@@ -258,6 +304,8 @@ RvFt::trim_ft_queue( void ) noexcept
     if ( p != &this->me &&
          this->expired_delta_ms( p->last_rcv_ns, this->activate_ms ) <= 0 ) {
       size_t pos;
+      fprintf( stderr, "FT Peer %s is missing\n", p->user );
+      p->update_state( STATE_FINISH, this->state_count );
       this->ft_queue.remove( p );
       if ( this->peer_ht->find( p->start_ns, pos ) )
         this->peer_ht->remove( pos );
@@ -275,10 +323,12 @@ RvFt::prepare_takeover( uint8_t action,  uint64_t deadline ) noexcept
     origin_ns = this->start_mono;
     if ( this->expired_delta_ms( origin_ns, this->activate_ms ) <= 0 ) {
       if ( this->me.state == STATE_JOIN ) {
-        this->me.state = STATE_SECONDARY;
+        /*this->me.state = STATE_SECONDARY;
         this->ft_queue.update( &this->me );
-        this->me.state = STATE_JOIN;
-        p = this->ft_queue.ptr[ 0 ];
+        this->me.state = STATE_JOIN;*/
+        if ( p != &this->me && FtPeer::is_greater_weight( this->me, *p ) )
+          p = &this->me;
+        /*p = this->ft_queue.ptr[ 0 ];*/
       }
       if ( p == &this->me )
         this->set_state( STATE_PRIMARY );
@@ -455,6 +505,7 @@ bool
 RvFt::check_latency( FtPeer &p,  int64_t ns ) noexcept
 {
   int64_t skew = p.latency();
+  uint64_t warn_time;
   if ( skew != 0 ) { /* if have samples */
     int64_t ms      = ns / ( 1000 * 1000 ),
             act_ms  = (int64_t) this->activate_ms,
@@ -463,17 +514,25 @@ RvFt::check_latency( FtPeer &p,  int64_t ns ) noexcept
     if ( ms < -( act_ms - skew ) || ms > ( act_ms + skew ) ) {
       const char *fmt = "discarding old msg from %s, outside activation %ld, "
                         "lat %ld, skew = %ld\n";
-      this->warn( fmt, p.user, act_ms, ms, skew );
-      if ( this->mout != NULL )
-        this->mout->printe( fmt, p.user, act_ms, ms, skew );
+      warn_time = this->poll.mono_ns / ( 1000 * 1000 * 1000 );
+      if ( ( warn_time - this->last_warn ) > 0 ) {
+        this->last_warn = warn_time;
+        this->warn( fmt, p.user, act_ms, ms, skew );
+        if ( this->mout != NULL )
+          this->mout->printe( fmt, p.user, act_ms, ms, skew );
+      }
       return false;
     }
     if ( ms < -( hb_ms - skew ) || ms > ( hb_ms + skew ) ) {
       const char *fmt = "msg from %s, outside heartbeat %ld, "
                         "lat %ld, skew = %ld\n";
-      this->warn( fmt, p.user, hb_ms, ms, skew );
-      if ( this->mout != NULL )
-        this->mout->printe( fmt, p.user, hb_ms, ms, skew );
+      warn_time = this->poll.mono_ns / ( 1000 * 1000 * 1000 );
+      if ( ( warn_time - this->last_warn ) > 0 ) {
+        this->last_warn = warn_time;
+        this->warn( fmt, p.user, hb_ms, ms, skew );
+        if ( this->mout != NULL )
+          this->mout->printe( fmt, p.user, hb_ms, ms, skew );
+      }
       return true;
     }
   }
@@ -489,15 +548,30 @@ RvFt::on_peer_msg( const FtPeerMsg &peer ) noexcept
   uint64_t cur_time = this->poll.now_ns;
   this->last_rcv_ns = this->poll.mono_ns;
 
+  /*if ( debug_ft )
+    if ( peer.type != HEARTBEAT )
+      peer.print();*/
   if ( this->me.state == STATE_LISTEN ) {
     if ( peer.start_ns < this->me.start_ns ) {
       if ( this->oldest_peer == 0 || peer.start_ns < this->oldest_peer ) {
         this->oldest_peer = peer.start_ns;
+        /* check that my heartbeat matches peer */
         this->start_hb( peer.hb_ival, peer.act_ival, peer.prep_ival );
       }
     }
   }
-  if ( peer.state != STATE_LISTEN ) {
+  if ( peer.state == STATE_LISTEN ) {
+    /* went back to listen state */
+    if ( this->peer_ht->find( peer.start_ns, pos, p ) ) {
+      p->update_state( STATE_LISTEN, this->state_count );
+      this->ft_queue.remove( p );
+      if ( this->peer_ht->find( p->start_ns, pos ) )
+        this->peer_ht->remove( pos );
+      this->release_peer( p );
+    }
+    this->notify_update();
+  }
+  else {
     if ( ! this->peer_ht->find( peer.start_ns, pos, p ) ) {
       p = this->make_peer( &peer );
       p->accum_latency( cur_time - peer.cur_time );
@@ -507,7 +581,7 @@ RvFt::on_peer_msg( const FtPeerMsg &peer ) noexcept
       int64_t ns = cur_time - peer.cur_time;
       if ( ! this->check_latency( *p, ns ) )
         return;
-      p->set( peer );
+      p->set( peer, this->state_count );
     }
     p->last_rcv_ns = this->last_rcv_ns;
     if ( peer.type != EXITING ) {
@@ -524,6 +598,7 @@ RvFt::on_peer_msg( const FtPeerMsg &peer ) noexcept
       }
     }
     else { /* exited */
+      p->update_state( STATE_FINISH, this->state_count );
       this->ft_queue.remove( p );
       if ( this->peer_ht->find( p->start_ns, pos ) )
         this->peer_ht->remove( pos );
@@ -573,9 +648,17 @@ FtPeer::is_greater_weight( const FtPeer &p1,  const FtPeer &p2 ) noexcept
 void
 FtQueue::insert( FtPeer *p ) noexcept
 {
-  uint32_t j;
   this->push( p );
-  for ( j = this->count - 1; j > 0; ) {
+  this->reorder();
+  this->seqno++;
+}
+
+void
+FtQueue::reorder( void ) noexcept
+{
+  uint32_t j = this->count - 1;
+  FtPeer * p = this->ptr[ j ];
+  while ( j > 0 ) {
     if ( FtPeer::is_greater( *this->ptr[ j-1 ], *p ) )
       break;
     this->ptr[ j ] = this->ptr[ j-1 ];
@@ -583,8 +666,6 @@ FtQueue::insert( FtPeer *p ) noexcept
   }
   for ( ; j < this->count; j++ )
     this->ptr[ j ]->pos = j + 1;
-  j = p->pos - 1;
-  this->seqno++;
 }
 
 uint32_t
@@ -630,7 +711,7 @@ FtQueue::in_order2( FtPeer *p ) const noexcept
 void
 FtQueue::update( FtPeer *p ) noexcept
 {
-  uint32_t j, k;
+  uint32_t j;
   if ( p->pos == 0 || (j = this->get_pos( p )) == this->count ) {
     this->insert( p );
     return;
@@ -638,20 +719,12 @@ FtQueue::update( FtPeer *p ) noexcept
   if ( this->in_order2( p ) )
     return;
 
-  for ( k = this->count - 1; k > 0; k-- ) {
-    if ( p != this->ptr[ k-1 ] &&
-         FtPeer::is_greater( *this->ptr[ k-1 ], *p ) )
-      break;
+  for ( ; j + 1 < this->count; j++ ) {
+    this->ptr[ j ] = this->ptr[ j + 1 ];
+    this->ptr[ j ]->pos = j + 1;
   }
-  ::memmove( &this->ptr[ j ], this->ptr[ j + 1 ],
-             sizeof( this->ptr[ 0 ] ) * ( this->count - ( j + 1 ) ) );
-  ::memmove( &this->ptr[ k + 1 ], &this->ptr[ k ],
-             sizeof( this->ptr[ 0 ] ) * ( this->count - ( k + 1 ) ) );
-  this->ptr[ k ] = p;
-  if ( j < k )
-    k = j;
-  for ( ; k < this->count; k++ )
-    this->ptr[ k ]->pos = k + 1;
+  this->ptr[ j ] = p;
+  this->reorder();
   this->seqno++;
 }
 
@@ -778,7 +851,7 @@ RvFt::make_peer( const FtPeerMsg *msg ) noexcept
     void * m = ::malloc( sizeof( FtPeerFree ) );
     this->ft_free = new ( m ) FtPeerFree( this->ft_free );
   }
-  return new ( this->ft_free->make_peer() ) FtPeer( msg );
+  return new ( this->ft_free->make_peer() ) FtPeer( msg, this->state_count );
 }
 
 void
@@ -836,4 +909,11 @@ RvFt::warn( const char *fmt, ... ) noexcept
   va_start( args, fmt );
   vfprintf( stderr, fmt, args );
   va_end( args );
+}
+
+void
+FtPeerMsg::print( void ) const noexcept
+{
+  printf( "{ %s, %s, user=%s }\n", RvFt::msg_type_str[ this->type ],
+          RvFt::state_str[ this->state ], this->user );
 }

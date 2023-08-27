@@ -145,10 +145,19 @@ void RvSubscriptionListener::on_snapshot    ( Snap  & ) noexcept {}
 void
 RvSubscriptionDB::add_wildcard( const char *wildcard ) noexcept
 {
-  size_t len = ::strlen( wildcard );
-  char * s   = (char *) ::malloc( len + 1 );
+  size_t len    = ( wildcard == NULL ? 0 : ::strlen( wildcard ) ),
+         suflen = ( len == 0 ? 1 :
+                    wildcard[ len - 1 ] != '>' ) ? 2 : 0;
+  char * s   = (char *) ::malloc( len + suflen + 1 );
   Filter &f = this->filters.push();
-  ::memcpy( s, wildcard, len + 1 );
+  if ( len > 0 )
+    ::memcpy( s, wildcard, len );
+  if ( suflen > 0 ) {
+    if ( suflen == 2 )
+      s[ len++ ] = '.';
+    s[ len++ ] = '>';
+  }
+  s[ len ] = '\0';
   f.wild     = s;
   f.wild_len = len;
 }

@@ -6,11 +6,13 @@
 /*
  * ft state transitions:
  *
- * listen -> join +-> primary  -+ 
- *                |     ^       |
- *                |     |       |
- *                |     v       |
- *                +-> secondary +->  finish
+ *    +--------+--------+
+ *    v        |        |
+ * listen -> join +-> primary --+
+ *    ^           |     ^       |
+ *    |           |     |       |
+ *    |           |     v       |
+ *    +-----------+-> secondary +->  finish
  *
  * primary has rank 1, secondaries have rankds 2 ... N
  *
@@ -105,6 +107,18 @@ struct FtPeerMsg {
                                       sizeof( this->sync_inbox ) );
     return n;
   }
+  void print( void ) const noexcept;
+};
+
+struct FtStateCount {
+  uint32_t primary,
+           secondary,
+           join;
+  FtStateCount() : primary( 0 ), secondary( 0 ), join( 0 ) {}
+  void update( uint8_t old_state,  uint8_t new_state ) noexcept;
+  uint32_t member_count( void ) const {
+    return this->primary + this->secondary + this->join;
+  }
 };
 
 struct FtPeer {
@@ -114,27 +128,35 @@ struct FtPeer {
   int64_t  latency_accum; /* track skew of sys clocks */
   uint32_t pos,           /* current rank 1 -> N, primary = 1 */
            latency_cnt;   /* how many sample latenceies */
-  uint8_t  state;         /* advertised state, PRIMARY, SECONDARY, JOINED */
+  const uint8_t state;    /* advertised state, PRIMARY, SECONDARY, JOINED */
+  uint8_t  old_state;
   char     user[ 64 ],
            sync_inbox[ MAX_RV_INBOX_LEN ];
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   void operator delete( void *ptr ) { ::free( ptr ); }
-  FtPeer() { this->zero(); }
-  FtPeer( const FtPeerMsg *m ) {
+  FtPeer() : state( 0 ) { this->zero(); }
+  FtPeer( const FtPeerMsg *m,  FtStateCount &count ) : state( 0 ) {
     this->zero();
     if ( m != NULL )
-      this->set( *m );
+      this->set( *m, count );
   }
   void zero( void ) {
     ::memset( (void *) this, 0, sizeof( *this ) );
   }
-  void set( const FtPeerMsg &m ) {
-    this->start_ns = m.start_ns;
-    this->weight   = m.weight;
-    this->state    = m.state;
+  void set( const FtPeerMsg &m,  FtStateCount &count ) {
+    this->start_ns  = m.start_ns;
+    this->weight    = m.weight;
+    this->old_state = this->state;
+    (uint8_t &) this->state = m.state;
+    count.update( this->old_state, this->state );
     ::memcpy( this->user, m.user, sizeof( this->user ) );
     ::memcpy( this->sync_inbox, m.sync_inbox, sizeof( this->sync_inbox ) );
+  }
+  void update_state( uint8_t new_state,  FtStateCount &count ) {
+    this->old_state = this->state;
+    (uint8_t &) this->state = new_state;
+    count.update( this->old_state, this->state );
   }
   int64_t latency( void ) const {
     if ( ( this->latency_cnt % 256 ) == 0 )
@@ -156,6 +178,7 @@ struct FtPeer {
 struct FtQueue : public kv::ArrayCount<FtPeer *, 4> {
   uint64_t seqno;
   void insert( FtPeer *p ) noexcept;
+  void reorder( void ) noexcept;
   uint32_t get_pos( FtPeer *p ) noexcept;
   void remove( FtPeer *p ) noexcept;
   void update( FtPeer *p ) noexcept;
@@ -184,7 +207,7 @@ struct FtPeerFree {
 
 struct RvFt : public kv::EvTimerCallback {
   enum FtAction {
-    ACTION_INIT       = 0, /* after subscribing */
+    ACTION_LISTEN     = 0, /* after subscribing */
     ACTION_JOIN       = 1, /* listen for peers before joining them */
     ACTION_ACTIVATE   = 2, /* become the primary */
     ACTION_DEACTIVATE = 3, /* deactivate, become a secondary */
@@ -195,7 +218,7 @@ struct RvFt : public kv::EvTimerCallback {
   };
   #define RVFT_ACTION_COUNT 8
   static const char *action_str[ RVFT_ACTION_COUNT ];
-  #define RVFT_ACTION_STR { "init", "join", "activate", "deactivate", "heartbeat", "prepare", "finish", "update" }
+  #define RVFT_ACTION_STR { "listen", "join", "activate", "deactivate", "heartbeat", "prepare", "finish", "update" }
 
   enum FtState {
     STATE_LISTEN    = 0, /* just listening, not joining */
@@ -250,16 +273,23 @@ struct RvFt : public kv::EvTimerCallback {
                  inbox_num,       /* which inbox to use for ACK replies */
                  sync_inbox_num,  /* ft where sync msgs are sent */
                  timer_mask;      /* 1 << ACTION bits, set when timer active */
+  FtStateCount   state_count;
   FtPeerFree   * ft_free;         /* unused peer mem */
   const char   * ft_sub;          /* subject to publish */
   size_t         ft_sub_len;
   char           sync_inbox[ MAX_RV_INBOX_LEN ];
   md::MDOutput * mout;            /* debug log output */
+  uint64_t       last_warn;
 
   RvFt( EvRvClient &c,  RvFtListener *ftl ) noexcept;
 
-  void notify_change( uint8_t action ) noexcept;
-  void notify_update( void ) noexcept;
+  void start( FtParameters &param ) noexcept; /* start hb, go to listen state */
+  void activate( void ) noexcept;   /* join the ft network, listen -> join */
+  void deactivate( void ) noexcept; /* go to a listen state, run -> listen */
+  uint32_t stop( void ) noexcept;   /* start exit notify, return ms time */
+
+  void notify_change( uint8_t action ) noexcept; /* call on_ft_change() */
+  bool notify_update( void ) noexcept; /* call on_ft_change() if needed */
 
   /* each action has a timer associated with it, these track which are set */
   void timer_active( FtAction action ) {
@@ -282,14 +312,15 @@ struct RvFt : public kv::EvTimerCallback {
     return ( this->timer_mask & mask ) != 0;
   }
 
-  void start( FtParameters &param ) noexcept;
-  uint32_t stop( void ) noexcept;
-  void finish( void ) noexcept;
-  void set_state( FtState state ) noexcept;
-  void set_timer( FtAction action,  uint64_t delta_ms,
+  void finish( void ) noexcept;     /* final call before exit */
+  void stop_timers( void ) noexcept;/* stop activate, deactivate timers */
+
+  void set_state( FtState state ) noexcept; /* alter run state */
+  void set_timer( FtAction action,  uint64_t delta_ms, /* start an action */
                   uint64_t &ori_ns,  uint64_t &exp_ns ) noexcept;
-  void set_prepare_timer( void ) noexcept;
-  void set_activate_timer( void ) noexcept;
+  void set_prepare_timer( void ) noexcept; /* prepare to takeover */
+  void set_activate_timer( void ) noexcept; /* after prepare, time to activate*/
+
   int64_t expired_delta_ms( uint64_t stamp_ns,  uint64_t delta_ms ) noexcept;
   void trim_ft_queue( void ) noexcept;
   void prepare_takeover( uint8_t action,  uint64_t deadline ) noexcept;

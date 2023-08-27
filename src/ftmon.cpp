@@ -20,13 +20,15 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   EvRvClient & client;          /* connection to rv */
   RvFt         ft;
   FtParameters param;
+  uint32_t     ft_rank;
   bool         is_running,
                is_finishing,
+               test_rejoin,
                top;
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  bool t )
-    : poll( p ), client( c ), ft( c, this ), is_running( false ),
-      is_finishing( false ), top( t ) {}
+    : poll( p ), client( c ), ft( c, this ), ft_rank( 0 ), is_running( false ),
+      is_finishing( false ), test_rejoin( false ), top( t ) {}
 
   /* after CONNECTED message */
   virtual void on_connect( EvSocket &conn ) noexcept;
@@ -61,8 +63,9 @@ void
 RvDataCallback::start_ft( void ) noexcept
 {
   this->ft.start( this->param );
-  this->is_running = true;
   this->poll.timer.add_timer_seconds( *this, 3, 1, 0 );
+  if ( this->test_rejoin && this->param.join_ms != 0 )
+    this->poll.timer.add_timer_seconds( *this, 20, 1, 1 );
 }
 
 const char *
@@ -87,14 +90,17 @@ RvDataCallback::ts( uint64_t mono,  const char *str,  char *buf ) noexcept
 }
 
 bool
-RvDataCallback::timer_cb( uint64_t , uint64_t ) noexcept
+RvDataCallback::timer_cb( uint64_t , uint64_t event_id ) noexcept
 {
-  if ( this->top ) {
+  if ( event_id == 0 && this->top ) {
     printf( "\033[H\033[J" );
-    printf( "%.*s hb:%u, act:%u, pre:%u, fin:%u, sta:%s\n",
+    printf(
+    "%.*s hb:%u, act:%u, pre:%u, fin:%u, sta:%s, pri:%u, sec:%u, j:%u\n",
             (int) this->ft.ft_sub_len, this->ft.ft_sub,
             this->ft.heartbeat_ms, this->ft.activate_ms, this->ft.prepare_ms,
-            this->ft.finish_ms, RvFt::state_str[ this->ft.me.state ]  );
+            this->ft.finish_ms, RvFt::state_str[ this->ft.me.state ],
+            this->ft.state_count.primary, this->ft.state_count.secondary,
+            this->ft.state_count.join );
     size_t maxlen = 0;
     for ( uint32_t i = 0; i < this->ft.ft_queue.count; i++ ) {
       FtPeer *p = this->ft.ft_queue.ptr[ i ];
@@ -115,13 +121,24 @@ RvDataCallback::timer_cb( uint64_t , uint64_t ) noexcept
     }
     fflush( stdout );
   }
+  else if ( this->is_running && event_id == 1 ) {
+    if ( this->is_finishing )
+      return false;
+    this->ft.deactivate();
+    this->poll.timer.add_timer_seconds( *this, 1, 1, 2 );
+  }
+  else if ( event_id == 2 ) {
+    if ( ! this->is_finishing )
+      this->ft.activate();
+    return false;
+  }
   return true;
 }
 /* if ctrl-c, program signalled, unsubscribe the subs */
 void
 RvDataCallback::on_stop( void ) noexcept
 {
-  if ( this->is_running && ! this->is_finishing ) {
+  if ( ! this->is_finishing ) {
     if ( this->ft.stop() == 0 ) {
       this->is_running = false;
       this->poll.quit++;
@@ -143,6 +160,22 @@ RvDataCallback::on_ft_change( uint8_t action ) noexcept
     this->is_running   = false;
     this->is_finishing = false;
     this->poll.quit++;
+  }
+  else if ( action == RvFt::ACTION_ACTIVATE ||
+            action == RvFt::ACTION_DEACTIVATE ) {
+    this->is_running = true;
+  }
+  else if ( action == RvFt::ACTION_LISTEN ) {
+    this->is_running = false;
+  }
+  if ( this->is_running || this->ft_rank > 0 ) {
+    uint32_t new_rank = this->ft.me.pos;
+    if ( this->ft_rank != new_rank ) {
+      printf( "new_rank = %u -> %u (p:%u, s:%u, j:%u)\n", this->ft_rank,
+              new_rank, this->ft.state_count.primary,
+              this->ft.state_count.secondary, this->ft.state_count.join );
+      this->ft_rank = new_rank;
+    }
   }
 }
 
@@ -200,6 +233,7 @@ main( int argc, const char *argv[] )
              * act     = get_arg( x, argc, argv, 1, "-a", "-activate", NULL ),
              * pre     = get_arg( x, argc, argv, 1, "-p", "-prepare", NULL ),
              * join    = get_arg( x, argc, argv, 0, "-j", "-join", NULL ),
+             * rejoin  = get_arg( x, argc, argv, 0, "-r", "-rejoin", NULL ),
              * log     = get_arg( x, argc, argv, 1, "-l", "-log", NULL ),
              * top     = get_arg( x, argc, argv, 0, "-t", "-top", NULL ),
              * help    = get_arg( x, argc, argv, 0, "-h", "-help", 0 );
@@ -219,6 +253,7 @@ main( int argc, const char *argv[] )
              "  -a act     = activate millisecs\n"
              "  -p prepare = prepare millisecs\n"
              "  -j         = join network, otherwise observe\n"
+             "  -r         = return to listen and rejoin every 20s\n"
              "  -l log     = write to debug log\n"
              "  -t         = top, update display\n"
              "ft subject is _FT.<cluster>\n", argv[ 0 ] );
@@ -257,6 +292,8 @@ main( int argc, const char *argv[] )
     mout.open( log, "w" );
     data.ft.mout = &mout;
   }
+  if ( rejoin != NULL )
+    data.test_rejoin = true;
   /* connect to daemon */
   if ( ! conn.connect( parm, &data, &data ) ) {
     fprintf( stderr, "Failed to connect to daemon\n" );
