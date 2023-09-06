@@ -16,6 +16,7 @@
 #include <raikv/util.h>
 #include <raikv/ev_publish.h>
 #include <raikv/array_space.h>
+#include <raikv/ev_cares.h>
 #include <sassrv/ev_rv.h>
 
 using namespace rai;
@@ -1158,26 +1159,17 @@ RvMcast::is_empty_string( const char *s ) noexcept
 uint32_t
 RvMcast::lookup_host_ip4( const char *host ) noexcept
 {
-  struct addrinfo * h = NULL,
-                  * res,
-                    hints;
+  struct addrinfo * res;
   uint32_t ipaddr = 0;
-
-  ::memset( &hints, 0, sizeof( hints ) );
-  hints.ai_family   = AF_INET;
-  hints.ai_socktype = SOCK_DGRAM;
-  hints.ai_protocol = IPPROTO_UDP;
-
-  if ( ::getaddrinfo( host, NULL, &hints, &h ) == 0 ) {
-    for ( res = h; res != NULL; res = res->ai_next ) {
-      if ( res->ai_family == AF_INET &&
-           res->ai_addrlen >= sizeof( struct sockaddr_in ) ) {
-        struct sockaddr_in *in = (struct sockaddr_in *) res->ai_addr;
-        ::memcpy( &ipaddr, &in->sin_addr.s_addr, 4 );
-        break;
-      }
+  CaresAddrInfo info( NULL );
+  info.get_address( host, 7500, OPT_AF_INET );
+  for ( res = info.addr_list; res != NULL; res = res->ai_next ) {
+    if ( res->ai_family == AF_INET &&
+         res->ai_addrlen >= sizeof( struct sockaddr_in ) ) {
+      struct sockaddr_in *in = (struct sockaddr_in *) res->ai_addr;
+      ::memcpy( &ipaddr, &in->sin_addr.s_addr, 4 );
+      break;
     }
-    ::freeaddrinfo( h );
   }
   return ipaddr;
 }

@@ -75,25 +75,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
     return this->EvSocket::fd != -1;
   }
   /* restart the protocol parser */
-  void initialize_state( void ) {
-    this->cb          = NULL;
-    this->rv_state    = VERS_RECV;
-    this->session_len = 0;
-    this->control_len = 0;
-    this->userid_len  = 0;
-    this->gob_len     = 0;
-    this->vmaj        = 5;
-    this->vmaj        = 4;
-    this->vupd        = 2;
-    this->ipport      = 0;
-    this->ipaddr      = 0;
-    this->network     = NULL;
-    this->service     = NULL;
-    this->notify      = NULL;
-    this->save_buf    = NULL;
-    this->param_buf   = NULL;
-    this->save_len    = 0;
-  }
+  void initialize_state( void ) noexcept;
   uint16_t make_inbox( char *inbox, uint32_t num ) noexcept;
   uint64_t is_inbox( const char *sub,  size_t sub_len ) {
     size_t off = this->control_len - 1;

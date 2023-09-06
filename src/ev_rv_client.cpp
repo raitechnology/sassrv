@@ -50,6 +50,33 @@ EvRvClient::EvRvClient( EvPoll &p ) noexcept
 
 bool RvClientCB::on_rv_msg( EvPublish & ) noexcept { return true; }
 
+/* restart the protocol parser */
+void
+EvRvClient::initialize_state( void ) noexcept
+{
+  this->cb          = NULL;
+  this->rv_state    = VERS_RECV;
+  this->session_len = 0;
+  this->control_len = 0;
+  this->userid_len  = 0;
+  this->gob_len     = 0;
+  this->vmaj        = 5;
+  this->vmaj        = 4;
+  this->vupd        = 2;
+  this->ipport      = 0;
+  this->ipaddr      = 0;
+  this->network     = NULL;
+  this->service     = NULL;
+  this->notify      = NULL;
+  if ( this->save_buf != NULL )
+    ::free( this->save_buf );
+  if ( this->param_buf != NULL )
+    ::free( this->param_buf );
+  this->save_buf    = NULL;
+  this->param_buf   = NULL;
+  this->save_len    = 0;
+}
+
 bool
 EvRvClient::connect( EvRvClientParameters &p,
                      EvConnectionNotify *n,
@@ -92,9 +119,10 @@ EvRvClient::connect( EvRvClientParameters &p,
     }
   }
   this->initialize_state();
-  if ( EvTcpConnection::connect( *this, daemon, port, p.opts ) != 0 )
+  if ( EvTcpConnection::connect( *this, daemon, port, p.opts ) != 0 ) {
+    this->rv_state = ERR_CLOSE;
     return false;
-
+  }
   if ( p.network != NULL || p.service != NULL ) {
     size_t net_len = ( p.network != NULL ? ::strlen( p.network ) + 1 : 0 );
     size_t svc_len = ( p.service != NULL ? ::strlen( p.service ) + 1 : 0 );
@@ -602,6 +630,8 @@ EvRvClient::queue_send( const void *buf,  size_t buflen,
     /*this->send( buf, off, msg, msg_len );*/
     return this->idle_push_write();
   }
+  if ( this->rv_state == ERR_CLOSE )
+    return false;
   size_t newlen = this->save_len + buflen + msglen;
   this->save_buf = ::realloc( this->save_buf, newlen );
   ::memcpy( &((char *) this->save_buf)[ this->save_len ], buf, buflen );
@@ -651,6 +681,7 @@ EvRvClient::release( void ) noexcept
     this->param_buf = NULL;
   }
   this->EvConnection::release_buffers();
+  this->rv_state = ERR_CLOSE;
 }
 /* a new subscription */
 void

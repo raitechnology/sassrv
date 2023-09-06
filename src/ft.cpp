@@ -48,6 +48,18 @@ static char * hms( uint64_t now,  char *buf ) noexcept {
 }
 
 void
+RvFt::release( void ) noexcept
+{
+  this->peer_ht->clear_all();
+  this->ft_queue.clear();
+  while ( this->ft_free != NULL ) {
+    FtPeerFree * next = this->ft_free->next;
+    delete this->ft_free;
+    this->ft_free = next;
+  }
+}
+
+void
 RvFt::notify_change( uint8_t action ) noexcept
 {
   this->cb->on_ft_change( action );
@@ -69,6 +81,8 @@ void
 RvFt::start( FtParameters &param ) noexcept
 {
   this->poll.update_time_ns();
+  this->state_count.init();
+  this->me.zero();
   this->me.start_ns    = this->poll.now_ns;
   this->me.last_rcv_ns = 0;
   this->me.weight      = param.weight;
@@ -85,8 +99,10 @@ RvFt::start( FtParameters &param ) noexcept
   this->inbox_num      = param.inbox_num;
   this->sync_inbox_num = param.sync_inbox_num;
   this->client.make_inbox( this->sync_inbox, param.sync_inbox_num );
-  this->ft_sub         = param.ft_sub;
-  this->ft_sub_len     = param.ft_sub_len;
+  this->ft_sub_len = param.ft_sub_len < MAX_FT_SUB_LEN ? param.ft_sub_len :
+                                                         MAX_FT_SUB_LEN - 1;
+  ::memcpy( this->ft_sub, param.ft_sub, this->ft_sub_len );
+  this->ft_sub[ this->ft_sub_len ] = '\0';
   this->accuracy_warn  = 100;
 
   size_t len = param.user_len;
@@ -492,7 +508,6 @@ RvFt::start_hb( uint32_t hb_ival,  uint32_t act_ival,
       timer.remove_timer_cb( *this, this->tid, ACTION_PREPARE );
     if ( this->timer_clear( ACTION_HEARTBEAT ) )
       timer.remove_timer_cb( *this, this->tid, ACTION_HEARTBEAT );
-
   }
   if ( ! this->timer_test_set( ACTION_HEARTBEAT ) ) {
     this->last_hb_ns = this->poll.mono_ns;

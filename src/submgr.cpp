@@ -122,8 +122,53 @@ RvSubscriptionDB::RvSubscriptionDB( EvRvClient &c,
                 host_inbox_base( 1000000 ), session_inbox_base( 1000 ),
                 is_subscribed( false ), is_all_subscribed( false ), mout( 0 )
 {
-  this->host_ht = kv::UIntHashTab::resize( NULL );
-  this->sess_ht = kv::UIntHashTab::resize( NULL );
+}
+
+void
+RvSubscriptionDB::release( void ) noexcept
+{
+  RouteLoc loc;
+  uint32_t i;
+  for ( RvSessionEntry *entry = this->session_tab.first( loc );
+        entry != NULL; entry = this->session_tab.next( loc ) ) {
+    if ( entry->state != RvSessionEntry::RV_SESSION_STOP )
+      entry->stop( 0 );
+  }
+  for ( i = 0; i < this->host_tab.count; i++ ) {
+    RvHostEntry & entry = this->host_tab.ptr[ i ];
+    if ( entry.state != RvHostEntry::RV_HOST_STOP )
+      entry.stop( 0 );
+  }
+  for ( i = 0; i < this->filters.count; i++ ) {
+    Filter &f = this->filters.ptr[ i ];
+    if ( f.wild != NULL ) {
+      ::free( f.wild );
+      f.wild = NULL;
+    }
+  }
+
+  this->host_tab.clear();
+  this->session_tab.release();
+  this->sub_tab.release();
+  this->filters.clear();
+  if ( this->host_ht != NULL )
+    delete this->host_ht;
+  if ( this->sess_ht != NULL )
+    delete this->sess_ht;
+
+  this->cur_mono          = 0;
+  this->next_session_ctr  = 0;
+  this->next_subject_ctr  = 0;
+  this->soft_host_query   = 0;
+  this->first_free_host   = 0;
+  this->next_gc           = 0;
+  this->host_ht           = NULL;
+  this->sess_ht           = NULL;
+  this->is_subscribed     = false;
+  this->is_all_subscribed = false;
+  this->subscriptions.reset();
+  this->sessions.reset();
+  this->subscriptions.reset();
 }
 
 uint32_t
@@ -236,6 +281,8 @@ RvSubscriptionDB::start_subscriptions( bool all ) noexcept
 {
   if ( this->is_subscribed )
     return;
+  this->host_ht           = kv::UIntHashTab::resize( NULL );
+  this->sess_ht           = kv::UIntHashTab::resize( NULL );
   this->is_subscribed     = true;
   this->is_all_subscribed = all;
   this->cur_mono          = this->client.poll.mono_ns / NS;

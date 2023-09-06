@@ -23,12 +23,13 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   uint32_t     ft_rank;
   bool         is_running,
                is_finishing,
+               is_stopped,
                test_rejoin,
                top;
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  bool t )
     : poll( p ), client( c ), ft( c, this ), ft_rank( 0 ), is_running( false ),
-      is_finishing( false ), test_rejoin( false ), top( t ) {}
+      is_finishing( false ), is_stopped( false ), test_rejoin( false ), top( t ) {}
 
   /* after CONNECTED message */
   virtual void on_connect( EvSocket &conn ) noexcept;
@@ -62,6 +63,9 @@ RvDataCallback::on_connect( EvSocket &conn ) noexcept
 void
 RvDataCallback::start_ft( void ) noexcept
 {
+  this->is_finishing = false;
+  this->is_stopped = false;
+  this->is_running = false;
   this->ft.start( this->param );
   this->poll.timer.add_timer_seconds( *this, 3, 1, 0 );
   if ( this->test_rejoin && this->param.join_ms != 0 )
@@ -138,6 +142,7 @@ RvDataCallback::timer_cb( uint64_t , uint64_t event_id ) noexcept
 void
 RvDataCallback::on_stop( void ) noexcept
 {
+  this->is_stopped = true;
   if ( ! this->is_finishing ) {
     if ( this->ft.stop() == 0 ) {
       this->is_running = false;
@@ -193,9 +198,14 @@ RvDataCallback::on_shutdown( EvSocket &conn,  const char *err,
   int len = (int) conn.get_peer_address_strlen();
   printf( "Shutdown: %.*s %.*s\n",
           len, conn.peer_address.buf, (int) errlen, err );
+  this->ft.finish_ms = 0;
+  if ( ! this->is_stopped )
+    this->on_stop();
+#if 0
   /* if disconnected by tcp, usually a reconnect protocol, but this just exits*/
   if ( this->poll.quit == 0 )
     this->poll.quit = 1; /* causes poll loop to exit */
+#endif
 }
 
 bool
@@ -319,6 +329,7 @@ main( int argc, const char *argv[] )
       /*poll.quit++;*/
     }
   }
+  data.ft.release();
   return 0;
 }
 

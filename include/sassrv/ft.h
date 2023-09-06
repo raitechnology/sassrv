@@ -119,6 +119,9 @@ struct FtStateCount {
   uint32_t member_count( void ) const {
     return this->primary + this->secondary + this->join;
   }
+  void init( void ) {
+    this->primary = this->secondary = this->join = 0;
+  }
 };
 
 struct FtPeer {
@@ -205,6 +208,8 @@ struct FtPeerFree {
   void release_peer( void *p ) noexcept;
 };
 
+static const size_t MAX_FT_SUB_LEN = 64;
+
 struct RvFt : public kv::EvTimerCallback {
   enum FtAction {
     ACTION_LISTEN     = 0, /* after subscribing */
@@ -275,7 +280,7 @@ struct RvFt : public kv::EvTimerCallback {
                  timer_mask;      /* 1 << ACTION bits, set when timer active */
   FtStateCount   state_count;
   FtPeerFree   * ft_free;         /* unused peer mem */
-  const char   * ft_sub;          /* subject to publish */
+  char           ft_sub[ MAX_FT_SUB_LEN ]; /* subject to publish */
   size_t         ft_sub_len;
   char           sync_inbox[ MAX_RV_INBOX_LEN ];
   md::MDOutput * mout;            /* debug log output */
@@ -283,6 +288,7 @@ struct RvFt : public kv::EvTimerCallback {
 
   RvFt( EvRvClient &c,  RvFtListener *ftl ) noexcept;
 
+  void release( void ) noexcept;
   void start( FtParameters &param ) noexcept; /* start hb, go to listen state */
   void activate( void ) noexcept;   /* join the ft network, listen -> join */
   void deactivate( void ) noexcept; /* go to a listen state, run -> listen */

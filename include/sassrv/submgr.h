@@ -240,6 +240,10 @@ struct RvSubscriptionDB {
     uint32_t active,
              removed;
     GCCounters() : active( 0 ), removed( 0 ) {}
+    void reset( void ) {
+      this->active  = 0;
+      this->removed = 0;
+    }
   };
 
   struct Filter {
@@ -277,6 +281,7 @@ struct RvSubscriptionDB {
 
   RvSubscriptionDB( EvRvClient &c,  RvSubscriptionListener *sl ) noexcept;
 
+  void release( void ) noexcept;
   static bool match_rv_wildcard( const char *wild,  size_t wild_len,
                                  const char *sub,  size_t sub_len ) noexcept;
   static const char * is_rv_wildcard( const char *wild,
