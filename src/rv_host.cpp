@@ -1185,7 +1185,7 @@ RvMcast::lookup_host_ip4( const char *host,  uint32_t &netmask ) noexcept
 #if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
   ifconf conf;
   ifreq  ifbuf[ 256 ],
-       * ifp, ifa, ifm;
+       * ifp;
   int    s  = ::socket( PF_INET, SOCK_DGRAM, IPPROTO_UDP );
 
   ::memset( ifbuf, 0, sizeof( ifbuf ) );
@@ -1198,23 +1198,16 @@ RvMcast::lookup_host_ip4( const char *host,  uint32_t &netmask ) noexcept
     ifp = ifbuf;
     /* for each interface */
     for ( ; (uint8_t *) ifp < &((uint8_t *) ifbuf)[ conf.ifc_len ]; ifp++ ) {
-      ::strcpy( ifa.ifr_name, ifp->ifr_name );
-      ::strcpy( ifm.ifr_name, ifp->ifr_name );
+      uint32_t addr = ((struct sockaddr_in &) ifp->ifr_addr).sin_addr.s_addr;
+      if ( ::ioctl( s, SIOCGIFNETMASK, ifp ) < 0 )
+          continue;
+      uint32_t mask = ((struct sockaddr_in &) ifp->ifr_netmask).sin_addr.s_addr;
 
-      /* fetch flags check if multicast exists, get address and netmask */
-      if ( ::ioctl( s, SIOCGIFADDR, &ifa )    >= 0 &&
-           ifa.ifr_addr.sa_family             == AF_INET &&
-           ::ioctl( s, SIOCGIFNETMASK, &ifm ) >= 0 ) {
-        uint32_t mask, addr;
-        mask = ((struct sockaddr_in &) ifm.ifr_netmask).sin_addr.s_addr;
-        addr = ((struct sockaddr_in &) ifa.ifr_addr).sin_addr.s_addr;
-
-        if ( ( addr & mask ) == ( ipaddr & mask ) ) {
-          netmask = mask;
-          ipaddr  = addr;
-          ::close( s );
-          goto found_address;
-        }
+      if ( ( addr & mask ) == ( ipaddr & mask ) ) {
+        netmask = mask;
+        ipaddr  = addr;
+        ::close( s );
+        goto found_address;
       }
     }
   }
