@@ -179,7 +179,7 @@ struct RvDataCallback {
       no_dictionary( nodict ), is_subscribed( false ), have_dictionary( false ), dump_hex( hex ),
       show_rate( rate ), subj_buf( 0 ), rand_schedule( 0 ), msg_recv( 0 ),
       msg_recv_bytes( 0 ), ibx_ht( 0 ),
-      rand_range( rng ), max_time_secs( secs ), use_random( rng > cnt ),
+      rand_range( rng ), max_time_secs( secs ), use_random( rng > n ),
       use_zipf( zipf ), quiet( q ), track_time( ts ),
       total_latency( 0 ), miss_latency( 0 ), trail_latency( 0 ),
       total_count( 0 ), miss_count( 0 ), repeat_count( 0 ), trail_count( 0 ),
