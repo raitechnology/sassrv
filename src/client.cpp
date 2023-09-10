@@ -305,6 +305,12 @@ RvDataCallback::start_subscriptions( void ) noexcept
         out.ts().printf( "Subscribe \"%.*s\", reply \"%.*s\"\n",
                          (int) subject_len, subject, (int) inbox_len, inbox );
       }
+      else {
+        if ( n == 0 )
+          out.ts().printf( "Subscribe \"%.*s\"", (int) subject_len, subject );
+        else
+          out.printf( ", \"%.*s\"", (int) subject_len, subject );
+      }
       /* subscribe with inbox reply */
       this->client.subscribe( subject, subject_len, inbox, inbox_len );
       this->subj_ht.upsert( subject, subject_len, n );
@@ -312,6 +318,8 @@ RvDataCallback::start_subscriptions( void ) noexcept
     if ( n >= this->num_subs * this->sub_count )
       break;
   }
+  if ( this->quiet )
+    out.puts( "\n" );
   out.flush();
 
   if ( this->show_rate ) {
@@ -477,6 +485,9 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
         this->add_update( sub_idx, pub_len );
         have_sub = true;
       }
+      else {
+        out.printf( "sub %.*s not found\n", (int) pub.subject_len, pub.subject );
+      }
     }
     if ( this->show_rate ) {
       this->msg_count++;
@@ -487,6 +498,7 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
   m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, pub.msg_enc, this->dict, mem );
   MDFieldIter * iter = NULL;
   double delta = 0, next_delta = 0, duration = 0;
+  double next = 0, expect = 0, cur = 0;
   uint64_t  sequence = 0, last_sequence = 0;
   if ( m != NULL && m->get_field_iter( iter ) == 0 && iter->first() == 0 ) {
     MDName nm;
@@ -506,7 +518,7 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
                      dur( durati, sizeof( durati ) ),
                      seq( seqno, sizeof( seqno ) );
         MDDecimal dec;
-        double    next = 0, val, last, cur;
+        double val;
         while ( iter->next() == 0 && iter->get_name( nm ) == 0 ) {
           bool is_volume   = nm.equals( vol ),
                is_duration = false,
@@ -542,12 +554,12 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
             }
           }
         }
-        last = this->next_pub[ sub_idx ]; /* last should be close to current */
+        expect = this->next_pub[ sub_idx ]; /* next should be close to current */
         last_sequence = this->last_seqno[ sub_idx ];
         cur = current_realtime_s();
-        if ( last != 0 ) {
+        if ( expect != 0 ) {
           bool missed = ( sequence > ( last_sequence + 1 ) );
-          delta = cur - last; /* positive is secs in before current time */
+          delta = cur - expect; /* positive is secs in before current time */
           if ( ! missed && delta > 0 ) {
             uint32_t i = 0;
             for ( ; i < histogram_size; i++ ) {
@@ -595,11 +607,19 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
       }
     }
   }
-  if ( this->quiet )
+  if ( this->quiet ) {
+    if ( delta > 1.0 || delta < 0 ) {
+      out.ts().printf( "## %.*s update latency %.6f, next expected %f, "
+                       "cur expect %f, actual time %f, next %f\n",
+                       (int) pub.subject_len, pub.subject,
+                       delta, next_delta, expect, cur, next );
+    }
     return true;
+  }
   if ( delta != 0 || next_delta != 0 ) {
-    out.ts().printf( "## update latency %.6f, next expected %f\n", delta,
-                     next_delta );
+    out.ts().printf( "## update latency %.6f, next expected %f, "
+                     "cur expect %f, actual time %f, next %f\n",
+                     delta, next_delta, expect, cur, next );
   }
   if ( last_sequence != 0 && sequence != 0 ) {
     out.ts().printf( "## last seqno %lu, current seqno %lu\n", last_sequence,
