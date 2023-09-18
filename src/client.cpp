@@ -348,8 +348,16 @@ RvDataCallback::on_unsubscribe( void ) noexcept
       this->make_subject( n, subject, subject_len );
       if ( ! this->quiet ) {
         out.ts().printf( "Unsubscribe \"%.*s\" initial=%u update=%u bytes=%u\n",
-                (int) subject_len, subject, this->msg_recv[ n ] & 1,
-                this->msg_recv[ n ] >> 1, (uint32_t) this->msg_recv_bytes[ n ] );
+               (int) subject_len, subject, this->msg_recv[ n ] & 1,
+               this->msg_recv[ n ] >> 1, (uint32_t) this->msg_recv_bytes[ n ] );
+      }
+      else {
+        if ( n == 0 )
+          out.ts().printf( "Unsubscribe \"%.*s\"", (int) subject_len, subject );
+        else
+          out.printf( ", \"%.*s\"", (int) subject_len, subject );
+        out.printf( " %u.%u", ( this->msg_recv[ n ] >> 1 ),
+                              ( this->msg_recv[ n ] & 1 ) );
       }
       if ( ( this->msg_recv[ n ] & 1 ) != 0 )
         this->sub_initial_count++;
@@ -361,6 +369,8 @@ RvDataCallback::on_unsubscribe( void ) noexcept
     if ( n >= this->num_subs * this->sub_count )
       break;
   }
+  if ( this->quiet )
+    out.puts( "\n" );
   out.flush();
 }
 
@@ -608,11 +618,12 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
     }
   }
   if ( this->quiet ) {
-    if ( delta > 1.0 || delta < 0 ) {
+    if ( delta > 2.0 || delta < -1.0 ) {
       out.ts().printf( "## %.*s update latency %.6f, next expected %f, "
                        "cur expect %f, actual time %f, next %f\n",
                        (int) pub.subject_len, pub.subject,
                        delta, next_delta, expect, cur, next );
+      out.flush();
     }
     return true;
   }
