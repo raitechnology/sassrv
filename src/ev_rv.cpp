@@ -1080,8 +1080,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
     rvmsg.append_string( SARG( "mtype" ), mtype, 2 );
   }
   if ( rvmsg.err == 0 && replen > 0 ) {
-    rvmsg.append_string( SARG( "return" ), reply, replen + 1 );
-    rvmsg.buf[ rvmsg.off - 1 ] = '\0';
+    rvmsg.append_string( SARG( "return" ), reply, replen );
   }
   if ( rvmsg.err == 0 ) {
     RvMsgWriter submsg( rvmsg.mem, NULL, 0 );

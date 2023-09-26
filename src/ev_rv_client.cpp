@@ -521,8 +521,7 @@ EvRvClient::publish( EvPublish &pub ) noexcept
        .append_string( SARG( "mtype" ), SARG( "D" ) );
   if ( rvmsg.err == 0 && pub.reply_len > 0 ) {
     rvmsg.append_string( SARG( "return" ), (const char *) pub.reply,
-                         pub.reply_len + 1 );
-    rvmsg.buf[ rvmsg.off - 1 ] = '\0';
+                         pub.reply_len );
   }
   if ( rvmsg.err == 0 ) {
     RvMsgWriter  submsg( rvmsg.mem, NULL, 0 );
