@@ -208,61 +208,6 @@ RvSubscriptionDB::add_wildcard( const char *wildcard ) noexcept
 }
 
 bool
-RvSubscriptionDB::match_rv_wildcard( const char *wild,  size_t wild_len,
-                                     const char *sub,  size_t sub_len ) noexcept
-{
-  const char * w   = wild,
-             * end = &wild[ wild_len ];
-  size_t       k   = 0;
-
-  for (;;) {
-    if ( k == sub_len || w == end ) {
-      if ( k == sub_len && w == end )
-        return true;
-      return false; /* no match */
-    }
-    if ( *w == '>' &&
-         ( ( w == wild || *(w-1) == '.' ) && w+1 == end ) )
-      return true;
-    else if ( *w == '*' &&
-              ( ( w   == wild || *(w-1) == '.' ) && /* * || *. || .* || .*. */
-                ( w+1 == end  || *(w+1) == '.' ) ) ) {
-      for (;;) {
-        if ( k == sub_len || sub[ k ] == '.' )
-          break;
-        k++;
-      }
-      w++;
-      continue;
-    }
-    if ( *w != sub[ k ] )
-      return false; /* no match */
-    w++;
-    k++;
-  }
-}
-
-const char *
-RvSubscriptionDB::is_rv_wildcard( const char *wild,  size_t wild_len ) noexcept
-{
-  const char * w   = wild,
-             * end = &wild[ wild_len ];
-
-  for ( ; ; w++ ) {
-    if ( w == end )
-      return NULL;
-    if ( *w == '>' &&
-         ( ( w == wild || *(w-1) == '.' ) && w+1 == end ) )
-      return w;
-    else if ( *w == '*' &&
-              ( ( w   == wild || *(w-1) == '.' ) && /* * || *. || .* || .*. */
-                ( w+1 == end  || *(w+1) == '.' ) ) ) {
-      return w;
-    }
-  }
-}
-
-bool
 RvSubscriptionDB::is_matched( const char *sub,  size_t sub_len ) noexcept
 {
   if ( this->filters.count == 0 )

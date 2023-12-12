@@ -4,6 +4,9 @@
 #include <sassrv/ev_rv.h>
 
 namespace rai {
+namespace trdp {
+  struct TrdpSvc;
+}
 namespace sassrv {
 
 struct EvRvClientParameters {
@@ -42,6 +45,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
   RvMsgIn      msg_in;         /* current message recvd */
   RvClientCB * cb;
   RvState      rv_state;       /* one of the above states */
+  bool         no_write;
   char         session[ 64 ],  /* session id of this connection */
                control[ 64 ],  /* the inbox name */
                userid[ 64 ],   /* the userid */
@@ -64,6 +68,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
              * param_buf;
   size_t       save_len;
   md::MDMsgMem spc;
+  trdp::TrdpSvc * svc;
 
   EvRvClient( kv::EvPoll &p ) noexcept;
 
@@ -75,7 +80,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
     return this->EvSocket::fd != -1;
   }
   /* restart the protocol parser */
-  void initialize_state( void ) noexcept;
+  void initialize_state( bool is_null ) noexcept;
   uint16_t make_inbox( char *inbox, uint32_t num ) noexcept;
   uint64_t is_inbox( const char *sub,  size_t sub_len ) {
     size_t off = this->control_len - 1;
@@ -122,6 +127,61 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
   virtual void on_reassert( uint32_t fd,  kv::RouteVec<kv::RouteSub> &sub_db,
                             kv::RouteVec<kv::RouteSub> &pat_db ) noexcept;
 };
+
+static inline bool
+match_rv_wildcard( const char *wild,  size_t wild_len,
+                   const char *sub,  size_t sub_len ) noexcept
+{
+  const char * w   = wild,
+             * end = &wild[ wild_len ];
+  size_t       k   = 0;
+
+  for (;;) {
+    if ( k == sub_len || w == end ) {
+      if ( k == sub_len && w == end )
+        return true;
+      return false; /* no match */
+    }
+    if ( *w == '>' &&
+         ( ( w == wild || *(w-1) == '.' ) && w+1 == end ) )
+      return true;
+    else if ( *w == '*' &&
+              ( ( w   == wild || *(w-1) == '.' ) && /* * || *. || .* || .*. */
+                ( w+1 == end  || *(w+1) == '.' ) ) ) {
+      for (;;) {
+        if ( k == sub_len || sub[ k ] == '.' )
+          break;
+        k++;
+      }
+      w++;
+      continue;
+    }
+    if ( *w != sub[ k ] )
+      return false; /* no match */
+    w++;
+    k++;
+  }
+}
+
+static inline const char *
+is_rv_wildcard( const char *wild,  size_t wild_len ) noexcept
+{
+  const char * w   = wild,
+             * end = &wild[ wild_len ];
+
+  for ( ; ; w++ ) {
+    if ( w == end )
+      return NULL;
+    if ( *w == '>' &&
+         ( ( w == wild || *(w-1) == '.' ) && w+1 == end ) )
+      return w;
+    else if ( *w == '*' &&
+              ( ( w   == wild || *(w-1) == '.' ) && /* * || *. || .* || .*. */
+                ( w+1 == end  || *(w+1) == '.' ) ) ) {
+      return w;
+    }
+  }
+}
 
 }
 }

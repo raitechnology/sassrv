@@ -219,7 +219,7 @@ gen_files   :=
 ev_rv_defines  := -DSASSRV_VER=$(ver_build)
 $(objd)/ev_rv.o : .copr/Makefile
 $(objd)/ev_rv.fpic.o : .copr/Makefile
-libsassrv_files := ev_rv rv_host ev_rv_client submgr ft
+libsassrv_files := ev_rv rv_host ev_rv_client submgr ft mc
 libsassrv_cfile := $(addprefix src/, $(addsuffix .cpp, $(libsassrv_files)))
 libsassrv_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libsassrv_files)))
 libsassrv_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libsassrv_files)))
@@ -235,7 +235,7 @@ $(libd)/libsassrv.$(dll): $(libsassrv_dbjs) $(dlnk_dep)
 all_libs    += $(libd)/libsassrv.a
 all_dlls    += $(libd)/libsassrv.$(dll)
 all_depends += $(libsassrv_deps)
-sassrv_lib   := $(libd)/libsassrv.a
+sassrv_lib  := $(libd)/libsassrv.a
 
 server_defines := -DSASSRV_VER=$(ver_build)
 $(objd)/server.o : .copr/Makefile
@@ -318,6 +318,49 @@ $(bind)/rv_ftmon$(exe): $(rv_ftmon_objs) $(rv_ftmon_libs) $(lnk_dep)
 
 all_exes    += $(bind)/rv_ftmon$(exe)
 all_depends += $(rv_ftmon_deps)
+
+librvlib_files := rv5_api
+librvlib_cfile := $(addprefix src/, $(addsuffix .cpp, $(librvlib_files)))
+librvlib_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(librvlib_files)))
+librvlib_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(librvlib_files)))
+librvlib_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(librvlib_files))) \
+                  $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(librvlib_files)))
+librvlib_dlnk  := $(rv_dlnk_lib) $(dlnk_lib)
+librvlib_spec  := $(version)-$(build_num)_$(git_hash)
+librvlib_ver   := $(major_num).$(minor_num)
+
+$(libd)/librvlib.a: $(librvlib_objs)
+$(libd)/librvlib.$(dll): $(librvlib_dbjs) $(rv_dlnk_dep) $(dlnk_dep)
+
+all_libs    += $(libd)/librvlib.a
+all_dlls    += $(libd)/librvlib.$(dll)
+all_depends += $(librvlib_deps)
+
+rv5_api_test_includes = -Iinclude/sassrv
+rv5_api_test_files := rv5_api_test
+rv5_api_test_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv5_api_test_files)))
+rv5_api_test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv5_api_test_files)))
+rv5_api_test_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv5_api_test_files)))
+rv5_api_test_libs  := $(sassrv_lib) $(libd)/librvlib.a
+rv5_api_test_lnk   := $(libd)/librvlib.a $(sassrv_lib) $(lnk_lib)
+
+$(bind)/rv5_api_test$(exe): $(rv5_api_test_objs) $(rv5_api_test_libs) $(lnk_dep)
+
+all_exes    += $(bind)/rv5_api_test$(exe)
+all_depends += $(rv5_api_test_deps)
+
+rv5_cpp_test_includes = -Iinclude/sassrv
+rv5_cpp_test_files := rv5_cpp_test rv5_api
+rv5_cpp_test_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv5_cpp_test_files)))
+rv5_cpp_test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv5_cpp_test_files)))
+rv5_cpp_test_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv5_cpp_test_files)))
+rv5_cpp_test_libs  := $(sassrv_lib) $(libd)/librvlib.a
+rv5_cpp_test_lnk   := $(libd)/librvlib.a $(sassrv_lib) $(lnk_lib)
+
+$(bind)/rv5_cpp_test$(exe): $(rv5_cpp_test_objs) $(rv5_cpp_test_libs) $(lnk_dep)
+
+all_exes    += $(bind)/rv5_cpp_test$(exe)
+all_depends += $(rv5_cpp_test_deps)
 
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
@@ -445,8 +488,9 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server$(exe) $(bind)/rv_client$(exe) $(bind)/rv_pub$(exe) $(bind)/rv_subtop $(bind)/rv_ftmon
+dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server$(exe) $(bind)/rv_client$(exe) $(bind)/rv_pub$(exe) $(bind)/rv_subtop$(exe) $(bind)/rv_ftmon$(exe)
 	chrpath -d $(libd)/libsassrv.$(dll)
+	chrpath -d $(libd)/librvlib.$(dll)
 	chrpath -d $(bind)/rv_server$(exe)
 	chrpath -d $(bind)/rv_client$(exe)
 	chrpath -d $(bind)/rv_pub$(exe)

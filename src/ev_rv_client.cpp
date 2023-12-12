@@ -6,6 +6,7 @@
 #include <raikv/ev_publish.h>
 #include <raikv/pattern_cvt.h>
 #include <sassrv/ev_rv_client.h>
+#include <sassrv/mc.h>
 #include <raimd/json_msg.h>
 #include <raimd/tib_msg.h>
 #include <raimd/tib_sass_msg.h>
@@ -16,6 +17,7 @@ using namespace rai;
 using namespace sassrv;
 using namespace kv;
 using namespace md;
+using namespace trdp;
 
 int rv_client_pub_verbose,
     rv_client_msg_verbose,
@@ -33,7 +35,8 @@ EvRvClient::EvRvClient( EvPoll &p ) noexcept
   : EvConnection( p, p.register_type( "rvclient" ) ),
     RouteNotify( p.sub_route ), sub_route( p.sub_route ),
     cb( 0 ), rv_state( VERS_RECV ), fwd_all_msgs( 1 ), fwd_all_subs( 1 ),
-    network( 0 ), service( 0 ), save_buf( 0 ), param_buf( 0 ), save_len( 0 )
+    network( 0 ), service( 0 ), save_buf( 0 ), param_buf( 0 ), save_len( 0 ),
+    svc( 0 )
 {
   if ( ! rv_client_init ) {
     rv_client_init = 1;
@@ -52,10 +55,11 @@ bool RvClientCB::on_rv_msg( EvPublish & ) noexcept { return true; }
 
 /* restart the protocol parser */
 void
-EvRvClient::initialize_state( void ) noexcept
+EvRvClient::initialize_state( bool is_null ) noexcept
 {
   this->cb          = NULL;
   this->rv_state    = VERS_RECV;
+  this->no_write    = false;
   this->session_len = 0;
   this->control_len = 0;
   this->userid_len  = 0;
@@ -75,6 +79,27 @@ EvRvClient::initialize_state( void ) noexcept
   this->save_buf    = NULL;
   this->param_buf   = NULL;
   this->save_len    = 0;
+  if ( is_null ) {
+    this->ipaddr = 0x7f000001;
+    this->ipport = 0x1234;
+    while ( this->gob_len < sizeof( this->gob ) - 1 )
+      this->gob[ this->gob_len++ ] = 1;
+    this->gob[ this->gob_len ] = '\0';
+    uint8_t * ip = (uint8_t *) (void *) &this->ipaddr;
+    char * ptr = this->session;
+    /* <ipaddr>.<pid><time><ptr> */
+    for ( size_t i = 0; i < 8; i += 2 ) {
+      *ptr++ = hexchar2( ( ip[ i/2 ] >> 4 ) & 0xf );
+      *ptr++ = hexchar2( ip[ i/2 ] & 0xf );
+    }
+    *ptr++ = '.';
+    this->start_stamp = kv_current_realtime_ns();
+    ptr += RvHost::time_to_str( this->start_stamp, ptr );
+    this->session_len = (uint16_t) ( ptr - this->session );
+    this->control_len = this->make_inbox( this->control, 1 );
+    this->rv_state = DATA_RECV;
+    this->no_write = true;
+  }
 }
 
 bool
@@ -84,6 +109,7 @@ EvRvClient::connect( EvRvClientParameters &p,
 {
   char * daemon = NULL, buf[ 256 ];
   int port = p.port;
+  bool is_null = false;
   if ( this->fd != -1 )
     return false;
   if ( p.daemon != NULL ) {
@@ -116,12 +142,25 @@ EvRvClient::connect( EvRvClientParameters &p,
         daemon += 3;
       if ( daemon[ 0 ] == '\0' )
         daemon = NULL;
+      if ( ::strcmp( daemon, "null" ) == 0 )
+        is_null = true;
     }
   }
-  this->initialize_state();
-  if ( EvTcpConnection::connect( *this, daemon, port, p.opts ) != 0 ) {
-    this->rv_state = ERR_CLOSE;
-    return false;
+  this->initialize_state( is_null );
+  if ( ! is_null ) {
+    if ( port == 0 )
+      port = 7500;
+    if ( EvTcpConnection::connect( *this, daemon, port, p.opts ) != 0 ) {
+      this->rv_state = ERR_CLOSE;
+      return false;
+    }
+  }
+  else {
+    this->fd = this->poll.get_null_fd();
+    this->sock_opts = OPT_NO_POLL;
+    this->PeerData::init_peer( this->poll.get_next_id(), this->fd,
+                               -1, NULL, "null" );
+    this->poll.add_sock( this );
   }
   if ( p.network != NULL || p.service != NULL ) {
     size_t net_len = ( p.network != NULL ? ::strlen( p.network ) + 1 : 0 );
@@ -148,6 +187,16 @@ EvRvClient::connect( EvRvClientParameters &p,
   }
   this->notify = n;
   this->cb     = c;
+
+  if ( is_null ) {
+    if ( this->network != NULL ) {
+      this->svc = TrdpSvc::create( this->poll, this->network, this->service );
+      if ( this->svc != NULL )
+        this->svc->db.conn = this;
+    }
+    if ( this->notify != NULL )
+      this->notify->on_connect( *this );
+  }
   return true;
 }
 
@@ -510,6 +559,8 @@ EvRvClient::on_msg( EvPublish &pub ) noexcept
 bool
 EvRvClient::publish( EvPublish &pub ) noexcept
 {
+  if ( this->no_write )
+    return true;
   size_t buf_len = 1024;
   if ( pub.subject_len + pub.reply_len > 1024 - 512 )
     buf_len = pub.subject_len + pub.reply_len + 512;
@@ -687,6 +738,8 @@ void
 EvRvClient::subscribe( const char *sub,  size_t sublen,
                        const char *rep,  size_t replen ) noexcept
 {
+  if ( this->no_write )
+    return;
   size_t  len    = sublen + replen,
           buflen = 1024;
 
@@ -702,8 +755,7 @@ EvRvClient::subscribe( const char *sub,  size_t sublen,
   if ( replen > 0 ) {
     if ( rep[ replen - 1 ] == '\0' )
       replen--;
-    msg.append_string( SARG( "return" ), rep, replen + 1 );
-    msg.buf[ msg.off - 1 ] = '\0';
+    msg.append_string( SARG( "return" ), rep, replen );
   }
   size_t size = msg.update_hdr();
   if ( rv_client_sub_verbose )
@@ -714,6 +766,8 @@ EvRvClient::subscribe( const char *sub,  size_t sublen,
 void
 EvRvClient::unsubscribe( const char *sub,  size_t sublen ) noexcept
 {
+  if ( this->no_write )
+    return;
   size_t  buflen = 1024;
 
   if ( buflen < (size_t) sublen * 2 + 32 )
@@ -750,6 +804,8 @@ EvRvClient::on_unsub( NotifySub &sub ) noexcept
 void
 EvRvClient::do_psub( const char *prefix,  uint8_t prefix_len ) noexcept
 {
+  if ( this->no_write )
+    return;
   char    sub[ 1024 ];
   size_t  sublen = prefix_len;
 
@@ -778,6 +834,8 @@ EvRvClient::on_psub( NotifyPattern &pat ) noexcept
 void
 EvRvClient::on_punsub( NotifyPattern &pat ) noexcept
 {
+  if ( this->no_write )
+    return;
   const size_t prefix_len = pat.cvt.prefixlen;
   const char * prefix     = pat.pattern;
   bool fwd = false;
@@ -819,6 +877,8 @@ EvRvClient::on_reassert( uint32_t /*fd*/,  kv::RouteVec<kv::RouteSub> &sub_db,
   RouteLoc   loc;
   RouteSub * sub;
 
+  if ( this->no_write )
+    return;
   for ( sub = sub_db.first( loc ); sub != NULL; sub = sub_db.next( loc ) ) {
     this->subscribe( sub->value, sub->len, NULL, 0 );
   }

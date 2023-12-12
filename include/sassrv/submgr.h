@@ -282,10 +282,6 @@ struct RvSubscriptionDB {
   RvSubscriptionDB( EvRvClient &c,  RvSubscriptionListener *sl ) noexcept;
 
   void release( void ) noexcept;
-  static bool match_rv_wildcard( const char *wild,  size_t wild_len,
-                                 const char *sub,  size_t sub_len ) noexcept;
-  static const char * is_rv_wildcard( const char *wild,
-                                      size_t wild_len ) noexcept;
   void add_wildcard( const char *wildcard ) noexcept;
   bool is_matched( const char *sub,  size_t sub_len ) noexcept;
   void start_subscriptions( bool all ) noexcept;

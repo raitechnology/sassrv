@@ -103,7 +103,8 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
                 is_subscribed,   /* sub[] are subscribed */
                 have_dictionary, /* set when dict request succeeded */
                 dump_hex,        /* print hex of message data */
-                show_rate;       /* show rate of messages recvd */
+                show_rate,       /* show rate of messages recvd */
+                ignore_not_found;
   char        * subj_buf;
   uint32_t    * rand_schedule,
               * msg_recv;
@@ -143,8 +144,8 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
       num_subs( n ), msg_count( 0 ), last_count( 0 ), last_time( 0 ),
       msg_bytes( 0 ), last_bytes( 0 ), no_dictionary( nodict ),
       is_subscribed( false ), have_dictionary( false ), dump_hex( hex ),
-      show_rate( rate ), subj_buf( 0 ), rand_schedule( 0 ), msg_recv( 0 ),
-      msg_recv_bytes( 0 ), rand_range( rng ),
+      show_rate( rate ), ignore_not_found( true ), subj_buf( 0 ),
+      rand_schedule( 0 ), msg_recv( 0 ), msg_recv_bytes( 0 ), rand_range( rng ),
       max_time_secs( secs ), sub_initial_count( 0 ), sub_update_count( 0 ),
       use_random( rng > n ), use_zipf( zipf ),
       quiet( q ), track_time( ts ),
@@ -496,6 +497,8 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
         have_sub = true;
       }
       else {
+        if ( this->ignore_not_found )
+          return true;
         out.printf( "sub %.*s not found\n", (int) pub.subject_len, pub.subject );
       }
     }
