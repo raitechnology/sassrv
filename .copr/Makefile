@@ -13,7 +13,7 @@ version     := $(major_num).$(minor_num).$(patch_num)
 ver_build   := $(version)-$(build_num)
 name_ver    := $(name)-$(ver_build)
 rpm_src_dir := rpmbuild/SOURCES/$(name)-$(version)
-srctree     := .git src include GNUmakefile .copr deb rpm
+srctree     := .git src test include GNUmakefile .copr deb rpm
 release     := $(shell if [ -x /bin/rpmspec ] ; then \
                    /bin/rpmspec -q rpm/$(name).spec | head -1 | sed 's/.*999.999-99999.//' | sed 's/.src//' ; fi)
 

@@ -182,6 +182,8 @@ TrdpWindowDB::process_msg( void *msg,  size_t msg_len,
     int32_t diff = seqno_diff( hdr.seqno, w.last_seqno );
     if ( diff <= 0 )
       return;
+    if ( diff > 1 )
+      w.reorder_seqno += diff - 1;
     if ( diff > 1 ||
          ( diff == 1 && hdr.data.total_len != hdr.data.data_len ) ) {
       TrdpWindowPkt *p = w.merge( hdr, payload, cur_mono_time );
@@ -216,17 +218,25 @@ TrdpWindowDB::output( TrdpWindow &w,  size_t len,  const void *data ) noexcept
     }
   }
   else if ( len >= 8 ) {
-    uint32_t magic    = get_u32<MD_BIG>( &((uint8_t *) data)[ 4 ] );
-    size_t   msg_size = get_u32<MD_BIG>( &((uint8_t *) data)[ 0 ] );
-    if ( magic == 0x9955eeaaU ) {
-      if ( msg_size == len )
-        this->recv_msg( data, len );
-      else if ( msg_size > len ) {
-        if ( w.output_len < msg_size )
-          w.output_buf = ::realloc( w.output_buf, msg_size );
-        w.output_off = len;
-        w.output_len = msg_size;
-        ::memcpy( w.output_buf, data, len );
+    for (;;) {
+      uint32_t magic    = get_u32<MD_BIG>( &((uint8_t *) data)[ 4 ] );
+      size_t   msg_size = get_u32<MD_BIG>( &((uint8_t *) data)[ 0 ] );
+      if ( magic == 0x9955eeaaU ) {
+        if ( msg_size <= len ) {
+          this->recv_msg( data, msg_size );
+          len -= msg_size;
+          data = &((uint8_t *) data)[ msg_size ];
+          if ( len < 8 )
+            break;
+        }
+        else {
+          if ( w.output_len < msg_size )
+            w.output_buf = ::realloc( w.output_buf, msg_size );
+          w.output_off = len;
+          w.output_len = msg_size;
+          ::memcpy( w.output_buf, data, len );
+          break;
+        }
       }
     }
   }
@@ -372,6 +382,22 @@ TrdpWindowDB::repeat_seqno( void ) noexcept
     }
   }
   return repeat_seqno;
+}
+
+uint64_t
+TrdpWindowDB::reorder_seqno( void ) noexcept
+{
+  uint64_t reorder_seqno = 0;
+  this->reorder_seqno_list.count = 0;
+  for ( size_t k = 0; k < this->windows.count; k++ ) {
+    TrdpWindow &w = this->windows[ k ];
+    reorder_seqno += w.reorder_seqno;
+    if ( w.last_reorder < w.reorder_seqno ) {
+      w.last_reorder = w.reorder_seqno;
+      this->reorder_seqno_list.push( w.tsid.src_addr );
+    }
+  }
+  return reorder_seqno;
 }
 
 uint64_t

@@ -484,11 +484,12 @@ rv_GetStats( rv_Session session, struct rv_Stats * stats )
   rv_Session_api & sess = *(rv_Session_api *) session;
   ::memset( stats, 0, sizeof( *stats ) );
   if ( sess.client.svc != NULL ) {
-    stats->bytes_recv   = sess.client.svc->db.output_bytes;
-    stats->msgs_recv    = sess.client.svc->db.msgs_recv;
-    stats->lost_seqno   = sess.client.svc->db.lost_seqno();
-    stats->repeat_seqno = sess.client.svc->db.repeat_seqno();
-    stats->nak_count    = sess.client.svc->db.nak_count();
+    stats->bytes_recv    = sess.client.svc->db.output_bytes;
+    stats->msgs_recv     = sess.client.svc->db.msgs_recv;
+    stats->lost_seqno    = sess.client.svc->db.lost_seqno();
+    stats->repeat_seqno  = sess.client.svc->db.repeat_seqno();
+    stats->reorder_seqno = sess.client.svc->db.reorder_seqno();
+    stats->nak_count     = sess.client.svc->db.nak_count();
     if ( stats->lost_seqno != 0 ) {
       stats->lost_src       = sess.client.svc->db.lost_seqno_list.ptr;
       stats->lost_src_count = sess.client.svc->db.lost_seqno_list.count;
@@ -497,22 +498,28 @@ rv_GetStats( rv_Session session, struct rv_Stats * stats )
       stats->repeat_src       = sess.client.svc->db.repeat_seqno_list.ptr;
       stats->repeat_src_count = sess.client.svc->db.repeat_seqno_list.count;
     }
+    if ( stats->reorder_seqno != 0 ) {
+      stats->reorder_src       = sess.client.svc->db.reorder_seqno_list.ptr;
+      stats->reorder_src_count = sess.client.svc->db.reorder_seqno_list.count;
+    }
     if ( stats->nak_count != 0 ) {
       stats->nak_src       = sess.client.svc->db.nak_count_list.ptr;
       stats->nak_src_count = sess.client.svc->db.nak_count_list.count;
     }
 
     struct rv_Stats tmp = *stats;
-    stats->bytes_recv   -= sess.client.svc->db.last_output_bytes;
-    stats->msgs_recv    -= sess.client.svc->db.last_msgs_recv;
-    stats->lost_seqno   -= sess.client.svc->db.last_lost;
-    stats->repeat_seqno -= sess.client.svc->db.last_repeat;
-    stats->nak_count    -= sess.client.svc->db.last_nak;
+    stats->bytes_recv    -= sess.client.svc->db.last_output_bytes;
+    stats->msgs_recv     -= sess.client.svc->db.last_msgs_recv;
+    stats->lost_seqno    -= sess.client.svc->db.last_lost;
+    stats->repeat_seqno  -= sess.client.svc->db.last_repeat;
+    stats->reorder_seqno -= sess.client.svc->db.last_reorder;
+    stats->nak_count     -= sess.client.svc->db.last_nak;
 
     sess.client.svc->db.last_output_bytes = tmp.bytes_recv;
     sess.client.svc->db.last_msgs_recv    = tmp.msgs_recv;
     sess.client.svc->db.last_lost         = tmp.lost_seqno;
     sess.client.svc->db.last_repeat       = tmp.repeat_seqno;
+    sess.client.svc->db.last_reorder      = tmp.reorder_seqno;
     sess.client.svc->db.last_nak          = tmp.nak_count;
   }
   return RV_OK;

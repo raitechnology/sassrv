@@ -39,13 +39,16 @@ struct rv_Stats {
                  msgs_recv,
                  lost_seqno,
                  repeat_seqno,
-                 nak_count;
+                 nak_count,
+                 reorder_seqno;
   rv_ipaddr_t  * lost_src,
                * repeat_src,
-               * nak_src;
+               * nak_src,
+               * reorder_src;
   unsigned int   lost_src_count,
                  repeat_src_count,
-                 nak_src_count;
+                 nak_src_count,
+                 reorder_src_count;
 };
 
 typedef void (*rv_MessageCallback)( rv_Listener listener, rv_Name subject,

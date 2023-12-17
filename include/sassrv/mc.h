@@ -96,9 +96,11 @@ struct TrdpWindow {
            output_off;
   uint64_t lost_seqno,
            repeat_seqno,
+           reorder_seqno,
            nak_count,
            last_lost,
            last_repeat,
+           last_reorder,
            last_nak,
            last_mono_time;
   void   * output_buf;
@@ -122,14 +124,15 @@ struct TrdpWindowDB {
   TrdpWindows   windows;
   kv::ArrayCount<uint32_t, 8> lost_seqno_list,
                               repeat_seqno_list,
+                              reorder_seqno_list,
                               nak_count_list;
   uint64_t      msgs_recv, last_msgs_recv, output_bytes, last_output_bytes,
-                last_mono_time, last_lost, last_repeat, last_nak;
+                last_mono_time, last_lost, last_repeat, last_reorder, last_nak;
   kv::EvConnection * conn;
   TrdpWindowDB()
     : hash( 0 ), msgs_recv( 0 ), last_msgs_recv( 0 ), output_bytes( 0 ),
-      last_output_bytes( 0 ), last_mono_time( 0 ),
-      last_lost( 0 ), last_repeat( 0 ), last_nak( 0 ), conn( 0 ) {}
+      last_output_bytes( 0 ), last_mono_time( 0 ), last_lost( 0 ),
+      last_repeat( 0 ), last_reorder( 0 ), last_nak( 0 ), conn( 0 ) {}
   TrdpWindow & get_window( TrdpTsid &tsid ) noexcept;
   void process_msg( void *msg,  size_t msg_len,
                     uint64_t cur_mono_time ) noexcept;
@@ -137,6 +140,7 @@ struct TrdpWindowDB {
   void recv_msg( const void *,  size_t ) noexcept;
   uint64_t lost_seqno( void ) noexcept;
   uint64_t repeat_seqno( void ) noexcept;
+  uint64_t reorder_seqno( void ) noexcept;
   uint64_t nak_count( void ) noexcept;
 };
 
