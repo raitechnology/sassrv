@@ -83,6 +83,7 @@ rv_Status rv_DestroyTimer( rv_Timer timer );
 rv_Status rv_CreateSignal( rv_Session session,  rv_Signal * shandle, int signo,
                            rv_SignalCallback callback, void * closure );
 rv_Status rv_DestroySignal( rv_Signal shandle );
+rv_Status rv_Print( void *data,  size_t data_len,  int type );
 
 #ifdef __cplusplus
 }

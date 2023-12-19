@@ -174,16 +174,23 @@ TrdpWindowDB::process_msg( void *msg,  size_t msg_len,
   if ( w.last_mono_time == 0 ) {
     if ( hdr.data.frag_num != 0 )
       return;
-    w.last_seqno     = hdr.seqno;
-    w.last_mono_time = cur_mono_time;
+    w.last_seqno      = hdr.seqno;
+    w.last_recv_seqno = hdr.seqno;
+    w.last_mono_time  = cur_mono_time;
     this->output( w, hdr.data.data_len, payload );
   }
   else {
-    int32_t diff = seqno_diff( hdr.seqno, w.last_seqno );
-    if ( diff <= 0 )
-      return;
+    int32_t diff;
+    diff = seqno_diff( hdr.seqno, w.last_recv_seqno );
+    w.last_recv_seqno = hdr.seqno;
     if ( diff > 1 )
-      w.reorder_seqno += diff - 1;
+      w.reorder_seqno++;
+
+    diff = seqno_diff( hdr.seqno, w.last_seqno );
+    if ( diff <= 0 ) {
+      w.repeat_seqno++;
+      return;
+    }
     if ( diff > 1 ||
          ( diff == 1 && hdr.data.total_len != hdr.data.data_len ) ) {
       TrdpWindowPkt *p = w.merge( hdr, payload, cur_mono_time );

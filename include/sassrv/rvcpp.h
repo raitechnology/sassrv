@@ -21,6 +21,7 @@ struct RvError {
 struct RvSignalCallback {
   virtual void onSignal( RvSignal *invoker ) = 0;
 };
+
 struct RvSignal {
   RvSession        * sess;
   rv_Signal          signal;
@@ -50,6 +51,7 @@ struct RvSender {
   RvSender( RvSession *s, rv_Name n ) : sess( s ), name( n ) {}
   void send( const char *subject, const RvDatum &data );
   RvSession *session( void ) const { return this->sess; }
+  const char *subject( void ) const { return this->name; }
 };
 
 struct RvDatum {
@@ -60,6 +62,9 @@ struct RvDatum {
   RvDatum( void *d, size_t sz, int t ) : msg( d ), msg_len( sz ), type( t ) {}
   void * data( void ) const { return this->msg; }
   size_t size( void ) const { return this->msg_len; }
+  int    print( void ) const {
+    return rv_Print( (void *) this->msg, this->msg_len, this->type );
+  }
 };
 
 struct RvListener {

@@ -91,6 +91,7 @@ typedef kv::DLinkList<TrdpWindowPkt> TrdpWindowPktList;
 struct TrdpWindow {
   TrdpTsid tsid;
   uint32_t last_seqno,
+           last_recv_seqno,
            save_size,
            output_len,
            output_off;

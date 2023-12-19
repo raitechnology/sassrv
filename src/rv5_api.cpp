@@ -525,4 +525,22 @@ rv_GetStats( rv_Session session, struct rv_Stats * stats )
   return RV_OK;
 }
 
+rv_Status
+rv_Print( void *data,  size_t data_len,  int type )
+{
+  MDOutput mout;
+  MDMsgMem mem;
+  MDMsg * m = MDMsg::unpack( data, 0, data_len, type, NULL, mem );
+  if ( m != NULL ) {
+    mout.puts( "{ " );
+    m->print( &mout, 0, NULL, NULL );
+    mout.puts( "}" );
+  }
+  else {
+    mout.puts( "\n" );
+    mout.print_hex( data, data_len );
+  }
+  return RV_OK;
+}
+
 }
