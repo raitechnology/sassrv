@@ -142,7 +142,7 @@ EvRvClient::connect( EvRvClientParameters &p,
         daemon += 3;
       if ( daemon[ 0 ] == '\0' )
         daemon = NULL;
-      if ( ::strcmp( daemon, "null" ) == 0 )
+      if ( daemon != NULL && ::strcmp( daemon, "null" ) == 0 )
         is_null = true;
     }
   }

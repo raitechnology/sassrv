@@ -118,7 +118,8 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   bool          use_random,
                 use_zipf,
                 quiet,
-                track_time;
+                track_time,
+                wild_subscribe;
   uint64_t      seed1, seed2;
   ArrayCount<double,64>   next_pub;
   ArrayCount<uint64_t,64> last_seqno;
@@ -148,7 +149,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
       rand_schedule( 0 ), msg_recv( 0 ), msg_recv_bytes( 0 ), rand_range( rng ),
       max_time_secs( secs ), sub_initial_count( 0 ), sub_update_count( 0 ),
       use_random( rng > n ), use_zipf( zipf ),
-      quiet( q ), track_time( ts ),
+      quiet( q ), track_time( ts ), wild_subscribe( false ),
       total_latency( 0 ), miss_latency( 0 ), trail_latency( 0 ),
       total_count( 0 ), miss_count( 0 ), repeat_count( 0 ), trail_count( 0 ),
       initial_count( 0 ), update_count( 0 ), miss_seqno( 0 ), hist_count( 0 ),
@@ -314,6 +315,8 @@ RvDataCallback::start_subscriptions( void ) noexcept
       }
       /* subscribe with inbox reply */
       this->client.subscribe( subject, subject_len, inbox, inbox_len );
+      this->wild_subscribe |=
+        ( is_rv_wildcard( subject, subject_len ) != NULL );
       this->subj_ht.upsert( subject, subject_len, n );
     }
     if ( n >= this->num_subs * this->sub_count )
@@ -418,6 +421,7 @@ RvDataCallback::timer_cb( uint64_t timer_id,  uint64_t ) noexcept
       out.ts().printf( "%.2f m/s %.2f mbit/s\n",
               (double) count * 1000000000.0 / (double) ival_ns,
               (double) bytes * 8.0 * 1000.0 / ival_ns );
+      out.flush();
     }
     this->last_time  += ival_ns;
     this->last_count += count;
@@ -434,12 +438,14 @@ RvDataCallback::timer_cb( uint64_t timer_id,  uint64_t ) noexcept
     return false;
   if ( timer_id == FIRST_TIMER_ID ) {
     out.ts().printf( "Dict request timeout, trying again\n" );
+    out.flush();
     this->send_dict_request();
     this->poll.timer.add_timer_seconds( *this, DICT_TIMER_SECS,
                                         SECOND_TIMER_ID, 0 );
   }
   else if ( timer_id == SECOND_TIMER_ID ) {
     out.ts().printf( "Dict request timeout again, starting subs\n" );
+    out.flush();
     this->start_subscriptions();
   }
   return false; /* return false to disable recurrent timer */
@@ -496,7 +502,7 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
         this->add_update( sub_idx, pub_len );
         have_sub = true;
       }
-      else {
+      else if ( ! this->wild_subscribe ) {
         if ( this->ignore_not_found )
           return true;
         out.printf( "sub %.*s not found\n", (int) pub.subject_len, pub.subject );
