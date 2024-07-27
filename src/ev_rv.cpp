@@ -560,9 +560,9 @@ EvRvService::respond_info( void ) noexcept
       this->host->mcast.fake_ip == 0 ? this->host->mcast.host_ip :
                                        this->host->mcast.fake_ip );
     submsg.append_ipdata( SARG( "ipport" ), this->host->service_port );
-    submsg.append_int<int32_t>( SARG( "vmaj" ), 5 );
-    submsg.append_int<int32_t>( SARG( "vmin" ), 4 );
-    submsg.append_int<int32_t>( SARG( "vupd" ), 2 );
+    submsg.append_int<int32_t>( SARG( "vmaj" ), /*this->vmaj*/ 5 );
+    submsg.append_int<int32_t>( SARG( "vmin" ), /*this->vmin*/ 4 );
+    submsg.append_int<int32_t>( SARG( "vupd" ), /*this->vupd*/ 2 );
 
     submsg.append_string( SARG( "gob" ), this->gob, this->gob_len + 1 );
     size = rvmsg.update_hdr( submsg );
@@ -1470,7 +1470,7 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
             if ( ::memcmp( nm.fname, SARG( "mtype" ) ) == 0 ) {
               if ( mref.ftype == MD_STRING && mref.fsize == 2 ) {
                 this->mtype = mref.fptr[ 0 ];
-                if ( this->mtype >= 'A' && this->mtype <= 'R' ) {
+                if ( this->mtype >= 'A' && this->mtype <= 'S' ) {
                   #define B( c ) ( 1U << ( c - 'A' ) )
                   static const uint32_t valid =
                         B( 'A' ) /* advisorty */
@@ -1478,7 +1478,8 @@ RvMsgIn::unpack( void *msgbuf,  size_t msglen ) noexcept
                       | B( 'D' ) /* data */
                       | B( 'I' ) /* initialize */
                       | B( 'L' ) /* listen */
-                      | B( 'R' );/* response */
+                      | B( 'R' ) /* response */
+                      | B( 'S' );/* process  */
                   if ( ( B( this->mtype ) & valid ) != 0 )
                     cnt |= HAS_MTYPE;
                   #undef B

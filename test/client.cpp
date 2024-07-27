@@ -634,7 +634,8 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
                        delta, next_delta, expect, cur, next );
       out.flush();
     }
-    return true;
+    if ( subject_len <= 3 || ::memcmp( subject, "_RV.", 4 ) != 0 )
+      return true;
   }
   if ( delta != 0 || next_delta != 0 ) {
     out.ts().printf( "## update latency %.6f, next expected %f, "

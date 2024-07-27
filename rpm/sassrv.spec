@@ -22,6 +22,7 @@ Requires:       raimd
 Requires:       libdecnumber
 Requires:       pcre2
 Requires:       c-ares
+Requires:       zlib
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 

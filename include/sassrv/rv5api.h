@@ -1,5 +1,5 @@
-#ifndef __rai_sassrv__rvapi_h__
-#define __rai_sassrv__rvapi_h__
+#ifndef __rai_sassrv__rv5api_h__
+#define __rai_sassrv__rv5api_h__
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,6 +71,7 @@ rv_Status rv_ListenInbox( rv_Session session, rv_Listener * listener,
 rv_Status rv_Close( rv_Listener listener );
 const char *rv_Subject( rv_Listener listener );
 const char *rv_ErrorText( rv_Session session, rv_Status status );
+const char *rv_Version( void );
 rv_Status rv_Send( rv_Session session, rv_Name subject, rvmsg_Type type,
                    size_t data_len, void *data );
 rv_Status rv_SendWithReply( rv_Session session, rv_Name subject, rv_Name reply,

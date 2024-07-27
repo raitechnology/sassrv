@@ -3,7 +3,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdarg.h>
-#include <tibrv/tibrv.h>
+#include <sassrv/rv7api.h>
 #include <raimd/md_msg.h>
 #include <raimd/md_dict.h>
 #include <raimd/cfile.h>

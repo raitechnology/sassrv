@@ -62,7 +62,8 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
                vupd,
                ipport;
   uint32_t     ipaddr;
-  const char * network,
+  const char * daemon,
+             * network,
              * service;
   void       * save_buf,
              * param_buf;
@@ -101,6 +102,8 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify {
                    size_t msglen = 0 ) noexcept;
   void flush_pending_send( void ) noexcept;
   bool publish( kv::EvPublish &pub ) noexcept;
+  md::RvMsg *make_rv_msg( void *msg,  size_t msg_len,
+                          uint32_t msg_enc ) noexcept;
   virtual void process( void ) noexcept;
   virtual bool on_msg( kv::EvPublish &pub ) noexcept;
   virtual void process_close( void ) noexcept;

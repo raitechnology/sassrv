@@ -67,7 +67,7 @@ exe         := .exe
 soflag      := -shared -Wl,--subsystem,windows
 fpicflags   := -fPIC -DRV_SHARED
 sock_lib    := -lcares -lws2_32
-dynlink_lib := -lpcre2-8
+dynlink_lib := -lpcre2-8 -lz
 NO_STL      := 1
 else
 dll         := so
@@ -76,7 +76,7 @@ soflag      := -shared
 fpicflags   := -fPIC
 thread_lib  := -pthread -lrt
 sock_lib    := -lcares
-dynlink_lib := -lpcre2-8
+dynlink_lib := -lpcre2-8 -lz
 endif
 # make apple shared lib
 ifeq (Darwin,$(lsb_dist)) 
@@ -280,20 +280,21 @@ $(bind)/rv_pub$(exe): $(rv_pub_objs) $(rv_pub_libs) $(lnk_dep)
 all_exes    += $(bind)/rv_pub$(exe)
 all_depends += $(rv_pub_deps)
 
-tibco_home = $(shell if [ -d /usr/tibco/tibrv ] ; then echo /usr/tibco/tibrv ; \
-                        elif [ -d /home/chris/tibco/tibrv ] ; then echo /home/chris/tibco/tibrv ; fi)
-api_client_includes = -I$(tibco_home)/include
+#tibco_home = $(shell if [ -d /usr/tibco/tibrv ] ; then echo /usr/tibco/tibrv ; \
+#                        elif [ -d /home/chris/tibco/tibrv ] ; then echo /home/chris/tibco/tibrv ; fi)
+#api_client_includes = -I$(tibco_home)/include
 api_client_files := api_client
 api_client_cfile := $(addprefix src/, $(addsuffix .cpp, $(api_client_files)))
 api_client_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(api_client_files)))
 api_client_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(api_client_files)))
-api_client_libs  :=
-api_client_lnk   := $(lnk_lib) $(tibco_home)/lib/libtibrv64.a
+api_client_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+#api_client_lnk   := $(lnk_lib) $(tibco_home)/lib/librv7lib64.a
+api_client_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
 
 $(bind)/api_client$(exe): $(api_client_objs) $(api_client_libs) $(lnk_dep)
 
-#all_exes    += $(bind)/api_client$(exe)
-#all_depends += $(api_client_deps)
+all_exes    += $(bind)/api_client$(exe)
+all_depends += $(api_client_deps)
 
 rv_subtop_files := subtop
 rv_subtop_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv_subtop_files)))
@@ -319,30 +320,49 @@ $(bind)/rv_ftmon$(exe): $(rv_ftmon_objs) $(rv_ftmon_libs) $(lnk_dep)
 all_exes    += $(bind)/rv_ftmon$(exe)
 all_depends += $(rv_ftmon_deps)
 
-librvlib_files := rv5_api
-librvlib_cfile := $(addprefix src/, $(addsuffix .cpp, $(librvlib_files)))
-librvlib_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(librvlib_files)))
-librvlib_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(librvlib_files)))
-librvlib_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(librvlib_files))) \
-                  $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(librvlib_files)))
-librvlib_dlnk  := $(rv_dlnk_lib) $(dlnk_lib)
-librvlib_spec  := $(version)-$(build_num)_$(git_hash)
-librvlib_ver   := $(major_num).$(minor_num)
+rv5_api_defines := -DSASSRV_VER=$(ver_build)
+librv5lib_files := rv5_api
+librv5lib_cfile := $(addprefix src/, $(addsuffix .cpp, $(librv5lib_files)))
+librv5lib_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(librv5lib_files)))
+librv5lib_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(librv5lib_files)))
+librv5lib_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(librv5lib_files))) \
+                  $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(librv5lib_files)))
+librv5lib_dlnk  := $(rv_dlnk_lib) $(dlnk_lib)
+librv5lib_spec  := $(version)-$(build_num)_$(git_hash)
+librv5lib_ver   := $(major_num).$(minor_num)
 
-$(libd)/librvlib.a: $(librvlib_objs)
-$(libd)/librvlib.$(dll): $(librvlib_dbjs) $(rv_dlnk_dep) $(dlnk_dep)
+$(libd)/librv5lib.a: $(librv5lib_objs)
+$(libd)/librv5lib.$(dll): $(librv5lib_dbjs) $(rv_dlnk_dep) $(dlnk_dep)
 
-all_libs    += $(libd)/librvlib.a
-all_dlls    += $(libd)/librvlib.$(dll)
-all_depends += $(librvlib_deps)
+all_libs    += $(libd)/librv5lib.a
+all_dlls    += $(libd)/librv5lib.$(dll)
+all_depends += $(librv5lib_deps)
+
+rv7_api_defines := -DSASSRV_VER=$(ver_build)
+librv7lib_files := rv7_api
+librv7lib_cfile := $(addprefix src/, $(addsuffix .cpp, $(librv7lib_files)))
+librv7lib_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(librv7lib_files)))
+librv7lib_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(librv7lib_files)))
+librv7lib_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(librv7lib_files))) \
+                  $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(librv7lib_files)))
+librv7lib_dlnk  := $(rv_dlnk_lib) $(dlnk_lib)
+librv7lib_spec  := $(version)-$(build_num)_$(git_hash)
+librv7lib_ver   := $(major_num).$(minor_num)
+
+$(libd)/librv7lib.a: $(librv7lib_objs)
+$(libd)/librv7lib.$(dll): $(librv7lib_dbjs) $(rv_dlnk_dep) $(dlnk_dep)
+
+all_libs    += $(libd)/librv7lib.a
+all_dlls    += $(libd)/librv7lib.$(dll)
+all_depends += $(librv7lib_deps)
 
 rv5_api_test_includes = -Iinclude/sassrv
 rv5_api_test_files := rv5_api_test
 rv5_api_test_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv5_api_test_files)))
 rv5_api_test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv5_api_test_files)))
 rv5_api_test_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv5_api_test_files)))
-rv5_api_test_libs  := $(sassrv_lib) $(libd)/librvlib.a
-rv5_api_test_lnk   := $(libd)/librvlib.a $(sassrv_lib) $(lnk_lib)
+rv5_api_test_libs  := $(sassrv_lib) $(libd)/librv5lib.a
+rv5_api_test_lnk   := $(libd)/librv5lib.a $(sassrv_lib) $(lnk_lib)
 
 $(bind)/rv5_api_test$(exe): $(rv5_api_test_objs) $(rv5_api_test_libs) $(lnk_dep)
 
@@ -354,13 +374,115 @@ rv5_cpp_test_files := rv5_cpp_test rv5_api
 rv5_cpp_test_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv5_cpp_test_files)))
 rv5_cpp_test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv5_cpp_test_files)))
 rv5_cpp_test_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv5_cpp_test_files)))
-rv5_cpp_test_libs  := $(sassrv_lib) $(libd)/librvlib.a
-rv5_cpp_test_lnk   := $(libd)/librvlib.a $(sassrv_lib) $(lnk_lib)
+rv5_cpp_test_libs  := $(sassrv_lib) $(libd)/librv5lib.a
+rv5_cpp_test_lnk   := $(libd)/librv5lib.a $(sassrv_lib) $(lnk_lib)
 
 $(bind)/rv5_cpp_test$(exe): $(rv5_cpp_test_objs) $(rv5_cpp_test_libs) $(lnk_dep)
 
 all_exes    += $(bind)/rv5_cpp_test$(exe)
 all_depends += $(rv5_cpp_test_deps)
+
+# tibrvclient_files := tibrvclient
+# tibrvclient_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvclient_files)))
+# tibrvclient_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(tibrvclient_files)))
+# tibrvclient_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(tibrvclient_files)))
+# tibrvclient_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+# tibrvclient_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+#
+# $(bind)/tibrvclient$(exe): $(tibrvclient_objs) $(tibrvclient_libs) $(lnk_dep)
+#
+# tibrvinitval_files := tibrvinitval
+# tibrvinitval_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvinitval_files)))
+# tibrvinitval_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(tibrvinitval_files)))
+# tibrvinitval_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(tibrvinitval_files)))
+# tibrvinitval_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+# tibrvinitval_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+#
+# $(bind)/tibrvinitval$(exe): $(tibrvinitval_objs) $(tibrvinitval_libs) $(lnk_dep)
+#
+# tibrvlisten_files := tibrvlisten
+# tibrvlisten_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvlisten_files)))
+# tibrvlisten_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(tibrvlisten_files)))
+# tibrvlisten_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(tibrvlisten_files)))
+# tibrvlisten_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+# tibrvlisten_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+#
+# $(bind)/tibrvlisten$(exe): $(tibrvlisten_objs) $(tibrvlisten_libs) $(lnk_dep)
+#
+# tibrvmultisend_files := tibrvmultisend
+# tibrvmultisend_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvmultisend_files)))
+# tibrvmultisend_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(tibrvmultisend_files)))
+# tibrvmultisend_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(tibrvmultisend_files)))
+# tibrvmultisend_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+# tibrvmultisend_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+#
+# $(bind)/tibrvmultisend$(exe): $(tibrvmultisend_objs) $(tibrvmultisend_libs) $(lnk_dep)
+#
+# tibrvsend_files := tibrvsend
+# tibrvsend_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvsend_files)))
+# tibrvsend_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(tibrvsend_files)))
+# tibrvsend_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(tibrvsend_files)))
+# tibrvsend_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+# tibrvsend_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+#
+# $(bind)/tibrvsend$(exe): $(tibrvsend_objs) $(tibrvsend_libs) $(lnk_dep)
+#
+# tibrvserver_files := tibrvserver
+# tibrvserver_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvserver_files)))
+# tibrvserver_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(tibrvserver_files)))
+# tibrvserver_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(tibrvserver_files)))
+# tibrvserver_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+# tibrvserver_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+#
+# $(bind)/tibrvserver$(exe): $(tibrvserver_objs) $(tibrvserver_libs) $(lnk_dep)
+#
+# dispatcher_files := dispatcher
+# dispatcher_cfile := $(addprefix src/, $(addsuffix .cpp, $(dispatcher_files)))
+# dispatcher_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(dispatcher_files)))
+# dispatcher_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(dispatcher_files)))
+# dispatcher_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+# dispatcher_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+#
+# $(bind)/dispatcher$(exe): $(dispatcher_objs) $(dispatcher_libs) $(lnk_dep)
+#
+# tibrvvectorlisten_files := tibrvvectorlisten
+# tibrvvectorlisten_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvvectorlisten_files)))
+# tibrvvectorlisten_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(tibrvvectorlisten_files)))
+# tibrvvectorlisten_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(tibrvvectorlisten_files)))
+# tibrvvectorlisten_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+# tibrvvectorlisten_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+#
+# $(bind)/tibrvvectorlisten$(exe): $(tibrvvectorlisten_objs) $(tibrvvectorlisten_libs) $(lnk_dep)
+#
+# tibrvvectorlistentester_files := tibrvvectorlistentester
+# tibrvvectorlistentester_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvvectorlistentester_files)))
+# tibrvvectorlistentester_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(tibrvvectorlistentester_files)))
+# tibrvvectorlistentester_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(tibrvvectorlistentester_files)))
+# tibrvvectorlistentester_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+# tibrvvectorlistentester_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+#
+# $(bind)/tibrvvectorlistentester$(exe): $(tibrvvectorlistentester_objs) $(tibrvvectorlistentester_libs) $(lnk_dep)
+#
+# priority_files := priority
+# priority_cfile := $(addprefix src/, $(addsuffix .cpp, $(priority_files)))
+# priority_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(priority_files)))
+# priority_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(priority_files)))
+# priority_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+# priority_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+#
+# $(bind)/priority$(exe): $(priority_objs) $(priority_libs) $(lnk_dep)
+
+rv7_test_files := rv7_test
+rv7_test_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv7_test_files)))
+rv7_test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv7_test_files)))
+rv7_test_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv7_test_files)))
+rv7_test_libs  := $(sassrv_lib) $(libd)/librv7lib.a
+rv7_test_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+
+$(bind)/rv7_test$(exe): $(rv7_test_objs) $(rv7_test_libs) $(lnk_dep)
+
+all_exes    += $(bind)/rv7_test$(exe)
+all_depends += $(rv7_test_deps)
 
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
@@ -490,7 +612,8 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 .PHONY: dist_bins
 dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server$(exe) $(bind)/rv_client$(exe) $(bind)/rv_pub$(exe) $(bind)/rv_subtop$(exe) $(bind)/rv_ftmon$(exe)
 	chrpath -d $(libd)/libsassrv.$(dll)
-	chrpath -d $(libd)/librvlib.$(dll)
+	chrpath -d $(libd)/librv5lib.$(dll)
+	chrpath -d $(libd)/librv7lib.$(dll)
 	chrpath -d $(bind)/rv_server$(exe)
 	chrpath -d $(bind)/rv_client$(exe)
 	chrpath -d $(bind)/rv_pub$(exe)
@@ -515,7 +638,7 @@ endif
 install: dist_bins
 	install -d $(install_prefix)/lib $(install_prefix)/bin
 	install -d $(install_prefix)/include/sassrv
-	for f in $(libd)/libsassrv.* ; do \
+	for f in $(libd)/libsassrv.* $(libd)/librv5lib.* $(libd)/librv7lib.* ; do \
 	if [ -h $$f ] ; then \
 	cp -a $$f $(install_prefix)/lib ; \
 	else \

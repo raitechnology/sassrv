@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <string.h>
-#include <rvapi.h>
+#include <rv5api.h>
 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 

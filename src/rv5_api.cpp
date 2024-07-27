@@ -9,7 +9,7 @@
 #include <raimd/md_msg.h>
 #include <raimd/md_dict.h>
 #include <raikv/ev_publish.h>
-#include <sassrv/rvapi.h>
+#include <sassrv/rv5api.h>
 #include <sassrv/mc.h>
 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -282,6 +282,12 @@ rv_ErrorText( rv_Session session,  rv_Status status )
   return "NOT_OK";
 }
 
+const char *
+rv_Version( void )
+{
+  return "sassrv-" kv_stringify( SASSRV_VER );
+}
+
 static void
 rv_signal_handler( int signum )
 {
@@ -323,9 +329,27 @@ rv_Init( rv_Session * session, rv_Name service, rv_Name network,
 {
   rv_Session_api *sess = new ( aligned_malloc( sizeof( rv_Session_api ) ) )
     rv_Session_api();
-  sess->poll.init( 5, false );
+  EvPoll &poll = sess->poll;
+  poll.init( 128, false );
   EvRvClientParameters parm( daemon, network, service, 0, 0 );
   if ( ! sess->client.connect( parm, sess, sess ) )
+    return RV_NOT_CONNECTED;
+
+  int idle_count = 0;
+  while ( sess->client.rv_state > EvRvClient::ERR_CLOSE &&
+          sess->client.rv_state < EvRvClient::DATA_RECV ) {
+    if ( poll.quit >= 5 )
+      break;
+    /* dispatch network events */
+    int idle = poll.dispatch();
+    if ( idle == EvPoll::DISPATCH_IDLE )
+      idle_count++;
+    else
+      idle_count = 0; 
+    /* wait for network events */
+    poll.wait( idle_count > 1 ? 100 : 0 );
+  }
+  if ( sess->client.rv_state != EvRvClient::DATA_RECV )
     return RV_NOT_CONNECTED;
   *session = sess;
   session_list.push_tl( sess );
@@ -435,7 +459,11 @@ rv_Status
 rv_Send( rv_Session session, rv_Name subject,  rvmsg_Type type,
          size_t data_len, void * data )
 {
-  printf( "rv_Send\n" );
+  rv_Session_api & sess = *(rv_Session_api *) session;
+  EvPublish pub( subject, ::strlen( subject ), NULL, 0, data, data_len,
+                 sess.client.sub_route, sess.client, 0,
+                 type == RVMSG_RVMSG ? RVMSG_TYPE_ID : 0 );
+  sess.client.publish( pub );
   return RV_OK;
 }
 
@@ -443,7 +471,11 @@ rv_Status
 rv_SendWithReply( rv_Session session, rv_Name subject, rv_Name reply,
                   rvmsg_Type type, size_t data_len, void * data )
 {
-  printf( "rv_SendWithReply\n" );
+  rv_Session_api & sess = *(rv_Session_api *) session;
+  EvPublish pub( subject, ::strlen( subject ), reply, ::strlen( reply ), data,
+                 data_len, sess.client.sub_route, sess.client, 0,
+                 type == RVMSG_RVMSG ? RVMSG_TYPE_ID : 0 );
+  sess.client.publish( pub );
   return RV_OK;
 }
 

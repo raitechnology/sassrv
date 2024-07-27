@@ -69,6 +69,7 @@ EvRvClient::initialize_state( bool is_null ) noexcept
   this->vupd        = 2;
   this->ipport      = 0;
   this->ipaddr      = 0;
+  this->daemon      = NULL;
   this->network     = NULL;
   this->service     = NULL;
   this->notify      = NULL;
@@ -107,42 +108,42 @@ EvRvClient::connect( EvRvClientParameters &p,
                      EvConnectionNotify *n,
                      RvClientCB *c ) noexcept
 {
-  char * daemon = NULL, buf[ 256 ];
+  char * conn = NULL, buf[ 256 ];
+  size_t daemon_len = 0;
   int port = p.port;
   bool is_null = false;
   if ( this->fd != -1 )
     return false;
   if ( p.daemon != NULL ) {
-    size_t len = ::strlen( p.daemon );
-    if ( len >= sizeof( buf ) )
-      len = sizeof( buf ) - 1;
+    daemon_len = ::strlen( p.daemon );
+    size_t len = daemon_len >= sizeof( buf ) ? sizeof( buf ) - 1 : daemon_len;
     ::memcpy( buf, p.daemon, len );
     buf[ len ] = '\0';
-    daemon = buf;
+    conn = buf;
   }
-  if ( daemon != NULL ) {
+  if ( conn != NULL ) {
     char * pt;
-    if ( (pt = ::strrchr( daemon, ':' )) != NULL ) {
+    if ( (pt = ::strrchr( conn, ':' )) != NULL ) {
       port = atoi( pt + 1 );
       *pt = '\0';
     }
     else {
-      for ( pt = daemon; *pt != '\0'; pt++ )
+      for ( pt = conn; *pt != '\0'; pt++ )
         if ( *pt < '0' || *pt > '9' )
           break;
       if ( *pt == '\0' ) {
-        port = atoi( daemon );
-        daemon = NULL;
+        port = atoi( conn );
+        conn = NULL;
       }
     }
-    if ( daemon != NULL ) { /* strip tcp: prefix */
-      if ( ::strncmp( daemon, "tcp:", 4 ) == 0 )
-        daemon += 4;
-      if ( ::strcmp( daemon, "tcp" ) == 0 )
-        daemon += 3;
-      if ( daemon[ 0 ] == '\0' )
-        daemon = NULL;
-      if ( daemon != NULL && ::strcmp( daemon, "null" ) == 0 )
+    if ( conn != NULL ) { /* strip tcp: prefix */
+      if ( ::strncmp( conn, "tcp:", 4 ) == 0 )
+        conn += 4;
+      if ( ::strcmp( conn, "tcp" ) == 0 )
+        conn += 3;
+      if ( conn[ 0 ] == '\0' )
+        conn = NULL;
+      if ( conn != NULL && ::strcmp( conn, "null" ) == 0 )
         is_null = true;
     }
   }
@@ -150,7 +151,7 @@ EvRvClient::connect( EvRvClientParameters &p,
   if ( ! is_null ) {
     if ( port == 0 )
       port = 7500;
-    if ( EvTcpConnection::connect( *this, daemon, port, p.opts ) != 0 ) {
+    if ( EvTcpConnection::connect( *this, conn, port, p.opts ) != 0 ) {
       this->rv_state = ERR_CLOSE;
       return false;
     }
@@ -162,18 +163,35 @@ EvRvClient::connect( EvRvClientParameters &p,
                                -1, NULL, "null" );
     this->poll.add_sock( this );
   }
-  if ( p.network != NULL || p.service != NULL ) {
+
+  const char * colon, * svc = p.service;
+  char         svcbuf[ 16 ];
+  if ( svc != NULL && (colon = ::strchr( svc, ':' )) != NULL ) {
+    if ( (size_t) ( &colon[ 1 ] - svc ) < sizeof( svcbuf ) ) {
+      size_t svclen = colon - svc;
+      ::memcpy( svcbuf, svc, svclen );
+      svcbuf[ svclen ] = '\0';
+      svc = svcbuf;
+    }
+  }
+  if ( daemon_len > 0 || p.network != NULL || svc != NULL ) {
     size_t net_len = ( p.network != NULL ? ::strlen( p.network ) + 1 : 0 );
-    size_t svc_len = ( p.service != NULL ? ::strlen( p.service ) + 1 : 0 );
-    this->param_buf = ::malloc( net_len + svc_len );
+    size_t svc_len = ( svc != NULL ? ::strlen( svc ) + 1 : 0 );
+    this->param_buf = ::malloc( daemon_len + 1 + net_len + svc_len );
     char * s = (char *) this->param_buf;
+    if ( daemon_len > 0 ) {
+      ::memcpy( s, p.daemon, daemon_len );
+      s[ daemon_len ] = '\0';
+      this->daemon = s;
+      s = &s[ daemon_len + 1 ];
+    }
     if ( net_len > 0 ) {
       ::memcpy( s, p.network, net_len );
       this->network = s;
       s = &s[ net_len ];
     }
     if ( svc_len > 0 ) {
-      ::memcpy( s, p.service, svc_len );
+      ::memcpy( s, svc, svc_len );
       this->service = s;
     }
   }
@@ -542,6 +560,61 @@ EvRvClient::fwd_pub( void ) noexcept
   if ( this->cb != NULL )
     return this->cb->on_rv_msg( pub );
   return this->sub_route.forward_msg( pub );
+}
+
+RvMsg *
+EvRvClient::make_rv_msg( void *msg,  size_t msg_len,
+                         uint32_t msg_enc ) noexcept
+{
+  bool is_rv = false;
+  switch ( msg_enc ) {
+    case RVMSG_TYPE_ID:
+      is_rv = true;
+      break;
+
+    case MD_OPAQUE:
+    case MD_STRING:
+      if ( RvMsg::is_rvmsg( msg, 0, msg_len, 0 ) ) {
+        is_rv = true;
+        break;
+      }
+      if ( msg_enc == MD_STRING ) {
+        if ( TibMsg::is_tibmsg( msg, 0, msg_len, 0 ) ||
+             TibSassMsg::is_tibsassmsg( msg, 0, msg_len, 0 ) )
+          msg_enc = MD_OPAQUE;
+        else {
+          if ( MDMsg::is_msg_type( msg, 0, msg_len, 0 ) == JSON_TYPE_ID ) {
+    case JSON_TYPE_ID:
+            if ( EvRvService::convert_json( this->spc, msg, msg_len ) ) {
+              is_rv = true;
+              break;
+            }
+          }
+        }
+      }
+      /* FALLTHRU */
+    case RAIMSG_TYPE_ID:
+    case TIB_SASS_TYPE_ID:
+    case TIB_SASS_FORM_TYPE_ID:
+    case MARKETFEED_TYPE_ID:
+    case RWF_MSG_TYPE_ID:
+    default:
+      break;
+    case MD_MESSAGE:
+      if ( RvMsg::is_rvmsg( msg, 0, msg_len, 0 ) )
+        is_rv = true;
+      break;
+  }
+  if ( is_rv )
+    return RvMsg::unpack_rv( msg, 0, msg_len, 0, NULL, this->msg_in.mem );
+  RvMsgWriter rvmsg( this->msg_in.mem, NULL, 0 );
+  if ( msg_enc == MD_STRING )
+    rvmsg.append_string( SARG( "_data_" ), (const char *) msg, msg_len );
+  else
+    rvmsg.append_opaque( SARG( "_data_" ), msg, msg_len );
+  return RvMsg::unpack_rv( rvmsg.buf, 0, rvmsg.update_hdr(), 0, NULL,
+                           this->msg_in.mem );
+  return NULL;
 }
 
 /* a message from the network, forward if matched by a subscription only once

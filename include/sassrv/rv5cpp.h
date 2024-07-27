@@ -1,7 +1,7 @@
-#ifndef __rai_sassrv__rvcpp_h__
-#define __rai_sassrv__rvcpp_h__
+#ifndef __rai_sassrv__rv5cpp_h__
+#define __rai_sassrv__rv5cpp_h__
 
-#include <sassrv/rvapi.h>
+#include <sassrv/rv5api.h>
 
 struct RvSession;
 struct RvSignal;

@@ -8,6 +8,7 @@
 #include <sassrv/ev_rv_client.h>
 #include <sassrv/ft.h>
 #include <raimd/md_msg.h>
+#include <raimd/md_dict.h>
 #include <raimd/sass.h>
 #include <raikv/ev_publish.h>
 
