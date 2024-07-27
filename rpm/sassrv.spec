@@ -17,6 +17,7 @@ BuildRequires:  libdecnumber
 BuildRequires:  pcre2-devel
 BuildRequires:  git-core
 BuildRequires:  c-ares-devel
+BuildRequires:  zlib-devel
 Requires:       raikv
 Requires:       raimd
 Requires:       libdecnumber
