@@ -249,7 +249,7 @@ main( int argc, const char *argv[] )
     data.sub_db.mout = &mout;
   }
   /* connect to daemon */
-  if ( ! conn.connect( parm, &data, &data ) ) {
+  if ( ! conn.rv_connect( parm, &data, &data ) ) {
     fprintf( stderr, "Failed to connect to daemon\n" );
     return 1;
   }

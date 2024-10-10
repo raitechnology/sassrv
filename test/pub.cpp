@@ -797,7 +797,7 @@ main( int argc, const char *argv[] )
     data.rectype = formclass;
   }
   /* connect to daemon */
-  if ( ! conn.connect( parm, &data, &data ) ) {
+  if ( ! conn.rv_connect( parm, &data, &data ) ) {
     fprintf( stderr, "Failed to connect to daemon\n" );
     return 1;
   }

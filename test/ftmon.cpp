@@ -305,7 +305,7 @@ main( int argc, const char *argv[] )
   if ( rejoin != NULL )
     data.test_rejoin = true;
   /* connect to daemon */
-  if ( ! conn.connect( parm, &data, &data ) ) {
+  if ( ! conn.rv_connect( parm, &data, &data ) ) {
     fprintf( stderr, "Failed to connect to daemon\n" );
     return 1;
   }

@@ -353,16 +353,26 @@ struct RvMsgIn {
     this->mem.reuse();
   }
   void set_prefix( const char *pref,  uint16_t len ) {
-    uint16_t i = sizeof( this->prefix ),
-             j = len;
-    this->prefix[ --i ] = '.';
-    for (;;) {
-      this->prefix[ --i ] = pref[ --j ];
-      if ( i == 1 || j == 0 )
-        break;
+    if ( len == 0 )
+      this->prefix_len = 0;
+    else {
+      uint16_t i = sizeof( this->prefix ),
+               j = len;
+      this->prefix[ --i ] = '.';
+      if ( pref[ j - 1 ] == '.' )
+        j--;
+      for (;;) {
+        this->prefix[ --i ] = pref[ --j ];
+        if ( i == 1 || j == 0 )
+          break;
+      }
+      if ( pref[ 0 ] != '_' )
+        this->prefix[ --i ] = '_';
+      this->prefix_len = sizeof( this->prefix ) - i;
     }
-    this->prefix[ --i ] = '_';
-    this->prefix_len = sizeof( this->prefix ) - i;
+  }
+  const char *prefix_start( void ) const {
+    return &this->prefix[ sizeof( this->prefix ) - this->prefix_len ];
   }
   void pre_subject( char *&str,  size_t &sz ) {
     str = this->sub - this->prefix_len;
@@ -441,8 +451,9 @@ struct EvRvService : public kv::EvConnection, public kv::BPData {
   uint64_t     timer_id;       /* timerid unique for this service */
   md::MDMsgMem spc;
 
-  EvRvService( kv::EvPoll &p,  const uint8_t t,  EvRvListen &l )
-    : kv::EvConnection( p, t ), sub_route( l.sub_route ),
+  EvRvService( kv::EvPoll &p,  const uint8_t t,  EvRvListen &l,
+               kv::EvConnectionNotify *n )
+    : kv::EvConnection( p, t, n ), sub_route( l.sub_route ),
       listener( l ), loss_queue( 0 ) {}
   void initialize_state( uint64_t id ) {
     this->svc_state     = VERS_RECV;

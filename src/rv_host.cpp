@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <time.h>
+#include <errno.h>
 #if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
 #include <unistd.h>
 #include <sys/socket.h>
@@ -1345,6 +1346,8 @@ RvMcast::parse_network( const char *network,  size_t net_len ) noexcept
     if ( ::gethostname( host, sizeof( host ) ) != 0 ) {
       host[ 0 ] = '\0';
       status = ERR_GETHOSTNAME_FAILED;
+      int e = errno;
+      fprintf( stderr, "rv gethostname() failed, %d/%s\n", e, strerror( e ) );
     }
     net_part = host;
   }
@@ -1352,8 +1355,10 @@ RvMcast::parse_network( const char *network,  size_t net_len ) noexcept
     this->host_ip = this->lookup_dev_ip4( net_part, this->netmask );
     if ( this->host_ip == 0 )
       this->host_ip = this->lookup_host_ip4( net_part, this->netmask );
-    if ( this->host_ip == 0 )
+    if ( this->host_ip == 0 ) {
       status = ERR_NO_INTERFACE_FOUND;
+      fprintf( stderr, "rv host \"%s\", route or ip address not found\n", net_part );
+    }
   }
   return status;
 }
@@ -1652,6 +1657,17 @@ RvHost::rem_ref( const char *sub,  size_t sublen,  uint32_t h,
   }
   rt->refcnt -= cnt;
   return rt->refcnt;
+}
+
+size_t
+RvHost::get_subscriptions( uint16_t svc,  SubRouteDB &subs ) noexcept
+{
+  RouteLoc loc;
+  if ( this->rpc == NULL || this->rpc->svc != svc )
+    return 0;
+  DaemonInbox &ibx = this->rpc->ibx;
+  subs.upsert( ibx.h, ibx.buf, ibx.len, loc );
+  return loc.is_new ? 1 : 0;
 }
 
 void RvHost::write( void ) noexcept {}

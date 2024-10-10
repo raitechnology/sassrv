@@ -79,7 +79,6 @@ main( int argc, const char *argv[] )
   r.no_default   = true;
   r.all          = true;
   r.add_desc( "  -r rv    = listen rv port          (7500)" );
-  r.add_desc( "  -d       = debug" );
   if ( ! r.parse_args( argc, argv ) )
     return 1;
   if ( shm.open( r.map_name, r.db_num ) != 0 )
@@ -87,7 +86,6 @@ main( int argc, const char *argv[] )
   printf( "rv_version:           " kv_stringify( SASSRV_VER ) "\n" );
   shm.print();
   r.rv_port = r.parse_port( argc, argv, "-r", "7500" );
-  rv_debug  = r.bool_arg( argc, argv, 0, "-d", 0, NULL );
   Runner<Args, Loop> runner( r, shm );
   if ( r.thr_error == 0 )
     return 0;

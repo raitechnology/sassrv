@@ -332,7 +332,7 @@ rv_Init( rv_Session * session, rv_Name service, rv_Name network,
   EvPoll &poll = sess->poll;
   poll.init( 128, false );
   EvRvClientParameters parm( daemon, network, service, 0, 0 );
-  if ( ! sess->client.connect( parm, sess, sess ) )
+  if ( ! sess->client.rv_connect( parm, sess, sess ) )
     return RV_NOT_CONNECTED;
 
   int idle_count = 0;

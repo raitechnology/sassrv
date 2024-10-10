@@ -441,6 +441,7 @@ struct RvHost : public kv::EvSocket {
   virtual void write( void ) noexcept;
   virtual void read( void ) noexcept;
   virtual void release( void ) noexcept;
+  virtual size_t get_subscriptions( uint16_t svc,  kv::SubRouteDB &subs ) noexcept;
   void reassert_subs( void ) noexcept;
   uint32_t add_ref( const char *sub,  size_t sublen,  uint32_t h ) noexcept;
   uint32_t rem_ref( const char *sub,  size_t sublen,  uint32_t h,

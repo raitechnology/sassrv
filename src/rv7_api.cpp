@@ -455,7 +455,7 @@ EvPipe::process( void ) noexcept
         break;
       }
       case OP_CREATE_TPORT:
-        rec.t->client.connect( *rec.parm, rec.t, rec.t );
+        rec.t->client.rv_connect( *rec.parm, rec.t, rec.t );
         break;
       case OP_TPORT_SEND:
         if ( rec.t->id != TIBRV_PROCESS_TRANSPORT )
@@ -637,8 +637,8 @@ Tibrv_API::Open( void ) noexcept
     this->make<api_Transport>( TIBRV_TRANSPORT, 0, TIBRV_PROCESS_TRANSPORT );
 
   EvRvClientParameters parm( "null", NULL, NULL, 0, 0 );
-  this->process_tport->client.connect( parm, this->process_tport,
-                                            this->process_tport );
+  this->process_tport->client.rv_connect( parm, this->process_tport,
+                                          this->process_tport );
   int fd = this->poll.get_null_fd();
   this->process_tport->sock_opts = OPT_NO_POLL;
   this->process_tport->PeerData::init_peer( this->poll.get_next_id(), fd, -1,

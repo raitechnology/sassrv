@@ -196,24 +196,26 @@ struct RvSubscriptionListener {
     RvSubscription & sub;
     const char     * reply;
     uint16_t         reply_len;
-    bool             is_listen_start;
+    bool             is_listen_start,
+                     coll;
 
     Start( RvSessionEntry &sess,  RvSubscription &script,  const char *rep,
-           size_t len,  bool is_listen )
+           size_t len,  bool is_listen,  bool col )
       : session( sess ), sub( script ), reply( rep ), reply_len( len ),
-        is_listen_start( is_listen ) {}
+        is_listen_start( is_listen ), coll( col ) {}
   };
 
   struct Stop {
     RvSessionEntry & session;
     RvSubscription & sub;
     bool             is_orphan,
-                     is_listen_stop;
+                     is_listen_stop,
+                     coll;
 
     Stop( RvSessionEntry &sess,  RvSubscription &script,  bool is_orph,
-          bool is_listen )
+          bool is_listen,  bool col )
       : session( sess ), sub( script ), is_orphan( is_orph ),
-        is_listen_stop( is_listen ) {}
+        is_listen_stop( is_listen ), coll( col ) {}
   };
 
   struct Snap {
@@ -231,6 +233,7 @@ struct RvSubscriptionListener {
   virtual void on_snapshot    ( Snap  &snp ) noexcept;
 };
 
+struct EvRvClient;
 struct RvSubscriptionDB {
   static const uint32_t HOST_QUERY_INTERVAL      = 30,
                         HOST_TIMEOUT_INTERVAL    = 120;
@@ -293,6 +296,9 @@ struct RvSubscriptionDB {
 
   void process_events( void ) noexcept;
   bool process_pub( kv::EvPublish &pub ) noexcept;
+  bool process_pub2( kv::EvPublish &pub,  const char *subject,
+                     size_t subject_len,  const char *reply,
+                     size_t reply_len ) noexcept;
   void gc( void ) noexcept;
   void make_sync( md::RvMsgWriter &w ) noexcept;
   bool make_host_sync( md::RvMsgWriter &w,  uint32_t i ) noexcept;
@@ -315,6 +321,7 @@ struct RvSubscriptionDB {
 
   void unsub_host( RvHostEntry &host ) noexcept;
   void unsub_session( RvSessionEntry &sess ) noexcept;
+  void unsub_all( void ) noexcept;
 
   RvSessionEntry & session_start( uint32_t host_id,  const char *session_name,
                            size_t session_len ) noexcept;
@@ -336,12 +343,17 @@ struct RvSubscriptionDB {
   RvSubscription * get_subject( uint32_t sub_id,  uint32_t sub_hash ) noexcept;
 
   RvSubscription & listen_start( RvSessionEntry &session,  const char *sub,
-                                 size_t sub_len, bool &is_added ) noexcept;
+                                 size_t sub_len, bool &is_added,
+                                 bool &coll ) noexcept;
   RvSubscription & listen_ref( RvSessionEntry &session,  const char *sub,
-                               size_t sub_len,  bool &is_added ) noexcept;
+                               size_t sub_len,  bool &is_added,
+                               bool &coll ) noexcept;
   RvSubscription & listen_stop( RvSessionEntry &session,  const char *sub,
-                                size_t sub_len,  bool &is_orphan ) noexcept;
+                                size_t sub_len,  bool &is_orphan,
+                                bool &coll ) noexcept;
   RvSubscription & snapshot( const char *sub,  size_t sub_len ) noexcept;
+  size_t sub_hash_count( const char *sub,  size_t sub_len,
+                         uint32_t sub_hash ) noexcept;
 };
 
 /*

@@ -79,7 +79,6 @@ print_hex( const void *buf,  size_t buflen )
 {
   struct HexDump hex;
   size_t off;
-  int n = 0;
   first_line( &hex );
   for ( off = 0; off < buflen; ) {
     off = fill_line( &hex, buf, off, buflen );
@@ -89,7 +88,7 @@ print_hex( const void *buf,  size_t buflen )
 }
 
 int
-main(int argc, char* argv[])
+main(int , char**)
 {
   const char *ar[]     = { "one", "two", "three", "four" };
   tibrv_u32 ip   = htonl( ( 127 << 24 ) | 1 ), ip2;

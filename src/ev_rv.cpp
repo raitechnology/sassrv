@@ -110,8 +110,8 @@ EvSocket *
 EvRvListen::accept( void ) noexcept
 {
   EvRvService *c =
-    this->poll.get_free_list<EvRvService, EvRvListen &>(
-      this->accept_sock_type, *this );
+    this->poll.get_free_list<EvRvService, EvRvListen &, EvConnectionNotify *>(
+      this->accept_sock_type, *this, this->notify );
   if ( c == NULL )
     return NULL;
   if ( ! this->accept2( *c, "rv" ) )
