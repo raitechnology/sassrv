@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <time.h>
-#include <netinet/in.h>
 #include <sassrv/ev_rv_client.h>
 #include <sassrv/ft.h>
 #include <raimd/md_msg.h>
@@ -41,7 +40,7 @@ static char * hms( uint64_t now,  char *buf ) noexcept {
   struct tm tm;
   time_t t = now / NS;
   uint32_t ms = ( now % NS ) / 1000000;
-  localtime_r( &t, &tm );
+  md_localtime( t, tm );
   ::snprintf( buf, 32, "%02d:%02d:%02d.%u%u%u",
               tm.tm_hour, tm.tm_min, tm.tm_sec,
               ms / 100, ( ms / 10 ) % 10, ms % 10);

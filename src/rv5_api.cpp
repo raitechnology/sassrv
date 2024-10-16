@@ -107,13 +107,21 @@ struct rv_Signal_api {
                   * back;
   rv_SignalCallback cb;
   void            * cl;
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+#else
   struct sigaction  old_action;
   int               signo;
+#endif
   bool              signaled;
   void * operator new( size_t, void *ptr ) { return ptr; }
   void operator delete( void *ptr ) { ::free( ptr ); }
   rv_Signal_api( rv_Session_api &s,  int sig ) : session( s ), next( 0 ),
-    back( 0 ), cb( 0 ), cl( 0 ), signo( sig ), signaled( false ) {}
+    back( 0 ), cb( 0 ), cl( 0 ), signaled( false ) {
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+#else
+  this->signo = sig;
+#endif
+  }
   virtual ~rv_Signal_api() {}
 };
 
@@ -288,6 +296,8 @@ rv_Version( void )
   return "sassrv-" kv_stringify( SASSRV_VER );
 }
 
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+#else
 static void
 rv_signal_handler( int signum )
 {
@@ -299,6 +309,7 @@ rv_signal_handler( int signum )
     }
   }
 }
+#endif
 
 rv_Status
 rv_CreateSignal( rv_Session session,  rv_Signal * signal,  int signo,
@@ -313,13 +324,15 @@ rv_CreateSignal( rv_Session session,  rv_Signal * signal,  int signo,
 
   if ( signal != NULL )
     *signal = s;
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+#else
   struct sigaction new_action;
 
   new_action.sa_handler = rv_signal_handler;
   sigemptyset( &new_action.sa_mask );
   new_action.sa_flags = 0;
   sigaction( signo, &new_action, &s->old_action );
-
+#endif
   return RV_OK;
 }
 

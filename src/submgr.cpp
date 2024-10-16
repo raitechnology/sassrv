@@ -3,7 +3,13 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#define __STDC_FORMAT_MACROS
+#include <inttypes.h>
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
 #include <netinet/in.h>
+#else
+#include <raikv/win.h>
+#endif
 #include <sassrv/ev_rv_client.h>
 #include <sassrv/submgr.h>
 #include <raikv/ev_publish.h>
@@ -72,7 +78,7 @@ match_rv_info( const char *sub,  uint32_t sub_len ) noexcept
 }
 static char * hms( time_t t,  char *buf ) noexcept {
   struct tm tm;
-  localtime_r( &t, &tm );
+  md_localtime( t, tm );
   ::snprintf( buf, 32, "%02d:%02d:%02d (%u)",
               tm.tm_hour, tm.tm_min, tm.tm_sec, (uint32_t) ( t % 3600 ) );
   return buf;
@@ -1383,9 +1389,9 @@ RvSubscriptionDB::gc( void ) noexcept
           sz += entry->sub_ht->mem_size();
         entry = this->session_tab.next( loc );
       }
-      this->mout->printf( "gc, rem %u subscriptions removed : %lu bytes used, "
-                          "%u sessions removed : %lu bytes used, "
-                          "other %lu bytes used\n",
+      this->mout->printf( "gc, rem %u subscriptions removed : %" PRIu64 " bytes used, "
+                          "%u sessions removed : %" PRIu64 " bytes used, "
+                          "other %" PRIu64 " bytes used\n",
                           sub_rem, this->sub_tab.mem_size(), sess_rem, 
                           this->sub_tab.mem_size(),
                           this->host_tab.size * sizeof( RvHostEntry ) +
