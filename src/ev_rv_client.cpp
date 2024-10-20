@@ -60,6 +60,7 @@ EvRvClient::EvRvClient( EvPoll &p,  RoutePublish &sr,  EvConnectionNotify *n ) n
     network( 0 ), service( 0 ), save_buf( 0 ), param_buf( 0 ), save_len( 0 ),
     svc( 0 ), sub_db( *this, this ), timer_id( 0 )
 {
+  this->start_stamp = kv_current_realtime_ns();
   if ( ! rv_client_init )
     rv_client_static_init();
   md_init_auto_unpack();
@@ -72,6 +73,7 @@ EvRvClient::EvRvClient( EvPoll &p ) noexcept
     network( 0 ), service( 0 ), save_buf( 0 ), param_buf( 0 ), save_len( 0 ),
     svc( 0 ), sub_db( *this, this )
 {
+  this->start_stamp = kv_current_realtime_ns();
   if ( ! rv_client_init )
     rv_client_static_init();
   md_init_auto_unpack();
@@ -123,7 +125,6 @@ EvRvClient::initialize_state( bool is_null ) noexcept
       *ptr++ = hexchar2( ip[ i/2 ] & 0xf );
     }
     *ptr++ = '.';
-    this->start_stamp = kv_current_realtime_ns();
     ptr += RvHost::time_to_str( this->start_stamp, ptr );
     this->session_len = (uint16_t) ( ptr - this->session );
     this->control_len = this->make_inbox( this->control, 1 );
@@ -527,7 +528,6 @@ EvRvClient::recv_info( void ) noexcept
         *ptr++ = hexchar2( ip[ i/2 ] & 0xf );
       }
       *ptr++ = '.';
-      this->start_stamp = kv_current_realtime_ns();
       ptr += RvHost::time_to_str( this->start_stamp, ptr );
       this->session_len = (uint16_t) ( ptr - this->session );
       this->control_len = this->make_inbox( this->control, 1 );

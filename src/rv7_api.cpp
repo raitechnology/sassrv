@@ -19,9 +19,33 @@
 #include <sassrv/mc.h>
 #include <sassrv/rv7cpp.h>
 
-namespace {
+namespace rv7 {
+
 Tibrv_API * tibrv_api;
 int debug_api;
+
+static inline timespec
+ts_timeout( double timeout, double default_timeout = 0 ) {
+  struct timespec ts;
+  if ( timeout < 0.0 )
+    timeout = default_timeout;
+  if ( timeout > 0.0 ) {
+    clock_gettime( CLOCK_REALTIME, &ts );
+    double frac, i;
+    frac = modf( timeout, &i );
+    ts.tv_sec  += i;
+    ts.tv_nsec += frac * 1000000000.0;
+    if ( ts.tv_nsec >= 1000000000 ) {
+      ts.tv_sec++;
+      ts.tv_nsec -= 1000000000;
+    }
+  }
+  else {
+    ts.tv_sec  = 0;
+    ts.tv_nsec = 0;
+  }
+  return ts;
+}
 
 void
 api_Transport::on_connect( EvSocket &conn ) noexcept
@@ -33,6 +57,63 @@ api_Transport::on_connect( EvSocket &conn ) noexcept
   pthread_mutex_lock( &this->mutex );
   pthread_cond_broadcast( &this->cond );
   pthread_mutex_unlock( &this->mutex );
+}
+
+void *
+tibrv_reconnect_thread( void *arg ) noexcept
+{
+  api_Transport & t = *(api_Transport *) arg;
+  pthread_cond_t wait_cond;
+  pthread_cond_init( &wait_cond, NULL );
+
+  for (;;) {
+    EvRvClientParameters parm( t.x.daemon, t.x.network, t.x.service );
+    parm.opts |= kv::OPT_CONNECT_NB;
+
+    EvPipeRec rec( OP_CREATE_TPORT, &t, &parm, &t.mutex, &t.cond );
+    struct timespec wait = ts_timeout( 1.0 ); /* pause 1 sec for reconnect */
+
+    pthread_mutex_lock( &t.mutex );
+    if ( pthread_cond_timedwait( &wait_cond, &t.mutex, &wait ) == ETIMEDOUT ) {
+      if ( ! t.is_destroyed )
+        t.api.ev_read->exec( rec );
+
+      if ( debug_api )
+        printf( "Reconnecting...\n" );
+      struct timespec ts = ts_timeout( 10.0 );
+      while ( ! t.is_destroyed  &&
+              t.client.rv_state > EvRvClient::ERR_CLOSE &&
+              t.client.rv_state < EvRvClient::DATA_RECV ) {
+        if ( pthread_cond_timedwait( &t.cond, &t.mutex, &ts ) == ETIMEDOUT ) {
+          EvPipeRec rec2( OP_CLOSE_TPORT, &t, &parm, &t.mutex, &t.cond );
+          t.api.ev_read->exec( rec2 );
+        }
+      }
+    }
+    if ( t.is_destroyed || t.client.rv_state == EvRvClient::DATA_RECV ) {
+      if ( debug_api )
+        printf( "Succussful reconnect...\n" );
+      break;
+    }
+    pthread_mutex_unlock( &t.mutex );
+  }
+
+  if ( ! t.is_destroyed ) {
+    tibrvId max_id = t.api.next_id;
+    for ( tibrvId id = 0; ! t.is_destroyed && id < max_id; id++ ) {
+      api_Listener *l;
+      if ( (l = t.api.get<api_Listener>( id, TIBRV_LISTENER )) != NULL ) {
+        if ( l->tport == t.id &&
+             t.client.is_inbox( l->subject, l->len ) == 0 ) {
+          EvPipeRec rec( OP_SUBSCRIBE, &t, l, &t.mutex, &t.cond );
+          t.api.ev_read->exec( rec );
+        }
+      }
+    }
+    t.reconnect_active = false;
+  }
+  pthread_mutex_unlock( &t.mutex );
+  return NULL;
 }
 
 void
@@ -48,6 +129,15 @@ api_Transport::on_shutdown( EvSocket &conn,  const char *err,
     this->client.poll.quit = 1;*/
   pthread_mutex_lock( &this->mutex );
   pthread_cond_broadcast( &this->cond );
+
+  if ( ! this->reconnect_active && this->x.session_len > 0 ) {
+    this->reconnect_active = true;
+    pthread_t id;
+    pthread_attr_t attr;
+    pthread_attr_init( &attr );
+    pthread_attr_setdetachstate( &attr, 1 );
+    pthread_create( &id, &attr, tibrv_reconnect_thread, this );
+  }
   pthread_mutex_unlock( &this->mutex );
 }
 
@@ -293,80 +383,6 @@ tibrv_disp_thread( void *arg ) noexcept
   return NULL;
 }
 
-enum EvPipeOp {
-  OP_NONE = 0,
-  OP_SUBSCRIBE,
-  OP_UNSUBSCRIBE,
-  OP_CREATE_TIMER,
-  OP_DESTROY_TIMER,
-  OP_RESET_TIMER,
-  OP_CREATE_TPORT,
-  OP_TPORT_SEND,
-  OP_TPORT_SENDV
-};
-
-struct EvPipeRec {
-  EvPipeOp          op;
-  api_Transport   * t;
-  api_Listener    * l;
-  api_Timer       * timer;
-  pthread_mutex_t * mutex;
-  pthread_cond_t  * cond;
-  EvPublish       * pub;
-  tibrv_u32         cnt;
-  EvRvClientParameters
-                  * parm;
-  bool            * complete;
-
-  EvPipeRec( EvPipeOp          oper,
-             api_Transport   * transport,
-             EvRvClientParameters * p,
-             pthread_mutex_t * m,
-             pthread_cond_t  * c )
-    : op( oper ), t( transport ), l( 0 ), timer( 0 ),
-      mutex( m ), cond( c ), pub( 0 ), cnt( 0 ), parm( p ), complete( 0 ) {}
-
-  EvPipeRec( EvPipeOp          oper,
-             api_Transport   * transport,
-             api_Listener    * listener,
-             pthread_mutex_t * m,
-             pthread_cond_t  * c )
-    : op( oper ), t( transport ), l( listener ), timer( 0 ),
-      mutex( m ), cond( c ), pub( 0 ), cnt( 0 ), parm( 0 ), complete( 0 ) {}
-
-  EvPipeRec( EvPipeOp          oper,
-             api_Timer       * tmr,
-             pthread_mutex_t * m,
-             pthread_cond_t  * c )
-    : op( oper ), t( 0 ), l( 0 ), timer( tmr ),
-      mutex( m ), cond( c ), pub( 0 ), cnt( 0 ), parm( 0 ), complete( 0 ) {}
-
-  EvPipeRec( EvPipeOp          oper,
-             api_Transport   * transport,
-             EvPublish       * p,
-             tibrv_u32         count,
-             pthread_mutex_t * m,
-             pthread_cond_t  * c )
-    : op( oper ), t( transport ), l( 0 ), timer( 0 ),
-      mutex( m ), cond( c ), pub( p ), cnt( count ), parm( 0 ), complete( 0 ) {}
-
-  EvPipeRec() : op( OP_NONE ), t( 0 ), l( 0 ), timer( 0 ),
-                mutex( 0 ), cond( 0 ), pub( 0 ), cnt( 0 ), parm( 0 ), complete( 0 ) {}
-};
-
-struct EvPipe : public EvConnection {
-  int write_fd;
-
-  void * operator new( size_t, void *ptr ) { return ptr; }
-  EvPipe( EvPoll &poll,  int wfd ) :
-    EvConnection( poll, poll.register_type( "tibrv_api" ) ), write_fd( wfd ) {}
-  bool start( int rfd,  const char *name ) noexcept;
-  virtual void process( void ) noexcept final;
-  virtual void release( void ) noexcept final {}
-
-  void exec( EvPipeRec &rec ) noexcept;
-};
-
 void
 EvPipe::exec( EvPipeRec &rec ) noexcept
 {
@@ -456,6 +472,10 @@ EvPipe::process( void ) noexcept
       }
       case OP_CREATE_TPORT:
         rec.t->client.rv_connect( *rec.parm, rec.t, rec.t );
+        break;
+      case OP_CLOSE_TPORT:
+        if ( rec.t->client.in_list( IN_ACTIVE_LIST ) )
+          rec.t->client.idle_push( EV_CLOSE );
         break;
       case OP_TPORT_SEND:
         if ( rec.t->id != TIBRV_PROCESS_TRANSPORT )
@@ -661,15 +681,15 @@ Tibrv_API::CreateListener( tibrvEvent * event,  tibrvQueue queue,
                           tibrvEventVectorCallback vcb,
                           const char * subj,  const void * closure ) noexcept
 {
+  size_t len  = ( subj == NULL ? 0 : ::strlen( subj ) );
   *event = TIBRV_INVALID_ID;
-  if ( subj == NULL || ::strstr( subj, ".." ) != NULL ||
-       subj[ 0 ] == '.' || subj[ 0 ] == '\0' )
+  if ( len == 0 || ::strstr( subj, ".." ) != NULL ||
+       subj[ 0 ] == '.' || subj[ len - 1 ] == '.' )
     return TIBRV_INVALID_SUBJECT;
   api_Queue     * q = this->get<api_Queue>( queue, TIBRV_QUEUE );
   api_Transport * t = this->get<api_Transport>( tport, TIBRV_TRANSPORT );
   if ( q == NULL ) return TIBRV_INVALID_QUEUE;
   if ( t == NULL ) return TIBRV_INVALID_TRANSPORT;
-  size_t         len  = ::strlen( subj );
   const char   * wild = is_rv_wildcard( subj, len );
   api_Listener * l    = this->make<api_Listener>( TIBRV_LISTENER, len + 1 );
   if ( wild != NULL ) {
@@ -734,7 +754,7 @@ Tibrv_API::DestroyEvent( tibrvEvent event,  tibrvEventOnComplete cb ) noexcept
     bool ok = true;
     switch ( type ) {
       case TIBRV_TIMER: {
-        api_Timer * t = this->get<api_Timer>( event, TIBRV_TIMER );
+        api_Timer * t = this->rem<api_Timer>( event, TIBRV_TIMER );
         if ( t == NULL )
           break;
         api_Queue * q = this->get<api_Queue>( t->queue, TIBRV_QUEUE );
@@ -745,10 +765,11 @@ Tibrv_API::DestroyEvent( tibrvEvent event,  tibrvEventOnComplete cb ) noexcept
           this->ev_read->exec( rec );
           pthread_mutex_unlock( &q->mutex );
         }
+        delete t;
         break;
       }
       case TIBRV_LISTENER: {
-        api_Listener  * l = this->get<api_Listener>( event, TIBRV_LISTENER );
+        api_Listener  * l = this->rem<api_Listener>( event, TIBRV_LISTENER );
         if ( l == NULL )
           break;
         api_Transport * t = this->get<api_Transport>( l->tport, TIBRV_TRANSPORT );
@@ -763,6 +784,7 @@ Tibrv_API::DestroyEvent( tibrvEvent event,  tibrvEventOnComplete cb ) noexcept
           t->ht.remove( l );
           pthread_mutex_unlock( &t->mutex );
         }
+        delete l;
         break;
       }
       case TIBRV_QUEUE:
@@ -879,29 +901,6 @@ Tibrv_API::CreateQueue( tibrvQueue * q ) noexcept
   api_Queue * queue = this->make<api_Queue>( TIBRV_QUEUE );
   *q = queue->id;
   return TIBRV_OK;
-}
-
-static inline timespec
-ts_timeout( double timeout, double default_timeout = 0 ) {
-  struct timespec ts;
-  if ( timeout < 0.0 )
-    timeout = default_timeout;
-  if ( timeout > 0.0 ) {
-    clock_gettime( CLOCK_REALTIME, &ts );
-    double frac, i;
-    frac = modf( timeout, &i );
-    ts.tv_sec  += i;
-    ts.tv_nsec += frac * 1000000000.0;
-    if ( ts.tv_nsec >= 1000000000 ) {
-      ts.tv_sec++;
-      ts.tv_nsec -= 1000000000;
-    }
-  }
-  else {
-    ts.tv_sec  = 0;
-    ts.tv_nsec = 0;
-  }
-  return ts;
 }
 
 tibrv_status
@@ -1221,9 +1220,25 @@ tibrv_status
 Tibrv_API::CreateTransport( tibrvTransport * tport, const char * service,
                            const char * network, const char * daemon ) noexcept
 {
-  api_Transport * t = this->make<api_Transport>( TIBRV_TRANSPORT );
+#define alen( s ) ( s == NULL ? 0 : ( ::strlen( s ) + 1 ) )
+  size_t add = alen( service ) + alen( network ) + alen( daemon );
+#undef alen
+
+  api_Transport * t = this->make<api_Transport>( TIBRV_TRANSPORT, add );
   *tport = t->id;
-  EvRvClientParameters parm( daemon, network, service, 0, 0 );
+  EvRvClientParameters parm( daemon, network, service );
+  parm.opts |= kv::OPT_CONNECT_NB;
+  char * p = (char *) (void *) &t[ 1 ];
+
+#define acat( x, s ) \
+  { size_t l = ::strlen( s ) + 1; ::memcpy( p, s, l ); x = p; p += l; }
+  if ( service != NULL )
+    acat( t->x.service, service );
+  if ( network != NULL )
+    acat( t->x.network, network );
+  if ( daemon != NULL )
+    acat( t->x.daemon, daemon );
+#undef acat
 
   EvPipeRec rec( OP_CREATE_TPORT, t, &parm, &t->mutex, &t->cond );
   tibrv_status ret = TIBRV_OK;
@@ -1234,11 +1249,15 @@ Tibrv_API::CreateTransport( tibrvTransport * tport, const char * service,
   struct timespec ts = ts_timeout( 10.0 );
   while ( t->client.rv_state > EvRvClient::ERR_CLOSE &&
           t->client.rv_state < EvRvClient::DATA_RECV ) {
-    if ( pthread_cond_timedwait( &t->cond, &t->mutex, &ts ) == ETIMEDOUT )
-      break;
+    if ( pthread_cond_timedwait( &t->cond, &t->mutex, &ts ) == ETIMEDOUT ) {
+      EvPipeRec rec2( OP_CLOSE_TPORT, t, &parm, &t->mutex, &t->cond );
+      this->ev_read->exec( rec2 );
+    }
   }
   if ( t->client.rv_state != EvRvClient::DATA_RECV )
     ret = TIBRV_DAEMON_NOT_FOUND;
+  ::memcpy( t->x.session, t->client.session, sizeof( t->x.session ) );
+  t->x.session_len = t->client.session_len;
   pthread_mutex_unlock( &t->mutex );
   return ret;
 }
@@ -1377,6 +1396,13 @@ Tibrv_API::DestroyTransport( tibrvTransport tport ) noexcept
   api_Transport * t = this->get<api_Transport>( tport, TIBRV_TRANSPORT );
   if ( t == NULL )
     return TIBRV_INVALID_TRANSPORT;
+
+  pthread_mutex_lock( &t->mutex );
+  EvPipeRec rec2( OP_CLOSE_TPORT, t, (EvRvClientParameters *) NULL,
+                  &t->mutex, &t->cond );
+  t->api.ev_read->exec( rec2 );
+  t->is_destroyed = true;
+  pthread_mutex_unlock( &t->mutex );
   return TIBRV_OK;
 }
 
@@ -1387,11 +1413,20 @@ Tibrv_API::CreateInbox( tibrvTransport tport, char * inbox_str,
   api_Transport * t = this->get<api_Transport>( tport, TIBRV_TRANSPORT );
   if ( t == NULL )
     return TIBRV_INVALID_TRANSPORT;
-  char inbox[ MAX_RV_INBOX_LEN ];
+
   pthread_mutex_lock( &t->mutex );
-  t->client.make_inbox( inbox, t->inbox_count++ );
+  uint32_t num = t->inbox_count++;
   pthread_mutex_unlock( &t->mutex );
-  size_t len = ::strlen( inbox );
+
+  char inbox[ MAX_RV_INBOX_LEN ];
+  size_t len = 7;
+  ::memcpy( inbox, "_INBOX.", len );
+  ::memcpy( &inbox[ len ], t->x.session, t->x.session_len );
+  len += t->x.session_len;
+  inbox[ len++ ] = '.';
+  len += uint32_to_string( num, &inbox[ len ] );
+  inbox[ len ] = '\0';
+
   if ( inbox_len > 0 )
     ::memcpy( inbox_str, inbox, len + 1 <= inbox_len ? len + 1 : inbox_len );
   return TIBRV_OK;
@@ -1562,6 +1597,8 @@ Tibrv_API::GetDispatcherName( tibrvDispatcher disp, const char ** name ) noexcep
 }
 
 extern "C" {
+
+using namespace rv7;
 
 const char *
 tibrv_Version( void )

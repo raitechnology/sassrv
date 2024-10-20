@@ -6,7 +6,7 @@ using namespace md;
 using namespace kv;
 using namespace sassrv;
 
-namespace {
+namespace rv7 {
 
 typedef enum { TIBRV_NONE     = 0,
                TIBRV_TIMER    = TIBRV_TIMER_EVENT,
@@ -29,9 +29,9 @@ struct api_Transport;
 
 struct Tibrv_API {
   EvPoll          poll;
-  tibrvId         next_id, map_size;
-  tibrv_Elem    * map;
+  tibrvId         next_id, free_id, map_size;
   int             idle_count;
+  tibrv_Elem    * map;
   pthread_mutex_t map_mutex;
   pthread_cond_t  cond;
   EvPipe        * ev_read;
@@ -39,9 +39,8 @@ struct Tibrv_API {
   api_Queue     * default_queue;
   api_Transport * process_tport;
   void * operator new( size_t, void *ptr ) { return ptr; }
-  Tibrv_API() : next_id( 11 ), map_size( 0 ), map( 0 ), idle_count( 0 ),
-                ev_read( 0 ), default_queue( 0 ), process_tport( 0 ) {}
-
+  Tibrv_API() : next_id( 11 ), free_id( 0 ), map_size( 0 ), idle_count( 0 ),
+               map( 0 ), ev_read( 0 ), default_queue( 0 ), process_tport( 0 ) {}
   bool do_poll( uint64_t nsecs,  bool once ) noexcept;
 
   template<class T>
@@ -53,8 +52,23 @@ struct Tibrv_API {
       mem = ::malloc( sizeof( T ) + add );
 
     pthread_mutex_lock( &this->map_mutex );
-    if ( id == 0 )
-      id = this->next_id++;
+    if ( id == 0 ) {
+      if ( this->free_id != 0 ) {
+        for (;;) {
+          id = this->free_id++;
+          if ( id >= this->next_id ) {
+            id = this->next_id++;
+            this->free_id = 0;
+            break;
+          }
+          if ( this->map[ id ].ptr == NULL )
+            break;
+        }
+      }
+      else {
+        id = this->next_id++;
+      }
+    }
     T *p = new ( mem ) T( *this, id );
     if ( id >= this->map_size ) {
       this->map = (tibrv_Elem *)
@@ -74,7 +88,23 @@ struct Tibrv_API {
     pthread_mutex_lock( &this->map_mutex );
     bool b = ( id < this->map_size && id == this->map[ id ].id &&
                type == this->map[ id ].type );
-    T * p = (T *) ( b ? this->map[ id ].ptr : NULL );
+    T  * p = (T *) ( b ? this->map[ id ].ptr : NULL );
+    pthread_mutex_unlock( &this->map_mutex );
+    return p;
+  }
+
+  template<class T>
+  T *rem( tibrvId id, ElemType type ) {
+    pthread_mutex_lock( &this->map_mutex );
+    bool b = ( id < this->map_size && id == this->map[ id ].id &&
+               type == this->map[ id ].type );
+    T  * p = NULL;
+    if ( b ) {
+      p = (T *) this->map[ id ].ptr;
+      this->map[ id ].ptr = NULL;
+    }
+    if ( this->free_id == 0 || id < this->free_id )
+      this->free_id = id;
     pthread_mutex_unlock( &this->map_mutex );
     return p;
   }
@@ -342,13 +372,25 @@ struct api_Transport : public EvConnectionNotify, public RvClientCB,
   pthread_mutex_t mutex;
   pthread_cond_t  cond;
 
+  struct TportReconnectArgs { /* saved state for reconnecting */
+    char session[ 64 ];
+    char * service, * network, * daemon;
+    uint16_t session_len;
+    TportReconnectArgs()
+      : service( 0 ), network( 0 ), daemon( 0 ), session_len( 0 ) {}
+  };
+  TportReconnectArgs x;
+  bool reconnect_active,
+       is_destroyed;
+
   void * operator new( size_t, void *ptr ) { return ptr; }
   void operator delete( void *ptr ) { aligned_free( ptr ); }
   api_Transport( Tibrv_API &a, tibrvId i ) :
     kv::EvSocket( a.poll, a.poll.register_type( "api_Transport" ) ),
     api( a ), client( a.poll ), me( &this->client ), wild_ht( 0 ), id( i ),
     inbox_count( 2 ), wait_limit( 0 ), batch_size( 0 ),
-    batch_mode( TIBRV_TRANSPORT_DEFAULT_BATCH ), descr( 0 ) {
+    batch_mode( TIBRV_TRANSPORT_DEFAULT_BATCH ), descr( 0 ),
+    reconnect_active( false ), is_destroyed( false ) {
     pthread_mutex_init( &this->mutex, NULL );
     pthread_cond_init( &this->cond, NULL );
   }
@@ -380,6 +422,7 @@ struct api_Timer : public EvTimerCallback {
   api_Timer( Tibrv_API &a,  tibrvId i ) : api( a ), id( i ), queue( 0 ),
      cb( 0 ), cl( 0 ), ival( 0 ), in_queue( false ) {}
   virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
+  virtual ~api_Timer() {}
 };
 
 struct TibrvMsgRef {
@@ -449,6 +492,81 @@ struct api_Msg {
     this->wr.reset();
     this->mem.reuse();
   }
+};
+
+enum EvPipeOp {
+  OP_NONE = 0,
+  OP_SUBSCRIBE,
+  OP_UNSUBSCRIBE,
+  OP_CREATE_TIMER,
+  OP_DESTROY_TIMER,
+  OP_RESET_TIMER,
+  OP_CREATE_TPORT,
+  OP_CLOSE_TPORT,
+  OP_TPORT_SEND,
+  OP_TPORT_SENDV
+};
+
+struct EvPipeRec {
+  EvPipeOp          op;
+  api_Transport   * t;
+  api_Listener    * l;
+  api_Timer       * timer;
+  pthread_mutex_t * mutex;
+  pthread_cond_t  * cond;
+  EvPublish       * pub;
+  tibrv_u32         cnt;
+  EvRvClientParameters
+                  * parm;
+  bool            * complete;
+
+  EvPipeRec( EvPipeOp          oper,
+             api_Transport   * transport,
+             EvRvClientParameters * p,
+             pthread_mutex_t * m,
+             pthread_cond_t  * c )
+    : op( oper ), t( transport ), l( 0 ), timer( 0 ),
+      mutex( m ), cond( c ), pub( 0 ), cnt( 0 ), parm( p ), complete( 0 ) {}
+
+  EvPipeRec( EvPipeOp          oper,
+             api_Transport   * transport,
+             api_Listener    * listener,
+             pthread_mutex_t * m,
+             pthread_cond_t  * c )
+    : op( oper ), t( transport ), l( listener ), timer( 0 ),
+      mutex( m ), cond( c ), pub( 0 ), cnt( 0 ), parm( 0 ), complete( 0 ) {}
+
+  EvPipeRec( EvPipeOp          oper,
+             api_Timer       * tmr,
+             pthread_mutex_t * m,
+             pthread_cond_t  * c )
+    : op( oper ), t( 0 ), l( 0 ), timer( tmr ),
+      mutex( m ), cond( c ), pub( 0 ), cnt( 0 ), parm( 0 ), complete( 0 ) {}
+
+  EvPipeRec( EvPipeOp          oper,
+             api_Transport   * transport,
+             EvPublish       * p,
+             tibrv_u32         count,
+             pthread_mutex_t * m,
+             pthread_cond_t  * c )
+    : op( oper ), t( transport ), l( 0 ), timer( 0 ),
+      mutex( m ), cond( c ), pub( p ), cnt( count ), parm( 0 ), complete( 0 ) {}
+
+  EvPipeRec() : op( OP_NONE ), t( 0 ), l( 0 ), timer( 0 ),
+                mutex( 0 ), cond( 0 ), pub( 0 ), cnt( 0 ), parm( 0 ), complete( 0 ) {}
+};
+
+struct EvPipe : public EvConnection {
+  int write_fd;
+
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  EvPipe( EvPoll &poll,  int wfd ) :
+    EvConnection( poll, poll.register_type( "tibrv_api" ) ), write_fd( wfd ) {}
+  bool start( int rfd,  const char *name ) noexcept;
+  virtual void process( void ) noexcept final;
+  virtual void release( void ) noexcept final {}
+
+  void exec( EvPipeRec &rec ) noexcept;
 };
 
 }
