@@ -88,7 +88,7 @@ print_hex( const void *buf,  size_t buflen )
 }
 
 int
-main(int , char**)
+main( int argc, char **argv )
 {
   const char *ar[]     = { "one", "two", "three", "four" };
   tibrv_u32 ip   = htonl( ( 127 << 24 ) | 1 ), ip2;
@@ -98,6 +98,7 @@ main(int , char**)
   tibrvMsg msg, sub, x;
   const char *msgString;
 
+  (void) argc; (void) argv;
   printf( "%s\n\n", tibrv_Version() );
   tibrvMsg_Create(&msg);
   tibrvMsg_Create(&sub);

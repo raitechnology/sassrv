@@ -95,6 +95,7 @@ EvRvClient::initialize_state( bool is_null ) noexcept
   this->vmaj        = 5;
   this->vmaj        = 4;
   this->vupd        = 2;
+  this->cid         = 0;
   this->ipport      = 0;
   this->ipaddr      = 0;
   this->daemon      = NULL;
@@ -269,8 +270,10 @@ EvRvClient::rv_connect( EvRvClientParameters &p,
     this->userid[ user_len - 1 ] = '\0';
     this->userid_len = user_len;
   }
-  this->notify = n;
-  this->cb     = c;
+  if ( n != NULL )
+    this->notify = n;
+  if ( c != NULL )
+    this->cb = c;
 
   if ( is_null ) {
     if ( this->network != NULL ) {
@@ -519,18 +522,31 @@ EvRvClient::recv_info( void ) noexcept
     if ( match_field( it, SARG( "ipaddr" ), ip,        alen, MD_IPDATA ) &&
          match_field( it, SARG( "ipport" ), pt,        plen, MD_IPDATA ) &&
          match_field( it, SARG( "gob" ),    this->gob, glen, MD_STRING ) ) {
-      size_t i;
-      char * ptr = this->session;
+      uint16_t tmp  = 0;
+      size_t   i, clen = 2;
+      char   * ptr = this->session;
       this->gob_len = (uint16_t) ( glen - 1 );
+      if ( match_field( it, SARG( "cid" ), &tmp, clen, MD_IPDATA ) )
+        this->cid = get_u16<MD_BIG>( &tmp );
+      else
+        this->cid = 0;
       /* <ipaddr>.<pid><time><ptr> */
       for ( i = 0; i < 8; i += 2 ) {
         *ptr++ = hexchar2( ( ip[ i/2 ] >> 4 ) & 0xf );
         *ptr++ = hexchar2( ip[ i/2 ] & 0xf );
       }
       *ptr++ = '.';
+      if ( this->cid != 0 ) {
+        *ptr++ = 'U';
+        for ( i = 4; i <= 16; i += 4 )
+          *ptr++ = hexchar2( ( this->cid >> ( 16 - i ) ) & 0xf );
+        *ptr++ = '.';
+      }
       ptr += RvHost::time_to_str( this->start_stamp, ptr );
       this->session_len = (uint16_t) ( ptr - this->session );
       this->control_len = this->make_inbox( this->control, 1 );
+      printf( "session: %.*s control: %.*s\n", this->session_len, this->session,
+              this->control_len, this->control );
       this->send_init_rec(); /* resend with session */
       this->rv_state = CONN_RECV;
       return 0;
@@ -554,7 +570,7 @@ EvRvClient::recv_conn( void ) noexcept
   size_t       size;
 
   rvmsg.append_string( SARG( "mtype" ), SARG( "L" ) );
-  /* control: _INBOX.<iphex>.<time>.1 */
+  /* control: _INBOX.<iphex>.U<cid>.<time>.1 */
   ::memcpy( inbox, this->control, this->control_len + 1 );
   inbox[ this->control_len - 1 ] = '>';
   rvmsg.append_subject( SARG( "sub" ), inbox, this->control_len );

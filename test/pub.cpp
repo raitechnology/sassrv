@@ -72,6 +72,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   char        * sub_buf,
               * payload,
               * msg_buf;
+  const char  * msg_str;
   size_t        sub_n,
                 sub_count,       /* count of sub[] */
                 pub_count,
@@ -106,9 +107,9 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t n,
                   size_t cnt,  size_t pcnt,  size_t sz,  bool nd,  bool uj,
                   bool ur,  bool ut,  bool verb,  bool hex,  size_t rate,
-                  bool ra,  bool zi,  bool ts )
+                  bool ra,  bool zi,  bool ts,  const char *str )
     : poll( p ), client( c ), dict( 0 ), sub( s ), sub_buf( 0 ), payload( 0 ),
-      msg_buf( 0 ), sub_n( n ), sub_count( cnt ), pub_count( pcnt ),
+      msg_buf( 0 ), msg_str( str ), sub_n( n ), sub_count( cnt ), pub_count( pcnt ),
       current_pub( 0 ), total_pub( n * cnt * pcnt ), rate_accum( 0 ),
       i( 0 ), j( 0 ), k( 0 ), max_len( 0 ), payload_bytes( sz ),
       msg_buf_len( 0 ), rate_per_sec( rate ), start_time_ns( 0 ),
@@ -209,15 +210,16 @@ struct WriteParam {
                delta;
   const char * payload;
   size_t       payload_bytes;
+  const char * msg_str;
   uint16_t     rectype;
   bool         track_time;
 
   WriteParam( const char *s,  size_t len,  uint64_t num,  uint64_t t,
               uint64_t del,  const char *pay,  size_t pay_bytes,
-              uint16_t rec,  bool track )
+              uint16_t rec,  bool track,  const char *str )
     : sub( s ), sublen( len ), seqno( num ), cur_time( t ), delta( del ),
-      payload( pay ), payload_bytes( pay_bytes ), rectype( rec ),
-      track_time( track ) {}
+      payload( pay ), payload_bytes( pay_bytes ), msg_str( str ),
+      rectype( rec ), track_time( track ) {}
 };
 
 template< class Writer >
@@ -237,48 +239,55 @@ write_msg( Writer &writer,  WriteParam &p ) noexcept
               trade_date[]  = "TRADE_DATE",
               volume[]      = "VOLUME",
               duration[]    = "DURATION",
-              buffer_data[] = "BUFFER_DATA";
+              buffer_data[] = "BUFFER_DATA",
+              status_str[]  = "STATUS_STRING";
   MDDecimal dec;
   MDTime time;
   MDDate date;
 
-  short type = ( p.seqno == 0 ? 8 : 1 );
-  writer.append_int( msg_type, sizeof( msg_type ), type );
-  if ( p.rectype != 0 )
-    writer.append_int( rec_type, sizeof( rec_type ), p.rectype );
-  writer.append_int( seq_no, sizeof( seq_no ),  p.seqno );
-  writer.append_int( rec_status, sizeof( rec_status ), (short) 0 );
-  const char *s = &p.sub[ p.sublen ];
-  int dots = 0;
-  for ( ; s > p.sub; s-- ) {
-    if ( s[ -1 ] == '.' )
-      if ( ++dots == 2 )
-        break;
+  if ( p.msg_str != NULL ) {
+    writer.append_string( status_str, sizeof( status_str ),
+                          p.msg_str, ::strlen( p.msg_str ) );
   }
-  writer.append_string( symbol, sizeof( symbol ), s,
-                        &p.sub[ p.sublen + 1 ] - s );
-  writer.append_real( bid_size, sizeof( bid_size ), 10.0 );
-  writer.append_real( ask_size, sizeof( ask_size ), 20.0 );
+  else {
+    short type = ( p.seqno == 0 ? 8 : 1 );
+    writer.append_int( msg_type, sizeof( msg_type ), type );
+    if ( p.rectype != 0 )
+      writer.append_int( rec_type, sizeof( rec_type ), p.rectype );
+    writer.append_int( seq_no, sizeof( seq_no ),  p.seqno );
+    writer.append_int( rec_status, sizeof( rec_status ), (short) 0 );
+    const char *s = &p.sub[ p.sublen ];
+    int dots = 0;
+    for ( ; s > p.sub; s-- ) {
+      if ( s[ -1 ] == '.' )
+        if ( ++dots == 2 )
+          break;
+    }
+    writer.append_string( symbol, sizeof( symbol ), s,
+                          &p.sub[ p.sublen + 1 ] - s );
+    writer.append_real( bid_size, sizeof( bid_size ), 10.0 );
+    writer.append_real( ask_size, sizeof( ask_size ), 20.0 );
 
-  dec.ival = 17500;
-  dec.hint = MD_DEC_LOGn10_3; /* / 1000 */
-  writer.append_decimal( bid, sizeof( bid ), dec );
+    dec.ival = 17500;
+    dec.hint = MD_DEC_LOGn10_3; /* / 1000 */
+    writer.append_decimal( bid, sizeof( bid ), dec );
 
-  dec.ival = 17750;
-  dec.hint = MD_DEC_LOGn10_3; /* / 1000 */
-  writer.append_decimal( ask, sizeof( ask ), dec );
+    dec.ival = 17750;
+    dec.hint = MD_DEC_LOGn10_3; /* / 1000 */
+    writer.append_decimal( ask, sizeof( ask ), dec );
 
-  time.hour       = 13;
-  time.minute     = 15;
-  time.sec        = 0;
-  time.resolution = MD_RES_MINUTES;
-  time.fraction   = 0;
-  writer.append_time( timact, sizeof( timact ), time );
+    time.hour       = 13;
+    time.minute     = 15;
+    time.sec        = 0;
+    time.resolution = MD_RES_MINUTES;
+    time.fraction   = 0;
+    writer.append_time( timact, sizeof( timact ), time );
 
-  date.year = 2019;
-  date.mon  = 4;
-  date.day  = 9;
-  writer.append_date( trade_date, sizeof( trade_date ), date );
+    date.year = 2019;
+    date.mon  = 4;
+    date.day  = 9;
+    writer.append_date( trade_date, sizeof( trade_date ), date );
+  }
 
   if ( p.track_time ) {
     dec.ival = p.cur_time;
@@ -466,7 +475,7 @@ RvDataCallback::run_publishers( void ) noexcept
 
     WriteParam param( subject, subject_len, seqno, cur_time, delta,
                       this->payload, this->payload_bytes,
-                      this->rectype, this->track_time );
+                      this->rectype, this->track_time, this->msg_str );
     MDMsgMem mem;
     if ( this->use_json ) {
       JsonMsgWriter jsonmsg( mem, this->msg_buf, this->msg_buf_len );
@@ -683,6 +692,7 @@ main( int argc, const char *argv[] )
              * random     = get_arg( x, argc, argv, 0, "-R", "-random", NULL ),
              * zipf       = get_arg( x, argc, argv, 0, "-Z", "-zipf", NULL ),
              * use_ts     = get_arg( x, argc, argv, 0, "-T", "-stamp", NULL ),
+             * msg_str    = get_arg( x, argc, argv, 1, "-M", "-msg", NULL ),
              * help       = get_arg( x, argc, argv, 0, "-h", "-help", 0 );
   int first_sub = x, idle_count = 0;
 
@@ -710,6 +720,7 @@ main( int argc, const char *argv[] )
              "  -R         = random subjects\n"
              "  -Z         = random, zipf(0.99) distribution\n"
              "  -T         = add timestamp to message\n"
+             "  -M message = publish message string\n"
              "  subject    = subject to publish\n", argv[ 0 ] );
     return 1;
   }
@@ -753,7 +764,7 @@ main( int argc, const char *argv[] )
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, &argv[ first_sub ], n,
                          sub_cnt, pub_cnt, pay_siz, nd || uj || ur || ut,
-                         uj, ur, ut, vb, du, rate, ra, zi, ts );
+                         uj, ur, ut, vb, du, rate, ra, zi, ts, msg_str );
   /* load dictionary if present */
   if ( ! data.no_dictionary ) {
     if ( path != NULL || (path = ::getenv( "cfile_path" )) != NULL ) {

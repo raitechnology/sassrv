@@ -401,7 +401,8 @@ EvRvService::fwd_pub( void *rvbuf,  size_t buflen ) noexcept
     }
   }
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
-                 this->sub_route, *this, h, ftype );
+                 this->sub_route, *this, h, ftype, PUB_TYPE_NORMAL,
+                 0, this->host->host_ip );
   if ( this->msg_in.suffix_len != 0 ) {
     uint32_t suf_len = this->msg_in.suffix_len;
     if ( &((uint8_t *) msg)[ msg_len + (size_t) suf_len ] ==
@@ -709,19 +710,30 @@ EvRvService::is_psubscribed( const NotifyPattern &pat ) noexcept
 void
 EvRvService::add_sub( void ) noexcept
 {
-  char      * sub;
-  size_t      len;
-  uint32_t    refcnt = 0, h, sub_h = 0;
-  RvSubStatus status;
-  bool        coll   = false;
+  char       * sub;
+  size_t       len;
+  uint32_t     refcnt = 0, h, sub_h = 0;
+  RvSubStatus  status;
+  bool         coll   = false;
+  const char * rep    = this->msg_in.reply;
+  size_t       replen = this->msg_in.replylen;
+  char         reply_buf[ 256 ];
+
+  if ( this->msg_in.prefix_len > 0 ) {
+    size_t prelen = this->msg_in.prefix_len;
+    char * buf    = reply_buf;
+    if ( prelen + replen >= sizeof( reply_buf ) )
+      buf = this->msg_in.mem.str_make( prelen + replen + 1 );
+    replen = this->msg_in.cat_pre_subject( buf, rep, replen );
+    rep    = buf;
+  }
 
   this->msg_in.pre_subject( sub, len );
   if ( ! this->msg_in.is_wild ) {
     h = kv_crc_c( sub, len, 0 );
     sub_h = h;
     status = this->sub_tab.put( h, sub, len, refcnt, coll );
-    NotifySub nsub( sub, len, this->msg_in.reply, this->msg_in.replylen,
-                    h, coll, 'V', *this );
+    NotifySub nsub( sub, len, rep, replen, h, coll, 'V', *this );
     if ( status == RV_SUB_OK ) {
       this->sub_route.add_sub( nsub );
     }
@@ -746,9 +758,7 @@ EvRvService::add_sub( void ) noexcept
             break;
           }
         }
-        NotifyPattern npat( cvt, sub, len,
-                            this->msg_in.reply, this->msg_in.replylen,
-                            h, coll, 'V', *this );
+        NotifyPattern npat( cvt, sub, len, rep, replen, h, coll, 'V', *this );
         if ( m == NULL ) {
           pcre2_real_code_8       * re = NULL;
           pcre2_real_match_data_8 * md = NULL;

@@ -29,13 +29,14 @@ struct RvSubscription {
 struct RvSessionEntry {
   enum SessionState {
     RV_SESSION_UNKNOWN = 0,
-    RV_SESSION_RV5     = 1,
-    RV_SESSION_QUERY   = 2,
-    RV_SESSION_STOP    = 3,
-    RV_SESSION_RV7     = 4,
-    RV_SESSION_SELF    = 5
+    RV_SESSION_CID     = 1,
+    RV_SESSION_RV5     = 2,
+    RV_SESSION_QUERY   = 3,
+    RV_SESSION_STOP    = 4,
+    RV_SESSION_RV7     = 5,
+    RV_SESSION_SELF    = 6
   };
-  #define MAX_SESSION_STATE 6
+  #define MAX_SESSION_STATE 7
   static const char *get_session_state_str( SessionState s ) noexcept;
 
   kv::UIntHashTab * sub_ht; /* subject_id -> subj_hash */
@@ -46,14 +47,16 @@ struct RvSessionEntry {
                     stop_mono,
                     query_mono;
   SessionState      state;
+  uint16_t          cid;
   uint32_t          hash;
   uint16_t          len;
   char              value[ 2 ];
 
-  void start( uint32_t host_id,  uint32_t sess_id,  uint32_t cur_mono,
-              bool is_start ) {
+  void start( uint32_t host_id,  uint16_t cid,  uint32_t sess_id,
+              uint32_t cur_mono,  bool is_start ) {
     this->sub_ht     = kv::UIntHashTab::resize( NULL );
     this->host_id    = host_id;
+    this->cid        = cid;
     this->session_id = sess_id;
     this->start_mono = is_start ? cur_mono : 0;
     this->ref_mono   = cur_mono;
@@ -61,6 +64,8 @@ struct RvSessionEntry {
     this->query_mono = 0;
     this->state      = is_start ? RV_SESSION_RV5 :
                        this->has_daemon() ? RV_SESSION_RV7 : RV_SESSION_QUERY;
+    if ( cid != 0 )
+      this->state = RV_SESSION_CID;
   }
   void stop( uint32_t cur_mono ) {
     this->state     = RV_SESSION_STOP;
@@ -105,12 +110,13 @@ struct RvSessionEntry {
 struct RvHostEntry {
   enum HostState {
     RV_HOST_UNKNOWN = 0,
-    RV_HOST_START   = 1,
-    RV_HOST_STATUS  = 2,
-    RV_HOST_QUERY   = 3,
-    RV_HOST_STOP    = 4,
+    RV_HOST_CID     = 1,
+    RV_HOST_START   = 2,
+    RV_HOST_STATUS  = 3,
+    RV_HOST_QUERY   = 4,
+    RV_HOST_STOP    = 5,
   };
-  #define MAX_HOST_STATE 5
+  #define MAX_HOST_STATE 6
   static const char *get_host_state_str( HostState s ) noexcept;
 
   kv::UIntHashTab * sess_ht; /* session_id -> session_hash */
@@ -122,11 +128,13 @@ struct RvHostEntry {
             query_mono,
             data_loss;
   HostState state;
+  uint16_t  cid;
 
-  void start( uint32_t id,  uint32_t cur_mono,  bool is_start,
-              bool is_status ) {
+  void start( uint32_t host_id,  uint16_t cid,  uint32_t cur_mono,
+              bool is_start,  bool is_status ) {
     this->sess_ht     = kv::UIntHashTab::resize( NULL );
-    this->host_id     = id;
+    this->host_id     = host_id;
+    this->cid         = cid;
     this->start_mono  = is_start  ? cur_mono : 0;
     this->status_mono = is_status ? cur_mono : 0;
     this->ref_mono    = cur_mono;
@@ -134,6 +142,8 @@ struct RvHostEntry {
     this->query_mono  = 0;
     this->data_loss   = 0;
     this->state       = is_start ? RV_HOST_START : RV_HOST_QUERY;
+    if ( cid != 0 )
+      this->state = RV_HOST_CID;
   }
 
   void stop( uint32_t cur_mono ) {
@@ -149,7 +159,7 @@ struct RvHostEntry {
     this->check_query_needed( cur_mono );
     this->status_mono = cur_mono;
     this->ref_mono    = cur_mono;
-    if ( this->state != RV_HOST_QUERY )
+    if ( this->state != RV_HOST_QUERY && this->state != RV_HOST_CID )
       this->state = RV_HOST_STATUS;
   }
 
@@ -159,7 +169,7 @@ struct RvHostEntry {
 
   uint32_t check_query_needed( uint32_t cur_mono ) {
     uint32_t late_secs = 0;
-    if ( this->state != RV_HOST_QUERY ) {
+    if ( this->state != RV_HOST_QUERY && this->state != RV_HOST_CID ) {
       if ( this->state == RV_HOST_STOP )
         return 0;
       if ( cur_mono > this->ref_mono ) {
@@ -310,10 +320,10 @@ struct RvSubscriptionDB {
   void mark_sessions( RvHostEntry &host ) noexcept;
   void stop_marked_sessions( RvHostEntry &host ) noexcept;
 
-  void host_start( uint32_t host_id ) noexcept;
-  void host_stop( uint32_t host_id ) noexcept;
-  RvHostEntry & host_ref( uint32_t host_id,  bool is_status ) noexcept;
-
+  void host_start( uint32_t host_id,  uint16_t cid ) noexcept;
+  void host_stop( uint32_t host_id,  uint16_t cid ) noexcept;
+  RvHostEntry & host_ref( uint32_t host_id,  uint16_t cid,
+                          bool is_status ) noexcept;
   RvSessionEntry * first_session( RvHostEntry &host,  size_t &pos ) noexcept;
   RvSessionEntry * next_session( RvHostEntry &host,  size_t &pos ) noexcept;
   RvSessionEntry * get_session( uint32_t sess_id, uint32_t sess_hash ) noexcept;
@@ -323,12 +333,14 @@ struct RvSubscriptionDB {
   void unsub_session( RvSessionEntry &sess ) noexcept;
   void unsub_all( void ) noexcept;
 
-  RvSessionEntry & session_start( uint32_t host_id,  const char *session_name,
-                           size_t session_len ) noexcept;
-  void session_stop( uint32_t host_id,  const char *session_name,
-                     size_t session_len ) noexcept;
-  RvSessionEntry & session_ref( const char *session_name,
-                         size_t session_len ) noexcept;
+  RvHostEntry *host_exists( uint32_t host_id,  uint16_t cid ) noexcept;
+  void session_start( uint32_t host_id,  uint16_t cid,
+                      const char *session_name,
+                      size_t session_len,  bool is_self ) noexcept;
+  void session_stop( uint32_t host_id,  uint16_t cid,
+                     const char *session_name,  size_t session_len ) noexcept;
+  RvSessionEntry & session_ref( uint16_t cid,  const char *session_name,
+                                size_t session_len ) noexcept;
 
   void add_session( RvHostEntry &host,  RvSessionEntry &sess ) noexcept;
   void rem_session( RvHostEntry &host,  RvSessionEntry &sess ) noexcept;

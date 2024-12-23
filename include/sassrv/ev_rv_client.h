@@ -71,6 +71,7 @@ struct EvRvClient : public kv::EvConnection, public kv::RouteNotify,
                vmaj,           /* vhat version of client is connected */
                vmin,
                vupd,
+               cid,
                ipport;
   uint32_t     ipaddr;
   const char * daemon,

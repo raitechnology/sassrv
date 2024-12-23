@@ -85,10 +85,10 @@ static char * hms( time_t t,  char *buf ) noexcept {
 }
 
 static const char *host_state_str[] = {
-  "unknown", "start", "status", "query", "stop"
+  "unknown", "cid", "start", "status", "query", "stop"
 };
 static const char *session_state_str[] = {
-  "unknown", "rv5", "query", "stop", "rv7", "self"
+  "unknown", "cid", "rv5", "query", "stop", "rv7", "self"
 };
 #if __cplusplus >= 201103L
 static_assert( MAX_HOST_STATE == ( sizeof( host_state_str ) / sizeof( host_state_str[ 0 ] ) ), "host_state_str" );
@@ -111,12 +111,28 @@ static inline uint32_t string_to_host_id( const char *str ) {
     id |= hexval( str[ i ] ) << ( --j * 4 );
   return id;
 }
-static inline char * host_id_to_string( uint32_t host_id,  char *str ) {
+static inline uint16_t string_to_cid( const char *str ) {
+  uint16_t id = 0;
+  for ( int i = 0, j = 4; i < 4; i++ )
+    id |= hexval( str[ i ] ) << ( --j * 4 );
+  return id;
+}
+static inline char * host_id_to_string( uint32_t host_id,  uint16_t cid,
+                                        char *str ) {
   for ( int i = 8; i > 0; ) {
     str[ --i ] = hexchar2( host_id & 0xf );
     host_id >>= 4;
   }
   str[ 8 ] = '\0';
+  if ( cid != 0 ) {
+    str[ 8 ] = '.';
+    str[ 9 ] = 'U';
+    for ( int i = 4; i > 0; ) {
+      str[ 10 + --i ] = hexchar2( cid & 0xf );
+      cid >>= 4;
+    }
+    str[ 14 ] = '\0';
+  }
   return str;
 }
 
@@ -240,13 +256,12 @@ RvSubscriptionDB::start_subscriptions( bool all ) noexcept
   this->next_gc           = this->cur_mono + 131;
   this->do_subscriptions( true );
 
-  RvHostEntry &host = this->host_ref( ntohl( this->client.ipaddr ), true );
+  RvHostEntry &host = this->host_ref( ntohl( this->client.ipaddr ),
+                                      this->client.cid, true );
   host.state = RvHostEntry::RV_HOST_QUERY;
 
-  RvSessionEntry &session =
-    this->session_start( host.host_id, this->client.session,
-                         this->client.session_len );
-  session.state = RvSessionEntry::RV_SESSION_SELF;
+  this->session_start( host.host_id, this->client.cid, this->client.session,
+                       this->client.session_len, true );
 }
 
 void
@@ -302,17 +317,22 @@ RvSubscriptionDB::do_wild_subscription( Filter &f,  bool is_subscribe,
     this->client.unsubscribe( sub.start, sub.len() );
 }
 
+static inline uint32_t hash_host_id( uint32_t host_id,  uint16_t cid ) {
+  return ( cid == 0 ? host_id : ( host_id ^ kv_hash_uint( cid ) ) );
+}
+
 RvHostEntry &
-RvSubscriptionDB::host_ref( uint32_t host_id,  bool is_status ) noexcept
+RvSubscriptionDB::host_ref( uint32_t host_id,  uint16_t cid,
+                            bool is_status ) noexcept
 {
-  uint32_t i;
+  uint32_t i, h = hash_host_id( host_id, cid );
   size_t   pos;
   if ( this->mout != NULL )
-    this->mout->printf( "> host %s %08X %s\n",
-       is_status ? "status" : "ref", host_id,
-       this->host_ht->find( host_id, pos, i ) ? "exists" : "new" );
+    this->mout->printf( "> host %s %08X %u %s\n",
+       is_status ? "status" : "ref", host_id, cid,
+       this->host_ht->find( h, pos, i ) ? "exists" : "new" );
 
-  if ( ! this->host_ht->find( host_id, pos, i ) ) {
+  if ( ! this->host_ht->find( h, pos, i ) ) {
     for (;;) {
       if ( this->first_free_host == this->host_tab.count ||
            this->host_tab.ptr[
@@ -321,13 +341,18 @@ RvSubscriptionDB::host_ref( uint32_t host_id,  bool is_status ) noexcept
     }
     i = this->first_free_host++;
     this->hosts.active++;
-    this->host_ht->set_rsz( this->host_ht, host_id, pos, i );
+    this->host_ht->set_rsz( this->host_ht, h, pos, i );
     RvHostEntry & host = ( i < this->host_tab.count ? this->host_tab.ptr[ i ] :
                            this->host_tab.push() );
-    host.start( host_id, this->cur_mono, false, is_status );
+    host.start( host_id, cid, this->cur_mono, false, is_status );
     if ( this->mout != NULL ) {
       if ( host.state == RvHostEntry::RV_HOST_QUERY )
-        this->mout->printf( "! host %08X query, no start\n", host_id );
+        this->mout->printf( "! host %08X %u query, no start\n", host_id, cid );
+      else if ( host.state == RvHostEntry::RV_HOST_CID ) {
+        this->mout->printf( "! host %08X %u, cannot recover subs\n",
+                            host_id, cid );
+        printf( "SDB: host %08X %u, cannot recover subs\n", host_id, cid );
+      }
     }
     return host;
   }
@@ -336,39 +361,46 @@ RvSubscriptionDB::host_ref( uint32_t host_id,  bool is_status ) noexcept
 
   if ( host.state == RvHostEntry::RV_HOST_STOP ) {
     this->hosts.active++;
-    host.start( host_id, this->cur_mono, false, is_status );
+    host.start( host_id, cid, this->cur_mono, false, is_status );
   }
   else if ( is_status )
     host.status( this->cur_mono );
   else
     host.ref( this->cur_mono );
   if ( this->mout != NULL ) {
-    if ( old_state != host.state && host.state == RvHostEntry::RV_HOST_QUERY )
-      this->mout->printf( "! host %08X query, no start\n", host_id );
+    if ( old_state != host.state ) {
+      if ( host.state == RvHostEntry::RV_HOST_QUERY )
+        this->mout->printf( "! host %08X %u query, no start\n", host_id, cid );
+      else if ( host.state == RvHostEntry::RV_HOST_CID ) {
+        this->mout->printf( "! host %08X %u, cannot recover subs\n",
+                            host_id, cid );
+        printf( "SDB: host %08X %u, cannot recover subs\n", host_id, cid );
+      }
+    }
   }
   return host;
 }
 
 void
-RvSubscriptionDB::host_start( uint32_t host_id ) noexcept
+RvSubscriptionDB::host_start( uint32_t host_id,  uint16_t cid ) noexcept
 {
-  uint32_t i;
+  uint32_t i, h = hash_host_id( host_id, cid );
   size_t   pos;
   if ( this->mout != NULL )
-    this->mout->printf( "> host start %08X %s\n", host_id,
-       this->host_ht->find( host_id, pos, i ) ? "exists" : "new" );
+    this->mout->printf( "> host start %08X %u %s\n", host_id, cid,
+       this->host_ht->find( h, pos, i ) ? "exists" : "new" );
 
-  if ( ! this->host_ht->find( host_id, pos, i ) ) {
+  if ( ! this->host_ht->find( h, pos, i ) ) {
     i = this->host_tab.count;
-    this->host_ht->set_rsz( this->host_ht, host_id, pos, i );
+    this->host_ht->set_rsz( this->host_ht, h, pos, i );
     RvHostEntry & host = this->host_tab.push();
-    host.start( host_id, this->cur_mono, true, false );
+    host.start( host_id, cid, this->cur_mono, true, false );
   }
   else {
     RvHostEntry          & host      = this->host_tab.ptr[ i ];
     RvHostEntry::HostState old_state = host.state;
 
-    host.start( host_id, this->cur_mono, true, false );
+    host.start( host_id, cid, this->cur_mono, true, false );
     if ( old_state != RvHostEntry::RV_HOST_STOP ) {
       host.state = RvHostEntry::RV_HOST_QUERY;
       if ( this->mout != NULL )
@@ -378,13 +410,13 @@ RvSubscriptionDB::host_start( uint32_t host_id ) noexcept
 }
 
 void
-RvSubscriptionDB::host_stop( uint32_t host_id ) noexcept
+RvSubscriptionDB::host_stop( uint32_t host_id,  uint16_t cid ) noexcept
 {
-  uint32_t i;
+  uint32_t i, h = hash_host_id( host_id, cid );
   size_t   pos;
   if ( this->mout != NULL )
-    this->mout->printf( "> host stop %08X\n", host_id );
-  if ( this->host_ht->find( host_id, pos, i ) ) {
+    this->mout->printf( "> host stop %08X %u\n", host_id, cid );
+  if ( this->host_ht->find( h, pos, i ) ) {
     RvHostEntry &host = this->host_tab.ptr[ i ];
     this->unsub_host( host );
   }
@@ -394,7 +426,7 @@ void
 RvSubscriptionDB::unsub_host( RvHostEntry &host ) noexcept
 {
   if ( this->mout != NULL )
-    this->mout->printf( "> unsub host %08X\n", host.host_id );
+    this->mout->printf( "> unsub host %08X %u\n", host.host_id, host.cid );
   size_t pos;
   for ( RvSessionEntry * entry = this->first_session( host, pos );
         entry != NULL; entry = this->next_session( host, pos ) ) {
@@ -451,14 +483,36 @@ RvSubscriptionDB::unsub_session( RvSessionEntry &sess ) noexcept
   sess.stop( this->cur_mono );
 }
 
-RvSessionEntry &
-RvSubscriptionDB::session_start( uint32_t host_id,  const char *session_name,
-                                 size_t session_len ) noexcept
+RvHostEntry *
+RvSubscriptionDB::host_exists( uint32_t host_id,  uint16_t cid ) noexcept
+{
+  uint32_t i, h = hash_host_id( host_id, cid );
+  size_t   pos;
+  if ( ! this->host_ht->find( h, pos, i ) )
+    return NULL;
+  RvHostEntry & host = this->host_tab.ptr[ i ];
+  if ( host.state < RvHostEntry::RV_HOST_START ||
+       host.state >= RvHostEntry::RV_HOST_STOP )
+    return NULL;
+  return &host;
+}
+
+void
+RvSubscriptionDB::session_start( uint32_t host_id,  uint16_t cid,
+                                 const char *session_name,
+                                 size_t session_len,
+                                 bool is_self ) noexcept
 {
   if ( this->mout != NULL )
-    this->mout->printf( "> session start %08X %.*s\n", host_id,
+    this->mout->printf( "> session start %08X %u %.*s\n", host_id, cid,
                         (int) session_len, session_name );
-  RvHostEntry    & host = this->host_ref( host_id, false );
+
+  RvHostEntry * host = this->host_exists( host_id, cid );
+  if ( host == NULL ) {
+    if ( this->mout != NULL )
+      this->mout->printf( "> session host %08X %u not found\n", host_id, cid );
+    return;
+  }
   uint32_t         hash = kv_crc_c( session_name, session_len, 0 );
   RouteLoc         loc;
   RvSessionEntry * entry;
@@ -468,44 +522,60 @@ RvSubscriptionDB::session_start( uint32_t host_id,  const char *session_name,
   if ( ! loc.is_new ) {
     if ( entry->state != RvSessionEntry::RV_SESSION_STOP ) {
       old_state = entry->state;
-      this->rem_session( host, *entry ); /* no stop session */
+      this->rem_session( *host, *entry ); /* no stop session */
     }
   }
-  entry->start( host_id, this->next_session_id(), this->cur_mono, true );
+  entry->start( host_id, cid, this->next_session_id(), this->cur_mono, true );
   if ( old_state != RvSessionEntry::RV_SESSION_STOP ) {
-    entry->state = RvSessionEntry::RV_SESSION_QUERY;
-    if ( this->mout != NULL )
-      this->mout->printf( "! query %08X %.*s, start with no sesion stop\n",
-                          host_id, entry->len, entry->value );
+    if ( entry->state != RvSessionEntry::RV_SESSION_CID ) {
+      entry->state = RvSessionEntry::RV_SESSION_QUERY;
+      if ( this->mout != NULL )
+        this->mout->printf( "! query %08X %.*s, start with no session stop\n",
+                            host_id, entry->len, entry->value );
+    }
   }
-  this->add_session( host, *entry );
-  return *entry;
+  this->add_session( *host, *entry );
+  if ( is_self )
+    entry->state = RvSessionEntry::RV_SESSION_SELF;
 }
 
 void
-RvSubscriptionDB::session_stop( uint32_t host_id,  const char *session_name,
+RvSubscriptionDB::session_stop( uint32_t host_id,  uint16_t cid,
+                                const char *session_name,
                                 size_t session_len ) noexcept
 {
   if ( this->mout != NULL )
-    this->mout->printf( "> session stop %08X %.*s\n", host_id,
+    this->mout->printf( "> session stop %08X %u %.*s\n", host_id, cid,
                        (int) session_len, session_name );
-  RvHostEntry    & host = this->host_ref( host_id, false );
   uint32_t         hash = kv_crc_c( session_name, session_len, 0 );
   RouteLoc         loc;
   RvSessionEntry * entry;
 
   entry = this->session_tab.find( hash, session_name, session_len, loc );
-  if ( entry != NULL )
-    this->rem_session( host, *entry );
+  if ( entry != NULL ) {
+    RvHostEntry * host = this->host_exists( entry->host_id, entry->cid );
+    if ( host != NULL )
+      this->rem_session( *host, *entry );
+    else {
+      if ( this->mout != NULL )
+        this->mout->printf( "> session host %08X %u not found\n",
+                            entry->host_id, entry->cid );
+    }
+  }
 }
 
 RvSessionEntry &
-RvSubscriptionDB::session_ref( const char *session_name,
+RvSubscriptionDB::session_ref( uint16_t cid,  const char *session_name,
                                size_t session_len ) noexcept
 {
+  if ( cid == 0 && session_len > 14 ) {
+    const char * x = session_name;
+    if ( x[ 8 ] == '.' && x[ 9 ] == 'U' && x[ 14 ] == '.' )
+      cid = string_to_cid( &x[ 10 ] );
+  }
   if ( this->mout != NULL )
-    this->mout->printf( "> session ref %.*s\n",
-                       (int) session_len, session_name );
+    this->mout->printf( "> session ref %.*s cid %u\n",
+                       (int) session_len, session_name, cid );
   uint32_t         hash = kv_crc_c( session_name, session_len, 0 );
   RouteLoc         loc;
   RvSessionEntry * entry;
@@ -513,8 +583,8 @@ RvSubscriptionDB::session_ref( const char *session_name,
   entry = this->session_tab.upsert( hash, session_name, session_len, loc );
   if ( loc.is_new || entry->state == RvSessionEntry::RV_SESSION_STOP ) {
     uint32_t      host_id = string_to_host_id( session_name );
-    RvHostEntry & host    = this->host_ref( host_id, false );
-    entry->start( host_id, this->next_session_id(), this->cur_mono, false );
+    RvHostEntry & host = this->host_ref( host_id, cid, false );
+    entry->start( host_id, cid, this->next_session_id(), this->cur_mono, false);
     this->add_session( host, *entry );
   }
   entry->ref_mono = this->cur_mono;
@@ -616,7 +686,8 @@ RvSubscriptionDB::listen_stop( RvSessionEntry &session,  const char *sub,
     if ( this->mout != NULL )
       this->mout->printf( "! listen stop without start %.*s %.*s\n",
                         session.len, session.value, (int) sub_len, sub );
-    if ( session.state != RvSessionEntry::RV_SESSION_SELF )
+    if ( session.state != RvSessionEntry::RV_SESSION_SELF &&
+         session.state != RvSessionEntry::RV_SESSION_CID )
       session.state = RvSessionEntry::RV_SESSION_QUERY;
   }
   return *script;
@@ -719,7 +790,8 @@ RvSubscriptionDB::stop_marked_sessions( RvHostEntry &host ) noexcept
             break;
         }
         else {
-          if ( entry->state != RvSessionEntry::RV_SESSION_SELF ) {
+          if ( entry->state != RvSessionEntry::RV_SESSION_SELF &&
+               entry->state != RvSessionEntry::RV_SESSION_CID ) {
             entry->state = RvSessionEntry::RV_SESSION_QUERY;
             if ( this->mout != NULL ) {
               this->mout->printf( "! query %08X %.*s, marked\n", host.host_id,
@@ -849,7 +921,7 @@ RvSubscriptionDB::send_host_query( uint32_t i ) noexcept
 
   char   daemon_inbox[ MAX_RV_INBOX_LEN ],
          inbox[ MAX_RV_INBOX_LEN ],
-         host_id_buf[ 16 ];
+         host_id_buf[ 24 ];
   size_t inbox_len;
 
   inbox_len = this->client.make_inbox( inbox, i + this->host_inbox_base );
@@ -859,7 +931,7 @@ RvSubscriptionDB::send_host_query( uint32_t i ) noexcept
      .append_string( "what", "sessions" )
      .update_hdr();
 
-  host_id_to_string( host.host_id, host_id_buf );
+  host_id_to_string( host.host_id, host.cid, host_id_buf );
   CatPtr p( daemon_inbox );
   size_t daelen = p.s( "_INBOX." ).s( host_id_buf ).s( ".DAEMON" ).end();
   EvPublish pub( daemon_inbox, daelen, inbox, inbox_len,
@@ -870,9 +942,10 @@ RvSubscriptionDB::send_host_query( uint32_t i ) noexcept
   host.query_mono = this->cur_mono;
 
   if ( this->mout != NULL ) {
-    this->mout->printf( "> pub get session to %08X\n", host.host_id );
+    this->mout->printf( "> pub get session to %08X %u (%s) -> %s\n",
+                        host.host_id, host.cid, host_id_buf, daemon_inbox );
   }
-  printf( "SDB: host %08X, get session\n", host.host_id );
+  printf( "SDB: host %08X, get session -> %s\n", host.host_id, daemon_inbox );
 }
 
 void
@@ -891,7 +964,7 @@ RvSubscriptionDB::send_session_query( RvHostEntry &host,
   }
   char     daemon_inbox[ MAX_RV_INBOX_LEN ],
            inbox[ MAX_RV_INBOX_LEN ],
-           host_id_buf[ 16 ];
+           host_id_buf[ 24 ];
   size_t   inbox_len;
   uint32_t i = session.session_id;
 
@@ -908,7 +981,7 @@ RvSubscriptionDB::send_session_query( RvHostEntry &host,
        .append_string( SARG( "session" ), session.value, session.len )
        .update_hdr();
 
-    host_id_to_string( host.host_id, host_id_buf );
+    host_id_to_string( host.host_id, host.cid, host_id_buf );
     CatPtr p( daemon_inbox );
     size_t daelen = p.s( "_INBOX." ).s( host_id_buf ).s( ".DAEMON" ).end();
     EvPublish pub( daemon_inbox, daelen, inbox, inbox_len,
@@ -919,11 +992,12 @@ RvSubscriptionDB::send_session_query( RvHostEntry &host,
     session.query_mono = this->cur_mono;
 
     if ( this->mout != NULL ) {
-      this->mout->printf( "> pub get subscriptions to %08X %.*s\n", host.host_id,
-                           session.len, session.value );
+      this->mout->printf( "> pub get subscriptions to %08X %u (%s) %.*s -> %s\n",
+                          host.host_id, host.cid, host_id_buf,
+                          session.len, session.value, daemon_inbox );
     }
-    printf( "SDB: session %.*s, get subscriptions\n",
-            session.len, session.value );
+    printf( "SDB: session %.*s, get subscriptions -> %s\n",
+            session.len, session.value, daemon_inbox );
   }
 }
 
@@ -1055,14 +1129,17 @@ RvSubscriptionDB::process_pub2( EvPublish &pub,  const char *subject,
              slen  = 0;
     uint32_t idl   = 0,
              odl   = 0;
-    uint16_t flags = 0;
+    uint16_t flags = 0,
+             cid   = 0;
 
     switch ( match->kind ) {
       case IS_SESSION_START:
       case IS_SESSION_STOP :
       case IS_LISTEN_START :
       case IS_LISTEN_STOP  :
+      case IS_HOST_START   :
       case IS_HOST_STATUS  :
+      case IS_HOST_STOP    :
       case IS_SNAP         : {
         if ( m == NULL )
           break;
@@ -1072,19 +1149,26 @@ RvSubscriptionDB::process_pub2( EvPublish &pub,  const char *subject,
           if ( rd.find( "flags" ) ) 
             rd.get_uint( flags );
         }
-        else if ( match->kind == IS_HOST_STATUS ) {
+        else if ( match->kind == IS_HOST_STATUS ||
+                  match->kind == IS_HOST_START ||
+                  match->kind == IS_HOST_STOP ) {
           if ( rd.find( "idl" ) )
             rd.get_uint( idl );
           if ( rd.find( "odl" ) )
             rd.get_uint( odl );
+          if ( rd.find( "cid" ) )
+            rd.get_uint( cid );
         }
         /* get id: session-name, sub: subject */
         else {
           if ( rd.find( "id" ) )
             rd.get_string( x, xlen );
-          if ( match->kind >= IS_LISTEN_START && match->kind <= IS_LISTEN_STOP ) {
+          if ( match->kind == IS_LISTEN_START ||
+               match->kind == IS_LISTEN_STOP ) {
             if ( rd.find( "sub" ) )
               rd.get_string( s, slen );
+            if ( rd.find( "cid" ) )
+              rd.get_uint( cid );
           }
         }
         break;
@@ -1092,10 +1176,13 @@ RvSubscriptionDB::process_pub2( EvPublish &pub,  const char *subject,
       default:
         break;
     }
-
+    if ( cid == 0 && xlen > 14 ) {
+      if ( x[ 8 ] == '.' && x[ 9 ] == 'U' && x[ 14 ] == '.' )
+        cid = string_to_cid( &x[ 10 ] );
+    }
     switch ( match->kind ) {
       case IS_HOST_STATUS  : {
-        RvHostEntry &host = this->host_ref( id, true );
+        RvHostEntry &host = this->host_ref( id, cid, true );
         if ( host.data_loss != idl + odl ) {
           if ( this->mout != NULL ) {
             this->mout->printf( "! query host %08X dataloss %u -> %u\n",
@@ -1108,12 +1195,12 @@ RvSubscriptionDB::process_pub2( EvPublish &pub,  const char *subject,
         }
         break;
       }
-      case IS_HOST_START   : this->host_start( id ); break;
-      case IS_HOST_STOP    : this->host_stop( id ); break;
-      case IS_SESSION_START: this->session_start( id, x, xlen ); break;
-      case IS_SESSION_STOP : this->session_stop( id, x, xlen ); break;
+      case IS_HOST_START   : this->host_start( id, cid ); break;
+      case IS_HOST_STOP    : this->host_stop( id, cid ); break;
+      case IS_SESSION_START: this->session_start( id, cid, x, xlen, false ); break;
+      case IS_SESSION_STOP : this->session_stop( id, cid, x, xlen ); break;
       case IS_LISTEN_START : {
-        RvSessionEntry & session  = this->session_ref( x, xlen );
+        RvSessionEntry & session  = this->session_ref( cid, x, xlen );
         if ( session.state == RvSessionEntry::RV_SESSION_SELF )
           break;
         bool             is_added = false,
@@ -1128,7 +1215,7 @@ RvSubscriptionDB::process_pub2( EvPublish &pub,  const char *subject,
         break;
       }
       case IS_LISTEN_STOP: {
-        RvSessionEntry & session = this->session_ref( x, xlen );
+        RvSessionEntry & session = this->session_ref( cid, x, xlen );
         if ( session.state == RvSessionEntry::RV_SESSION_SELF )
           break;
         bool             is_orphan = false, coll = false;
@@ -1179,7 +1266,7 @@ RvSubscriptionDB::process_pub2( EvPublish &pub,  const char *subject,
             char * x    = NULL;
             size_t xlen = 0;
             if ( nm.fnamelen == 0 && rd.get_string( x, xlen ) )
-              this->session_ref( x, xlen );
+              this->session_ref( host.cid, x, xlen );
           }
           this->stop_marked_sessions( host );
           host.state = RvHostEntry::RV_HOST_STATUS;
@@ -1254,6 +1341,8 @@ RvSubscriptionDB::make_host_sync( RvMsgWriter &w,  uint32_t i ) noexcept
 
   w.append_msg( SARG( "host" ), host_sub );
   host_sub.append_uint( SARG( "id" ), host.host_id );
+  if ( host.cid != 0 )
+    host_sub.append_uint( SARG( "cid" ), host.cid );
   if ( host.data_loss != 0 )
     host_sub.append_uint( SARG( "data_loss" ), host.data_loss );
 
@@ -1294,19 +1383,22 @@ RvSubscriptionDB::update_sync( RvMsg &msg ) noexcept
     if ( nm.equals( SARG( "host" ) ) && rd.get_sub_msg( host_sub ) ) {
       MDFieldReader hrd( *host_sub );
       uint32_t host_id = 0;
+      uint16_t cid     = 0;
 
       for ( bool c = hrd.first( nm ); c; c = hrd.next( nm ) ) {
         if ( nm.equals( SARG( "id" ) ) )
           hrd.get_uint( host_id );
+        else if ( nm.equals( SARG( "cid" ) ) )
+          hrd.get_uint( cid );
 
         else if ( nm.equals( SARG( "sessions" ) ) && host_id != 0 &&
                   hrd.get_sub_msg( sess_sub ) ) {
-          this->host_ref( host_id, true );
+          this->host_ref( host_id, cid, true );
           MDFieldReader srd( *sess_sub );
 
           for ( bool d = srd.first( snm ); d; d = srd.next( snm ) ) {
             RvSessionEntry & session =
-              this->session_ref( snm.fname, snm.fnamelen - 1 );
+              this->session_ref( cid, snm.fname, snm.fnamelen - 1 );
             if ( session.state == RvSessionEntry::RV_SESSION_SELF )
               continue;
 
