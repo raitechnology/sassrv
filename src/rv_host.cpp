@@ -650,7 +650,7 @@ RvHost::check_network( const RvHostNet &hn ) noexcept
   int status = HOST_OK;
   if ( this->mcast.host_ip == 0 || ! this->is_same_network( hn ) ) {
     RvMcast mc;
-    status = mc.parse_network( hn.network, hn.network_len );
+    status = mc.parse_network( hn.network, hn.network_len, true );
     if ( status == HOST_OK )
       status = this->start_network( mc, hn );
     if ( status != HOST_OK )
@@ -1255,6 +1255,80 @@ found_address:;
 }
 
 uint32_t
+RvMcast::scan_dev_ip4( uint32_t &netmask ) noexcept
+{
+  uint32_t ipaddr = 0;
+  netmask = 0;
+
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
+  ifconf conf;
+  ifreq  ifbuf[ 256 ],
+       * ifp;
+  int    s  = ::socket( PF_INET, SOCK_DGRAM, IPPROTO_UDP );
+
+  ::memset( ifbuf, 0, sizeof( ifbuf ) );
+  ::memset( &conf, 0, sizeof( conf ) );
+
+  conf.ifc_len = sizeof( ifbuf );
+  conf.ifc_buf = (char *) ifbuf;
+
+  if ( ::ioctl( s, SIOCGIFCONF, &conf ) != -1 ) {
+    ifp = ifbuf;
+    /* for each interface */
+    for ( ; (uint8_t *) ifp < &((uint8_t *) ifbuf)[ conf.ifc_len ]; ifp++ ) {
+      uint32_t addr = ((struct sockaddr_in &) ifp->ifr_addr).sin_addr.s_addr;
+      if ( ::ioctl( s, SIOCGIFNETMASK, ifp ) < 0 )
+          continue;
+      uint32_t mask = ((struct sockaddr_in &) ifp->ifr_netmask).sin_addr.s_addr;
+
+      if ( addr != 0 ) {
+        if ( ipaddr == 0 || ntohl( netmask & ipaddr ) == ( 127 << 24 ) ) {
+          netmask = mask;
+          ipaddr  = addr;
+        }
+      }
+    }
+  }
+  ::close( s );
+#else
+  SOCKET s = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
+  DWORD  nbytes;
+  char   buf_out[ 64 * 1024 ];
+  char   buf_in[ 64 * 1024 ];
+
+  if ( ::WSAIoctl( s, SIO_GET_INTERFACE_LIST,
+                   buf_in, sizeof( buf_in ),
+                   buf_out, sizeof( buf_out ),
+                   &nbytes, NULL, NULL ) != SOCKET_ERROR ) {
+    LPINTERFACE_INFO info;
+
+    if ( nbytes != 0 ) {
+      for ( info = (INTERFACE_INFO *) buf_out;
+            info < (INTERFACE_INFO *) &buf_out[ nbytes ];
+            info++ ) {
+        if ( ( info->iiFlags & IFF_UP ) != 0 &&
+             /*( info->iiFlags & IFF_MULTICAST ) != 0 &&*/
+             ((struct sockaddr_in &) info->iiAddress).sin_family == AF_INET ) {
+          uint32_t mask, addr;
+          mask = ((struct sockaddr_in &) info->iiNetmask).sin_addr.s_addr;
+          addr = ((struct sockaddr_in &) info->iiAddress).sin_addr.s_addr;
+
+          if ( addr != 0 ) {
+            if ( ipaddr == 0 || ntohl( netmask & ipaddr ) == ( 127 << 24 ) ) {
+              netmask = mask;
+              ipaddr  = addr;
+            }
+          }
+        }
+      }
+    }
+  }
+  ::closesocket( s );
+#endif
+  return ipaddr;
+}
+
+uint32_t
 RvMcast::lookup_dev_ip4( const char *dev,  uint32_t &netmask ) noexcept
 {
   uint32_t ipaddr = 0;
@@ -1280,7 +1354,8 @@ RvMcast::lookup_dev_ip4( const char *dev,  uint32_t &netmask ) noexcept
 }
 
 RvHostError
-RvMcast::parse_network( const char *network,  size_t net_len ) noexcept
+RvMcast::parse_network( const char *network,  size_t net_len,
+                        bool verbose ) noexcept
 {
   char tmp_buf[ 4 * 1024 ],
        recv_host[ 16 ],
@@ -1335,30 +1410,45 @@ RvMcast::parse_network( const char *network,  size_t net_len ) noexcept
 
   /* lookup the hosts */
   this->send_ip = this->lookup_host_ip4( send_part );
-  if ( this->send_ip == 0 && ::strcmp( send_part, "0.0.0.0" ) != 0 )
+  if ( this->send_ip == 0 && ::strcmp( send_part, "0.0.0.0" ) != 0 ) {
+    if ( verbose )
+      fprintf( stderr, "rv send network \"%s\" not found\n", send_part );
     status = ERR_NETWORK_NOT_FOUND;
+  }
   for ( uint32_t i = 0; i < this->recv_cnt; i++ ) {
     this->recv_ip[ i ] = this->lookup_host_ip4( recv_part[ i ] );
-    if ( this->recv_ip[ i ] == 0 && ::strcmp( recv_part[ i ], "0.0.0.0" ) != 0 )
+    if ( this->recv_ip[ i ] == 0 && ::strcmp( recv_part[ i ], "0.0.0.0" ) != 0 ) {
+      if ( verbose )
+        fprintf( stderr, "rv recv network \"%s\" not found\n", recv_part[ i ] );
       status = ERR_NETWORK_NOT_FOUND;
+    }
   }
   if ( is_empty_string( net_part ) ) {
-    if ( ::gethostname( host, sizeof( host ) ) != 0 ) {
+    net_part = host;
+    if ( ::gethostname( host, sizeof( host ) ) == 0 ) {
+      this->host_ip = this->lookup_host_ip4( net_part, this->netmask );
+      if ( this->host_ip == 0 )
+        this->host_ip = this->scan_dev_ip4( this->netmask );
+    }
+    else {
       host[ 0 ] = '\0';
       status = ERR_GETHOSTNAME_FAILED;
-      int e = errno;
-      fprintf( stderr, "rv gethostname() failed, %d/%s\n", e, strerror( e ) );
+      if ( verbose ) {
+        int e = errno;
+        fprintf( stderr, "rv gethostname() failed, %d/%s\n", e, strerror( e ) );
+      }
     }
-    net_part = host;
   }
-  if ( ! is_empty_string( net_part ) ) {
+  else {
     this->host_ip = this->lookup_dev_ip4( net_part, this->netmask );
     if ( this->host_ip == 0 )
       this->host_ip = this->lookup_host_ip4( net_part, this->netmask );
-    if ( this->host_ip == 0 ) {
-      status = ERR_NO_INTERFACE_FOUND;
-      fprintf( stderr, "rv host \"%s\", route or ip address not found\n", net_part );
-    }
+  }
+  if ( status == 0 && this->host_ip == 0 ) {
+    status = ERR_NO_INTERFACE_FOUND;
+    if ( verbose )
+      fprintf( stderr, "rv host \"%s\", route or ip address not found\n",
+               net_part );
   }
   return status;
 }

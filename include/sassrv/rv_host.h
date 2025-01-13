@@ -155,8 +155,8 @@ struct RvMcast {
   }
   /* fill out above fields by parsing a rv network string:
    * "eth0;228.8.8.8,226.6.6.6;224.4.4.4", reeturn RvHostError if failed */
-  RvHostError parse_network( const char *network,  size_t net_len ) noexcept;
-
+  RvHostError parse_network( const char *network,  size_t net_len,
+                             bool verbose ) noexcept;
   static bool is_empty_string( const char *s ) noexcept;
   /* return ip4 addr */
   static uint32_t lookup_host_ip4( const char *host ) noexcept;
@@ -166,6 +166,7 @@ struct RvMcast {
   /* return ip4 addr, netmask by looking up device */
   static uint32_t lookup_dev_ip4( const char *dev,
                                   uint32_t &netmask ) noexcept;
+  static uint32_t scan_dev_ip4( uint32_t &netmask ) noexcept;
   static uint16_t ip4_string( uint32_t ip,  char *buf ) noexcept;
   static uint16_t ip4_hex_string( uint32_t ip,  char *buf ) noexcept;
   void print( void ) noexcept;

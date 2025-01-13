@@ -433,7 +433,7 @@ TrdpSvc::create( EvPoll &poll,  const char *network,
 
   RvMcast mcast;
   int status;
-  if ( (status = mcast.parse_network( network, ::strlen( network ) )) != 0 ) {
+  if ( (status = mcast.parse_network( network, ::strlen( network ), true )) != 0 ) {
     fprintf( stderr, "invalid network %s status %d\n", network, status );
     return NULL;
   }
