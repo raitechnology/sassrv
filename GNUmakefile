@@ -656,6 +656,7 @@ dist_bins: $(all_libs) $(all_dlls) $(bind)/rv_server$(exe) $(bind)/rv_client$(ex
 	chrpath -d $(libd)/libsassrv.$(dll)
 	chrpath -d $(libd)/librv5lib.$(dll)
 	chrpath -d $(libd)/librv7lib.$(dll)
+	chrpath -d $(libd)/librv7ftlib.$(dll)
 	chrpath -d $(bind)/rv_server$(exe)
 	chrpath -d $(bind)/rv_client$(exe)
 	chrpath -d $(bind)/rv_pub$(exe)
