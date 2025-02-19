@@ -17,6 +17,7 @@ struct EvRvListen;
 #define _SYSTEM     "SYSTEM"
 #define _INFO       "INFO"
 #define _ERROR      "ERROR"
+#define _WARN       "WARN"
 
 #define _RV_INFO_SYSTEM  "_RV.INFO.SYSTEM"
 #define _RV_ERROR_SYSTEM "_RV.ERROR.SYSTEM"

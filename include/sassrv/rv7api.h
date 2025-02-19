@@ -29,6 +29,8 @@ typedef tibrvId            tibrvDispatchable;
 typedef tibrvId            tibrvDispatcher;
 typedef tibrvId            tibrvContentDesc;
 typedef tibrv_u32          tibrvEventType;
+typedef tibrvId            tibrvftMember;
+typedef tibrvId            tibrvftMonitor;
 
 typedef enum {
   TIBRV_FALSE = 0,
@@ -70,10 +72,22 @@ typedef struct {
   tibrv_u8       type;
 } tibrvMsgField;
 
+typedef enum {
+  TIBRVFT_PREPARE_TO_ACTIVATE = 1,
+  TIBRVFT_ACTIVATE            = 2,
+  TIBRVFT_DEACTIVATE          = 3
+} tibrvftAction;
+
 typedef void (* tibrvEventCallback )( tibrvEvent , tibrvMsg , void * );
 typedef void (* tibrvEventVectorCallback )( tibrvMsg * , tibrv_u32 );
 typedef void (* tibrvEventOnComplete )( tibrvEvent , void * );
 typedef void (* tibrvQueueOnComplete )( tibrvQueue, void * );
+typedef void (* tibrvftMemberCallback )( tibrvftMember, const char *,
+                                         tibrvftAction, void * );
+typedef void (* tibrvftMemberOnComplete )( tibrvftMember, void * );
+typedef void (* tibrvftMonitorCallback )( tibrvftMonitor, const char *,
+                                          tibrv_u32, void * );
+typedef void (* tibrvftMonitorOnComplete )( tibrvftMonitor, void * );
 
 #define TIBRV_TIMER_EVENT       1
 #define TIBRV_IO_EVENT          2
@@ -194,16 +208,16 @@ tibrv_status tibrv_SetRVParameters( tibrv_u32 argc, const char **argv );
 tibrv_status tibrv_OpenEx( const char  *pathname );
 tibrv_bool tibrv_IsIPM( void );
 
-tibrv_status tibrvEvent_CreateListener( tibrvEvent * event,  tibrvQueue queue,  tibrvEventCallback cb,
+tibrv_status tibrvEvent_CreateListener( tibrvEvent * event,  tibrvQueue q,  tibrvEventCallback cb,
                                         tibrvTransport tport,  const char * subj,  const void * closure );
-tibrv_status tibrvEvent_CreateVectorListener( tibrvEvent * event,  tibrvQueue queue, tibrvEventVectorCallback cb,
+tibrv_status tibrvEvent_CreateVectorListener( tibrvEvent * event,  tibrvQueue q, tibrvEventVectorCallback cb,
                                               tibrvTransport tport, const char * subj, const void * closure );
-tibrv_status tibrvEvent_CreateTimer( tibrvEvent * event,  tibrvQueue queue,  tibrvEventCallback cb,
+tibrv_status tibrvEvent_CreateTimer( tibrvEvent * event,  tibrvQueue q,  tibrvEventCallback cb,
                                      tibrv_f64 ival,  const void * closure );
 #define tibrvEvent_Destroy( event ) tibrvEvent_DestroyEx( event, NULL )
 tibrv_status tibrvEvent_DestroyEx( tibrvEvent event,  tibrvEventOnComplete cb );
 tibrv_status tibrvEvent_GetType( tibrvEvent event,  tibrvEventType * type );
-tibrv_status tibrvEvent_GetQueue( tibrvEvent event,  tibrvQueue * queue );
+tibrv_status tibrvEvent_GetQueue( tibrvEvent event,  tibrvQueue * q );
 tibrv_status tibrvEvent_GetListenerSubject( tibrvEvent event,  const char ** subject );
 tibrv_status tibrvEvent_GetListenerTransport( tibrvEvent event,  tibrvTransport * tport );
 tibrv_status tibrvEvent_GetTimerInterval( tibrvEvent event,  tibrv_f64 * ival );
@@ -296,6 +310,7 @@ tibrv_status tibrvMsg_GetClosure( tibrvMsg msg,  void ** closure );
 tibrv_status tibrvMsg_GetNumFields( tibrvMsg msg,  tibrv_u32 * num_flds );
 tibrv_status tibrvMsg_GetByteSize( tibrvMsg msg,  tibrv_u32 * size );
 tibrv_status tibrvMsg_ConvertToString( tibrvMsg msg,  const char ** str );
+tibrv_status tibrvMsg_Print( tibrvMsg msg );
 tibrv_status tibrvMsg_AddField( tibrvMsg msg,  tibrvMsgField * field );
 tibrv_status tibrvMsg_GetFieldInstance( tibrvMsg msg,  const char * name,  tibrvMsgField * field,  tibrv_u32 inst );
 tibrv_status tibrvMsg_GetFieldByIndex( tibrvMsg msg,  tibrvMsgField * field,  tibrv_u32 idx );
@@ -501,6 +516,24 @@ tibrv_status tibrvMsg_UpdateXmlEx( tibrvMsg msg, const char * name, const void *
 #define tibrvMsg_UpdateF64Array( msg, name, array, num ) tibrvMsg_UpdateF64ArrayEx( msg, name, array, num, 0 )
 #define tibrvMsg_UpdateStringArray( msg, name, array, num ) tibrvMsg_UpdateStringArrayEx( msg, name, array, num, 0 )
 #define tibrvMsg_UpdateMsgArray( msg, name, array, num ) tibrvMsg_UpdateMsgArrayEx( msg, name, array, num, 0 )
+
+#define TIBRVFT_ADV_SOURCE "RVFT"
+
+const char *tibrvft_Version( void );
+tibrv_status tibrvftMember_Create( tibrvftMember * memb, tibrvQueue q, tibrvftMemberCallback cb, tibrvTransport tport, const char * name, tibrv_u16 weight, tibrv_u16 active_goal, tibrv_f64 hb_ival, tibrv_f64 prepare_ival, tibrv_f64 activate_ival, const void * closure );
+tibrv_status tibrvftMember_Destroy( tibrvftMember memb );
+tibrv_status tibrvftMember_DestroyEx( tibrvftMember memb, tibrvftMemberOnComplete cb );
+tibrv_status tibrvftMember_GetQueue( tibrvftMember memb, tibrvQueue * q );
+tibrv_status tibrvftMember_GetTransport( tibrvftMember memb, tibrvTransport * tport );
+tibrv_status tibrvftMember_GetGroupName( tibrvftMember memb, const char ** name );
+tibrv_status tibrvftMember_GetWeight( tibrvftMember memb, tibrv_u16 * weight );
+tibrv_status tibrvftMember_SetWeight( tibrvftMember memb, tibrv_u16 weight );
+tibrv_status tibrvftMonitor_Create( tibrvftMonitor * mon, tibrvQueue q, tibrvftMonitorCallback cb, tibrvTransport tport, const char * name, tibrv_f64 lost_ival, const void * closure );
+tibrv_status tibrvftMonitor_Destroy( tibrvftMonitor mon );
+tibrv_status tibrvftMonitor_DestroyEx( tibrvftMonitor mon, tibrvftMonitorOnComplete cb );
+tibrv_status tibrvftMonitor_GetQueue( tibrvftMonitor mon, tibrvQueue * q );
+tibrv_status tibrvftMonitor_GetTransport( tibrvftMonitor  mon, tibrvTransport * tport );
+tibrv_status tibrvftMonitor_GetGroupName( tibrvftMonitor mon, const char ** name );
 
 #ifdef __cplusplus
 }

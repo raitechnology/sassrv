@@ -339,7 +339,7 @@ all_dlls    += $(libd)/librv5lib.$(dll)
 all_depends += $(librv5lib_deps)
 
 rv7_api_defines := -DSASSRV_VER=$(ver_build)
-librv7lib_files := rv7_api
+librv7lib_files := rv7_api rv7_msg
 librv7lib_cfile := $(addprefix src/, $(addsuffix .cpp, $(librv7lib_files)))
 librv7lib_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(librv7lib_files)))
 librv7lib_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(librv7lib_files)))
@@ -355,6 +355,24 @@ $(libd)/librv7lib.$(dll): $(librv7lib_dbjs) $(rv_dlnk_dep) $(dlnk_dep)
 all_libs    += $(libd)/librv7lib.a
 all_dlls    += $(libd)/librv7lib.$(dll)
 all_depends += $(librv7lib_deps)
+
+rv7_ft_defines := -DSASSRV_VER=$(ver_build)
+librv7ftlib_files := rv7_ft
+librv7ftlib_cfile := $(addprefix src/, $(addsuffix .cpp, $(librv7ftlib_files)))
+librv7ftlib_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(librv7ftlib_files)))
+librv7ftlib_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(librv7ftlib_files)))
+librv7ftlib_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(librv7ftlib_files))) \
+                  $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(librv7ftlib_files)))
+librv7ftlib_dlnk  := $(rv_dlnk_lib) $(dlnk_lib)
+librv7ftlib_spec  := $(version)-$(build_num)_$(git_hash)
+librv7ftlib_ver   := $(major_num).$(minor_num)
+
+$(libd)/librv7ftlib.a: $(librv7ftlib_objs)
+$(libd)/librv7ftlib.$(dll): $(librv7ftlib_dbjs) $(rv_dlnk_dep) $(dlnk_dep)
+
+all_libs    += $(libd)/librv7ftlib.a
+all_dlls    += $(libd)/librv7ftlib.$(dll)
+all_depends += $(librv7ftlib_deps)
 
 rv5_api_test_includes = -Iinclude/sassrv
 rv5_api_test_files := rv5_api_test
@@ -471,13 +489,37 @@ all_depends += $(rv5_cpp_test_deps)
 # priority_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
 #
 # $(bind)/priority$(exe): $(priority_objs) $(priority_libs) $(lnk_dep)
+#
+#tibrvfttime_files := tibrvfttime
+#tibrvfttime_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvfttime_files)))
+#tibrvfttime_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(tibrvfttime_files)))
+#tibrvfttime_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(tibrvfttime_files)))
+#tibrvfttime_libs  := $(sassrv_lib) $(libd)/librv7ftlib.$(dll) $(libd)/librv7lib.$(dll)
+#tibrvfttime_lnk   := $(rv_dlnk_lib) -lrv7ftlib -lrv7lib $(dlnk_lib)
+#
+#$(bind)/tibrvfttime$(exe): $(tibrvfttime_objs) $(tibrvfttime_libs) $(lnk_dep)
+#
+#all_exes    += $(bind)/tibrvfttime$(exe)
+#all_depends += $(tibrvfttime_deps)
+#
+#tibrvftmon_files := tibrvftmon
+#tibrvftmon_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvftmon_files)))
+#tibrvftmon_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(tibrvftmon_files)))
+#tibrvftmon_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(tibrvftmon_files)))
+#tibrvftmon_libs  := $(sassrv_lib) $(libd)/librv7ftlib.$(dll) $(libd)/librv7lib.$(dll)
+#tibrvftmon_lnk   := $(rv_dlnk_lib) -lrv7ftlib -lrv7lib $(dlnk_lib)
+#
+#$(bind)/tibrvftmon$(exe): $(tibrvftmon_objs) $(tibrvftmon_libs) $(lnk_dep)
+#
+#all_exes    += $(bind)/tibrvftmon$(exe)
+#all_depends += $(tibrvftmon_deps)
 
 rv7_test_files := rv7_test
 rv7_test_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv7_test_files)))
 rv7_test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv7_test_files)))
 rv7_test_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(rv7_test_files)))
-rv7_test_libs  := $(sassrv_lib) $(libd)/librv7lib.a
-rv7_test_lnk   := $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+rv7_test_libs  := $(sassrv_lib) $(libd)/librv7ftlib.a $(libd)/librv7lib.a
+rv7_test_lnk   := $(libd)/librv7ftlib.a $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
 
 $(bind)/rv7_test$(exe): $(rv7_test_objs) $(rv7_test_libs) $(lnk_dep)
 

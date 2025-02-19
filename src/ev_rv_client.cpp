@@ -545,8 +545,9 @@ EvRvClient::recv_info( void ) noexcept
       ptr += RvHost::time_to_str( this->start_stamp, ptr );
       this->session_len = (uint16_t) ( ptr - this->session );
       this->control_len = this->make_inbox( this->control, 1 );
-      printf( "session: %.*s control: %.*s\n", this->session_len, this->session,
-              this->control_len, this->control );
+      if ( rv_client_pub_verbose || rv_debug )
+        printf( "session: %.*s control: %.*s\n", this->session_len,
+                this->session, this->control_len, this->control );
       this->send_init_rec(); /* resend with session */
       this->rv_state = CONN_RECV;
       return 0;

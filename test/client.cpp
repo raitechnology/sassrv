@@ -811,7 +811,8 @@ main( int argc, const char *argv[] )
   }
 
   if ( log != NULL ) {
-    out.open( log, "a" );
+    if ( ::strcmp( log, "-" ) != 0 )
+      out.open( log, "a" );
     out.add_timestamp = true;
   }
 
