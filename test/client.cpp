@@ -27,7 +27,13 @@ static const uint32_t DICT_TIMER_SECS = 3,
 static const uint64_t FIRST_TIMER_ID  = 1, /* first dict request */
                       SECOND_TIMER_ID = 2, /* second dict request */
                       RATE_TIMER_ID   = 3, /* rate timer */
-                      STOP_TIMER_ID   = 4; /* stop timer */
+                      STOP_TIMER_ID   = 4, /* stop timer */
+                      SUB_TIMER_ID    = 5;
+enum {
+  SUBSCRIBE_UPDATE = 0,
+  SNAPSHOT_ONCE    = 1,
+  SNAPSHOT_FOREVER = 2
+};
 
 struct LogOutput : public MDOutput {
   char     ts_buf[ 64 ];
@@ -93,7 +99,8 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   MDDict      * dict;            /* dictinary to use for decoding msgs */
   const char ** sub;             /* subject strings */
   size_t        sub_count,       /* count of sub[] */
-                num_subs;
+                num_subs,
+                sub_total;
   uint64_t      msg_count,
                 last_count,
                 last_time,
@@ -101,6 +108,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
                 last_bytes;
   bool          no_dictionary,   /* don't request dictionary */
                 is_subscribed,   /* sub[] are subscribed */
+                is_unsubscribed,
                 have_dictionary, /* set when dict request succeeded */
                 dump_hex,        /* print hex of message data */
                 show_rate,       /* show rate of messages recvd */
@@ -120,6 +128,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
                 quiet,
                 track_time,
                 wild_subscribe;
+  uint8_t       kind;
   uint64_t      seed1, seed2;
   ArrayCount<double,64>   next_pub;
   ArrayCount<uint64_t,64> last_seqno;
@@ -135,25 +144,28 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
                 miss_seqno;
   uint64_t      hist[ histogram_size + 1 ],
                 hist_count;
-  double        start_time;
+  double        start_time,
+                sub_rate;
+  uint64_t      loop_count;
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t cnt,
                   bool nodict,  bool hex,  bool rate,  size_t n,  size_t rng,
-                  bool zipf,  uint32_t secs,  bool q,  bool ts,
+                  bool zipf,  uint32_t secs,  bool q,  bool ts,  uint8_t snp,
                   uint64_t s1, uint64_t s2 )
     : poll( p ), client( c ), dict( 0 ), sub( s ), sub_count( cnt ),
-      num_subs( n ), msg_count( 0 ), last_count( 0 ), last_time( 0 ),
-      msg_bytes( 0 ), last_bytes( 0 ), no_dictionary( nodict ),
-      is_subscribed( false ), have_dictionary( false ), dump_hex( hex ),
+      num_subs( n ), sub_total( cnt * n ), msg_count( 0 ), last_count( 0 ),
+      last_time( 0 ), msg_bytes( 0 ), last_bytes( 0 ), no_dictionary( nodict ),
+      is_subscribed( false ), is_unsubscribed( false ),
+      have_dictionary( false ), dump_hex( hex ),
       show_rate( rate ), ignore_not_found( true ), subj_buf( 0 ),
       rand_schedule( 0 ), msg_recv( 0 ), msg_recv_bytes( 0 ), rand_range( rng ),
       max_time_secs( secs ), sub_initial_count( 0 ), sub_update_count( 0 ),
       use_random( rng > n ), use_zipf( zipf ),
-      quiet( q ), track_time( ts ), wild_subscribe( false ),
+      quiet( q ), track_time( ts ), wild_subscribe( false ), kind( snp ),
       total_latency( 0 ), miss_latency( 0 ), trail_latency( 0 ),
       total_count( 0 ), miss_count( 0 ), repeat_count( 0 ), trail_count( 0 ),
       initial_count( 0 ), update_count( 0 ), miss_seqno( 0 ), hist_count( 0 ),
-      start_time( 0 ) {
+      start_time( 0 ), sub_rate( 0 ), loop_count( 0 ) {
     ::memset( this->msg_type_cnt, 0, sizeof( this->msg_type_cnt ) );
     ::memset( this->hist, 0, sizeof( this->hist ) );
     this->seed1 = ( s1 == 0 ? current_monotonic_time_ns() : s1 );
@@ -174,8 +186,9 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   virtual void on_connect( EvSocket &conn ) noexcept;
   /* start sub[] with inbox reply */
   void make_random( void ) noexcept;
-  void make_subject( size_t n,  const char *&s,  size_t &slen ) noexcept;
-  void start_subscriptions( void ) noexcept;
+  void make_subject( size_t n,  const char *&s,  size_t &slen,
+                     bool is_snap ) noexcept;
+  bool start_subscriptions( void ) noexcept;
   /* when signalled, unsubscribe */
   void on_unsubscribe( void ) noexcept;
   /* when disconnected */
@@ -243,7 +256,8 @@ RvDataCallback::make_random( void ) noexcept
 }
 
 void
-RvDataCallback::make_subject( size_t n,  const char *&s, size_t &slen ) noexcept
+RvDataCallback::make_subject( size_t n,  const char *&s, size_t &slen,
+                              bool is_snap ) noexcept
 {
   if ( this->use_random ) {
     if ( this->rand_schedule == NULL )
@@ -257,12 +271,14 @@ RvDataCallback::make_subject( size_t n,  const char *&s, size_t &slen ) noexcept
 
   const char * p = ::strstr( s, "%d" );
   if ( this->num_subs > 1 || p != NULL ) {
-    if ( this->subj_buf == NULL || slen + 12 > 1024 ) {
-      size_t len = ( slen + 12 < 1024 ? 1024 : slen + 12 );
+    if ( this->subj_buf == NULL || slen + 24 > 1024 ) {
+      size_t len = ( slen + 24 < 1024 ? 1024 : slen + 24 );
       this->subj_buf = (char *) ::realloc( this->subj_buf, len );
     }
     CatPtr cat( this->subj_buf );
     const char * e = &s[ slen ];
+    if ( is_snap )
+      cat.s( "_SNAP." );
     if ( p == NULL ) {
       cat.x( s, e - s ).s( "." ).u( n );
     }
@@ -278,54 +294,86 @@ RvDataCallback::make_subject( size_t n,  const char *&s, size_t &slen ) noexcept
 }
 
 /* start subscriptions from command line, inbox number indexes the sub[] */
-void
+bool
 RvDataCallback::start_subscriptions( void ) noexcept
 {
-  if ( this->is_subscribed ) /* subscribing multiple times is allowed, */
-    return;                  /* but must unsub multiple times as well */
+  size_t end_count = 0;
+  bool   started   = ( this->start_time == 0 );
 
-  this->start_time = current_realtime_s();
-  size_t n   = this->sub_count * this->num_subs;
-  size_t sz  = sizeof( this->msg_recv[ 0 ] ) * n,
-         sz2 = sizeof( this->msg_recv_bytes[ 0 ] ) * n;
-  this->msg_recv = (uint32_t *) ::malloc( sz );
-  this->msg_recv_bytes = (size_t *) ::malloc( sz2 );
-  ::memset( this->msg_recv, 0, sz );
-  ::memset( this->msg_recv_bytes, 0, sz2 );
-
-  for ( n = 0; ; ) {
-    for ( size_t j = 0; j < this->sub_count; j++, n++ ) {
-      char         inbox[ MAX_RV_INBOX_LEN ]; /* _INBOX.<session>.3 + <sub> */
-      uint16_t     inbox_len;
-      const char * subject;
-      size_t       subject_len;
-
-      inbox_len = this->client.make_inbox( inbox, n + SUB_INBOX_BASE );
-      this->make_subject( n, subject, subject_len );
-
-      if ( ! this->quiet ) {
-        out.ts().printf( "Subscribe \"%.*s\", reply \"%.*s\"\n",
-                         (int) subject_len, subject, (int) inbox_len, inbox );
-      }
-      else {
-        if ( n == 0 )
-          out.ts().printf( "Subscribe \"%.*s\"", (int) subject_len, subject );
-        else
-          out.printf( ", \"%.*s\"", (int) subject_len, subject );
-      }
-      /* subscribe with inbox reply */
-      this->client.subscribe( subject, subject_len, inbox, inbox_len );
-      this->wild_subscribe |=
-        ( is_rv_wildcard( subject, subject_len ) != NULL );
-      this->subj_ht.upsert( subject, subject_len, n );
-    }
-    if ( n >= this->num_subs * this->sub_count )
-      break;
+  if ( this->is_subscribed ) {
+    if ( this->sub_rate == 0 ||
+         ( this->loop_count == this->sub_total &&
+           this->kind != SNAPSHOT_FOREVER ) )
+      return false;
   }
-  if ( this->quiet )
+
+  if ( started ) {
+    this->start_time = current_realtime_s();
+    size_t sz  = sizeof( this->msg_recv[ 0 ] ) * this->sub_total,
+           sz2 = sizeof( this->msg_recv_bytes[ 0 ] ) * this->sub_total;
+    this->msg_recv = (uint32_t *) ::malloc( sz );
+    this->msg_recv_bytes = (size_t *) ::malloc( sz2 );
+    ::memset( this->msg_recv, 0, sz );
+    ::memset( this->msg_recv_bytes, 0, sz2 );
+  }
+  if ( this->sub_rate != 0 ) {
+    end_count = (size_t)
+      ( ( current_realtime_s() - this->start_time ) * this->sub_rate );
+    if ( end_count > this->sub_total && this->kind != SNAPSHOT_FOREVER )
+      end_count = this->sub_total;
+  }
+  else {
+    end_count = this->sub_total;
+  }
+  bool first = true;
+  for ( ; this->loop_count < end_count; this->loop_count++ ) {
+    char         inbox[ MAX_RV_INBOX_LEN ]; /* _INBOX.<session>.3 + <sub> */
+    uint16_t     inbox_len;
+    const char * subject, * what;
+    size_t       subject_len,
+                 sub_idx = this->loop_count % this->sub_total;
+
+    inbox_len = this->client.make_inbox( inbox, sub_idx + SUB_INBOX_BASE );
+    this->make_subject( sub_idx, subject, subject_len,
+                        this->kind != SUBSCRIBE_UPDATE );
+    what = ( this->kind != SUBSCRIBE_UPDATE ? "Snap" : "Subscribe" );
+    if ( ! this->quiet ) {
+      out.ts().printf( "%s \"%.*s\", reply \"%.*s\"\n", what,
+                       (int) subject_len, subject, (int) inbox_len, inbox );
+    }
+    else if ( this->kind != SNAPSHOT_FOREVER ) {
+      if ( first ) {
+        out.ts().printf( "%s \"%.*s\"", what, (int) subject_len, subject );
+        first = false;
+      }
+      else
+        out.printf( ", \"%.*s\"", (int) subject_len, subject );
+    }
+    /* subscribe with inbox reply */
+    if ( this->kind != SUBSCRIBE_UPDATE ) {
+      uint32_t  h = kv_crc_c( subject, subject_len, 0 );
+      EvPublish pub( subject, subject_len, inbox, inbox_len, NULL, 0,
+                     this->client.sub_route, this->client, h, 0 );
+      this->client.publish( pub );
+    }
+    else {
+      this->client.subscribe( subject, subject_len, inbox, inbox_len );
+    }
+    this->wild_subscribe |=
+      ( is_rv_wildcard( subject, subject_len ) != NULL );
+    this->subj_ht.upsert( subject, subject_len, sub_idx );
+  }
+  if ( this->quiet && ! first )
     out.puts( "\n" );
   out.flush();
 
+  bool not_done = ( this->sub_rate != 0 &&
+                    ( this->loop_count < this->sub_total ||
+                      this->kind == SNAPSHOT_FOREVER ) );
+  if ( started && not_done ) {
+    this->poll.timer.add_timer_double( *this, 0.5 / this->sub_rate,
+                                       SUB_TIMER_ID, 0 );
+  }
   if ( this->show_rate ) {
     this->last_time = this->poll.current_coarse_ns();
     this->poll.timer.add_timer_seconds( *this, RATE_TIMER_SECS,
@@ -336,20 +384,23 @@ RvDataCallback::start_subscriptions( void ) noexcept
                                         STOP_TIMER_ID, 0 );
   }
   this->is_subscribed = true;
+  return not_done;
 }
 
 /* if ctrl-c, program signalled, unsubscribe the subs */
 void
 RvDataCallback::on_unsubscribe( void ) noexcept
 {
-  if ( ! this->is_subscribed )
+  if ( ! this->is_unsubscribed )
     return;
-  this->is_subscribed = false;
+  this->is_unsubscribed = true;
+  if ( this->kind != SUBSCRIBE_UPDATE )
+    return;
   for ( size_t n = 0; ; ) {
     for ( size_t j = 0; j < this->sub_count; j++, n++ ) {
       const char * subject;
       size_t       subject_len;
-      this->make_subject( n, subject, subject_len );
+      this->make_subject( n, subject, subject_len, false );
       if ( ! this->quiet ) {
         out.ts().printf( "Unsubscribe \"%.*s\" initial=%u update=%u bytes=%u\n",
                (int) subject_len, subject, this->msg_recv[ n ] & 1,
@@ -428,7 +479,11 @@ RvDataCallback::timer_cb( uint64_t timer_id,  uint64_t ) noexcept
     this->last_bytes += bytes;
     return true;
   }
-  if ( timer_id == STOP_TIMER_ID ) {
+  else if ( timer_id == SUB_TIMER_ID ) {
+    if ( this->start_subscriptions() )
+      return true;
+  }
+  else if ( timer_id == STOP_TIMER_ID ) {
     this->on_unsubscribe();
     if ( this->poll.quit == 0 )
       this->poll.quit = 1; /* causes poll loop to exit */
@@ -481,7 +536,7 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
   if ( which != 0 ) {
     if ( which >= SUB_INBOX_BASE ) {
       n = which - SUB_INBOX_BASE;
-      this->make_subject( n, subject, subject_len );
+      this->make_subject( n, subject, subject_len, false );
       this->add_initial( n, pub_len );
       sub_idx  = n;
       have_sub = true;
@@ -626,6 +681,7 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
       }
     }
   }
+  bool skip_print_msg = false;
   if ( this->quiet ) {
     if ( delta > 2.0 || delta < -1.0 ) {
       out.ts().printf( "## %.*s update latency %.6f, next expected %f, "
@@ -635,41 +691,48 @@ RvDataCallback::on_rv_msg( EvPublish &pub ) noexcept
       out.flush();
     }
     if ( subject_len <= 3 || ::memcmp( subject, "_RV.", 4 ) != 0 )
-      return true;
+      skip_print_msg = true;
   }
-  if ( delta != 0 || next_delta != 0 ) {
-    out.ts().printf( "## update latency %.6f, next expected %f, "
-                     "cur expect %f, actual time %f, next %f\n",
-                     delta, next_delta, expect, cur, next );
-  }
-  if ( last_sequence != 0 && sequence != 0 ) {
-    out.ts().printf( "## last seqno %lu, current seqno %lu\n", last_sequence,
-                     sequence );
-  }
-  if ( which >= SUB_INBOX_BASE ) {
-    out.ts().printf( "## %.*s: (inbox: %.*s)\n", (int) subject_len, subject,
-                     (int) pub.subject_len, pub.subject );
-  }
-  else { /* not inbox subject */
-    if ( pub.reply_len != 0 )
-      out.ts().printf( "## %.*s (reply: %.*s):\n", (int) subject_len, subject,
-                        (int) pub.reply_len, (const char *) pub.reply );
+  if ( ! skip_print_msg ) {
+    if ( delta != 0 || next_delta != 0 ) {
+      out.ts().printf( "## update latency %.6f, next expected %f, "
+                       "cur expect %f, actual time %f, next %f\n",
+                       delta, next_delta, expect, cur, next );
+    }
+    if ( last_sequence != 0 && sequence != 0 ) {
+      out.ts().printf( "## last seqno %lu, current seqno %lu\n", last_sequence,
+                       sequence );
+    }
+    if ( which >= SUB_INBOX_BASE ) {
+      out.ts().printf( "## %.*s: (inbox: %.*s)\n", (int) subject_len, subject,
+                       (int) pub.subject_len, pub.subject );
+    }
+    else { /* not inbox subject */
+      if ( pub.reply_len != 0 )
+        out.ts().printf( "## %.*s (reply: %.*s):\n", (int) subject_len, subject,
+                          (int) pub.reply_len, (const char *) pub.reply );
+      else
+        out.ts().printf( "## %.*s:\n", (int) subject_len, subject );
+    }
+    /* print message */
+    if ( m != NULL ) {
+      out.ts().printf( "## format: %s, length %u\n", m->get_proto_string(),
+                       pub.msg_len );
+      m->print( &out );
+      if ( this->dump_hex )
+        out.print_hex( m );
+    }
+    else if ( pub.msg_len == 0 )
+      out.ts().printf( "## No message data\n" );
     else
-      out.ts().printf( "## %.*s:\n", (int) subject_len, subject );
+      out.ts().printe( "Message unpack error\n" );
+    out.flush();
   }
-  /* print message */
-  if ( m != NULL ) {
-    out.ts().printf( "## format: %s, length %u\n", m->get_proto_string(),
-                     pub.msg_len );
-    m->print( &out );
-    if ( this->dump_hex )
-      out.print_hex( m );
+  if ( this->kind == SNAPSHOT_ONCE &&
+       this->initial_count == this->sub_total ) {
+    if ( this->poll.quit == 0 )
+      this->poll.quit = 1; /* causes poll loop to exit */
   }
-  else if ( pub.msg_len == 0 )
-    out.ts().printf( "## No message data\n" );
-  else
-    out.ts().printe( "Message unpack error\n" );
-  out.flush();
   return true;
 }
 
@@ -688,7 +751,7 @@ RvDataCallback::check_trail_time( void ) noexcept
     if ( next != 0 ) {
       delta = cur - next; /* if exepcted next more than 5.0 seconds ago */
       if ( delta > 5.0 ) {
-        this->make_subject( sub_idx, subject, subject_len );
+        this->make_subject( sub_idx, subject, subject_len, false );
         out.ts().printf(
 "## %.*s delta %.6f (expected=%.6f, current=%.6f, last_seqno=%lu) (trail)\n",
           (int) subject_len, subject, delta, next, cur, seqno );
@@ -725,6 +788,9 @@ main( int argc, const char *argv[] )
              * nodict  = get_arg( x, argc, argv, 0, "-x", "-nodict", NULL ),
              * dump    = get_arg( x, argc, argv, 0, "-e", "-hex", NULL ),
              * rate    = get_arg( x, argc, argv, 0, "-r", "-rate", NULL ),
+             * sub_rte = get_arg( x, argc, argv, 1, "-m", "-subrate", NULL ),
+             * do_snap = get_arg( x, argc, argv, 0, "-i", "-snap", NULL ),
+             * do_fore = get_arg( x, argc, argv, 0, "-I", "-forever", NULL ),
              * sub_cnt = get_arg( x, argc, argv, 1, "-k", "-count", NULL ),
              * zipf    = get_arg( x, argc, argv, 0, "-Z", "-zipf", NULL ),
              * time    = get_arg( x, argc, argv, 1, "-t", "-secs", NULL ),
@@ -750,6 +816,9 @@ main( int argc, const char *argv[] )
              "  -x         = don't load a dictionary\n"
              "  -e         = show hex dump of messages\n"
              "  -r         = show rate of messages\n"
+             "  -m rate    = limit subscription rate/s\n"
+             "  -i         = do snapshot requests instead of subscribes\n"
+             "  -I         = do snapshot requests forever\n"
              "  -k         = subscribe to numeric subjects (subject.%%d)\n"
              "  -Z         = use zipf(0.99) distribution\n"
              "  -t secs    = stop after seconds expire\n"
@@ -819,12 +888,21 @@ main( int argc, const char *argv[] )
   EvPoll poll;
   poll.init( 5, false );
 
+  uint8_t kind = SUBSCRIBE_UPDATE;
+  if ( do_snap != NULL )
+    kind = SNAPSHOT_ONCE;
+  if ( do_fore != NULL )
+    kind = SNAPSHOT_FOREVER;
+
   EvRvClientParameters parm( daemon, network, service, user, 0 );
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, &argv[ first_sub ], argc - first_sub,
                              nodict != NULL, dump != NULL, rate != NULL, cnt,
                              range, zipf != NULL, secs, quiet != NULL,
-                             use_ts != NULL, seed1, seed2 );
+                             use_ts != NULL, kind, seed1, seed2 );
+  if ( sub_rte != NULL && atof( sub_rte ) != 0 ) {
+    data.sub_rate = atof( sub_rte );
+  }
   /* load dictionary if present */
   if ( ! data.no_dictionary ) {
     if ( path != NULL || (path = ::getenv( "cfile_path" )) != NULL ) {
