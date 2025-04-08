@@ -546,19 +546,21 @@ Tibrv_API::Open( void ) noexcept
   this->ev_read->start( this->pfd[ 0 ], "tibrv_api_pipe" );
   this->default_queue =
     this->make<api_Queue>( TIBRV_QUEUE, 0, TIBRV_DEFAULT_QUEUE );
-  this->process_tport =
+  api_Transport * t =
     this->make<api_Transport>( TIBRV_TRANSPORT, 0, TIBRV_PROCESS_TRANSPORT );
+  this->process_tport = t;
 
   EvRvClientParameters parm( "null", NULL, NULL, 0, 0 );
-  this->process_tport->client.rv_connect( parm, this->process_tport,
-                                          this->process_tport );
+  t->client.rv_connect( parm, t, t );
   int fd = this->poll.get_null_fd();
-  this->process_tport->sock_opts = OPT_NO_POLL;
-  this->process_tport->PeerData::init_peer( this->poll.get_next_id(), fd, -1,
+  t->sock_opts = OPT_NO_POLL;
+  t->PeerData::init_peer( this->poll.get_next_id(), fd, -1,
                                            NULL, "tibrv_process_transport" );
-  this->process_tport->set_name( "tibrv_process", 13 );
-  this->process_tport->poll.add_sock( this->process_tport );
-  this->process_tport->me = this->process_tport;
+  t->set_name( "tibrv_process", 13 );
+  t->poll.add_sock( t );
+  t->me = t;
+  ::memcpy( t->x.session, t->client.session, sizeof( t->x.session ) );
+  t->x.session_len = t->client.session_len;
 
   pthread_t id;
   pthread_attr_t attr;
@@ -1201,10 +1203,12 @@ Tibrv_API::CreateTransport( tibrvTransport * tport, const char * service,
     }
   }
   if ( t->client.rv_state != EvRvClient::DATA_RECV )
-    ret = TIBRV_DAEMON_NOT_FOUND;
+    ret = TIBRV_DAEMON_NOT_CONNECTED;
   ::memcpy( t->x.session, t->client.session, sizeof( t->x.session ) );
   t->x.session_len = t->client.session_len;
   pthread_mutex_unlock( &t->mutex );
+  if ( ret != TIBRV_OK )
+    *tport = TIBRV_INVALID_ID;
   return ret;
 }
 
@@ -1398,8 +1402,11 @@ Tibrv_API::CreateInbox( tibrvTransport tport, char * inbox_str,
                         tibrv_u32 inbox_len ) noexcept
 {
   api_Transport * t = this->get<api_Transport>( tport, TIBRV_TRANSPORT );
-  if ( t == NULL )
+  if ( t == NULL ) {
+    if ( inbox_len > 0 )
+      *inbox_str = 0;
     return TIBRV_INVALID_TRANSPORT;
+  }
 
   pthread_mutex_lock( &t->mutex );
   uint32_t num = t->inbox_count++;
@@ -1407,11 +1414,12 @@ Tibrv_API::CreateInbox( tibrvTransport tport, char * inbox_str,
 
   char inbox[ MAX_RV_INBOX_LEN ];
   CatPtr p( inbox );
-  size_t len = p.s( "_INBOX." )
-                .b( t->x.session, t->x.session_len )
-                .c( '.' )
-                .u( num )
-                .end();
+  p.s( "_INBOX." );
+  if ( t->x.session_len > 0 ) {
+    p.b( t->x.session, t->x.session_len )
+     .c( '.' );
+  }
+  size_t len = p.u( num ).end();
   if ( inbox_len > 0 )
     ::memcpy( inbox_str, inbox, len + 1 <= inbox_len ? len + 1 : inbox_len );
   return TIBRV_OK;

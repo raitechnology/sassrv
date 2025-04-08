@@ -118,8 +118,9 @@ EvRvClient::initialize_state( bool is_null ) noexcept
     while ( this->gob_len < sizeof( this->gob ) - 1 )
       this->gob[ this->gob_len++ ] = 1;
     this->gob[ this->gob_len ] = '\0';
-    uint8_t * ip = (uint8_t *) (void *) &this->ipaddr;
+#if 0
     char * ptr = this->session;
+    uint8_t * ip = (uint8_t *) (void *) &this->ipaddr;
     /* <ipaddr>.<pid><time><ptr> */
     for ( size_t i = 0; i < 8; i += 2 ) {
       *ptr++ = hexchar2( ( ip[ i/2 ] >> 4 ) & 0xf );
@@ -128,6 +129,9 @@ EvRvClient::initialize_state( bool is_null ) noexcept
     *ptr++ = '.';
     ptr += RvHost::time_to_str( this->start_stamp, ptr );
     this->session_len = (uint16_t) ( ptr - this->session );
+#endif
+    this->session[ 0 ] = '\0';
+    this->session_len = 0;
     this->control_len = this->make_inbox( this->control, 1 );
     this->rv_state = DATA_RECV;
     this->no_write = true;
@@ -480,7 +484,8 @@ EvRvClient::make_inbox( char *inbox,  uint32_t num ) noexcept
   ::memcpy( inbox, "_INBOX.", off );
   ::memcpy( &inbox[ off ], this->session, this->session_len );
   off += this->session_len;
-  inbox[ off++ ] = '.';
+  if ( off > 0 )
+    inbox[ off++ ] = '.';
   off += uint32_to_string( num, &inbox[ off ] );
   inbox[ off ] = '\0';
   return off;
