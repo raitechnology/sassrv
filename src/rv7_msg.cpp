@@ -311,12 +311,17 @@ tibrvMsg_CreateFromBytes( tibrvMsg * msg,  const void * bytes )
   MDMsgMem      mem;
   size_t        sz = get_u32<MD_BIG>( &((uint8_t *) bytes)[ 0 ] );
   RvMsg       * m  = RvMsg::unpack_rv( (void *) bytes, 0, sz, 0, NULL, mem );
-  if ( m == NULL ) {
+  tibrv_status status = TIBRV_OK;
+  if ( m == NULL )
+    status = TIBRV_CORRUPT_MSG;
+  else
+    status = tibrvMsg_Create( msg );
+  if ( status != TIBRV_OK ) {
     *msg = NULL;
-    return TIBRV_CORRUPT_MSG;
+    return status;
   }
-  tibrvMsg_Create( msg );
-  api_Msg & x = *(api_Msg *) msg;
+  tibrvMsg new_msg = * msg;
+  api_Msg & x = *(api_Msg *) new_msg;
   x.wr.append_rvmsg( *m );
   return TIBRV_OK;
 }
