@@ -563,7 +563,7 @@ get_array_value( MDFieldReader &rd, T ** value, MDType type,  tibrv_u32 *count )
   if ( ! rd.get_array_count( cnt ) )
     return TIBRV_ARG_CONFLICT;
   if ( cnt > 0 ) {
-    *value = (T *) rd.iter->iter_msg.mem->make( cnt * sizeof( T ) );
+    *value = (T *) rd.iter->iter_msg().mem->make( cnt * sizeof( T ) );
     if ( ! rd.get_array_value( *value, cnt, sizeof( T ), type ) )
       return TIBRV_ARG_CONFLICT;
     *count = (tibrv_u32) cnt;
@@ -591,7 +591,7 @@ get_msg( tibrvMsg msg,  MDFieldReader &rd,  tibrvMsg *sub )
 {
   MDMsg *rvmsg;
   *sub = NULL;
-  if ( rd.iter->iter_msg.get_sub_msg( rd.mref, rvmsg, rd.iter ) == 0 ) {
+  if ( rd.iter->iter_msg().get_sub_msg( rd.mref, rvmsg, rd.iter ) == 0 ) {
     api_Msg * smsg = ((api_Msg *) msg)->make_submsg();
     char * msg_buf = &((char *) rvmsg->msg_buf)[ rvmsg->msg_off ];
     size_t msg_len = rvmsg->msg_end - rvmsg->msg_off;
@@ -625,12 +625,12 @@ get_msg_array( tibrvMsg msg,  MDFieldReader &rd,  tibrvMsg **array,  tibrv_u32 *
   if ( ! rd.get_array_count( cnt ) )
     return TIBRV_ARG_CONFLICT;
   if ( cnt > 0 ) {
-    MDMsgMem * mem = rd.iter->iter_msg.mem;
+    MDMsgMem * mem = rd.iter->iter_msg().mem;
     tibrvMsg * ar  = (tibrvMsg *) mem->make( cnt * sizeof( tibrvMsg * ) );
     for ( size_t i = 0; i < cnt; i++ ) {
       api_Msg * m = ((api_Msg *) msg)->make_submsg();
       MDReference aref;
-      if ( rd.iter->iter_msg.get_array_ref( rd.mref, i, aref ) == 0 ) {
+      if ( rd.iter->iter_msg().get_array_ref( rd.mref, i, aref ) == 0 ) {
         m->msg_enc  = RVMSG_TYPE_ID;
         m->msg_data = m->mem.memalloc( aref.fsize, aref.fptr );
         m->msg_len  = aref.fsize;
@@ -945,7 +945,7 @@ tibrvMsg_AddMsgEx( tibrvMsg msg, const char * name, tibrvMsg value, tibrv_u16 id
   char fbuf[ 256 ];
   RvMsgWriter & w = get_writer( msg );
   RvMsgWriter & v = get_writer( value );
-  RvMsgWriter submsg( w.mem, NULL, 0 );
+  RvMsgWriter submsg( w.mem(), NULL, 0 );
   w.append_msg( FNAME_ARG, submsg );
   submsg.append_writer( v );
   w.update_hdr( submsg );
@@ -961,7 +961,7 @@ tibrvMsg_AddMsgArrayEx( tibrvMsg msg, const char * name, const tibrvMsg * value,
   w.append_msg_array( FNAME_ARG, aroff );
   for ( tibrv_u32 i = 0; i < num; i++ ) {
     RvMsgWriter & v = get_writer( value[ i ] );
-    RvMsgWriter submsg( w.mem, NULL, 0 );
+    RvMsgWriter submsg( w.mem(), NULL, 0 );
     w.append_msg_elem( submsg );
     submsg.append_writer( v );
     w.update_hdr( submsg );
@@ -1277,7 +1277,7 @@ tibrvMsg_UpdateMsgEx( tibrvMsg msg, const char * name, tibrvMsg value, tibrv_u16
   char fbuf[ 256 ];
   UpdGeom g( get_writer( msg ), FNAME_ARG );
   RvMsgWriter & v = get_writer( value );
-  RvMsgWriter submsg( g.wr.mem, NULL, 0 );
+  RvMsgWriter submsg( g.wr.mem(), NULL, 0 );
   g.wr.append_msg( FNAME_ARG, submsg );
   submsg.append_writer( v );
   g.wr.update_hdr( submsg );
@@ -1546,7 +1546,7 @@ tibrvMsg_UpdateMsgArrayEx( tibrvMsg msg, const char * name, const tibrvMsg * val
   g.wr.append_msg_array( FNAME_ARG, aroff );
   for ( tibrv_u32 i = 0; i < num; i++ ) {
     RvMsgWriter & v = get_writer( value[ i ] );
-    RvMsgWriter submsg( g.wr.mem, NULL, 0 );
+    RvMsgWriter submsg( g.wr.mem(), NULL, 0 );
     g.wr.append_msg_elem( submsg );
     submsg.append_writer( v );
     g.wr.update_hdr( submsg );

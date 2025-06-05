@@ -78,7 +78,7 @@ match_rv_info( const char *sub,  uint32_t sub_len ) noexcept
 }
 static char * hms( time_t t,  char *buf ) noexcept {
   struct tm tm;
-  md_localtime( t, tm );
+  md_localtime( t, &tm );
   ::snprintf( buf, 32, "%02d:%02d:%02d (%u)",
               tm.tm_hour, tm.tm_min, tm.tm_sec, (uint32_t) ( t % 3600 ) );
   return buf;
@@ -1332,9 +1332,9 @@ RvSubscriptionDB::make_host_sync( RvMsgWriter &w,  uint32_t i ) noexcept
        host.state == RvHostEntry::RV_HOST_STOP )
     return false;
 
-  RvMsgWriter      host_sub( w.mem, NULL, 0 ),
-                   sess_sub( w.mem, NULL, 0 ),
-                   subs_sub( w.mem, NULL, 0 );
+  RvMsgWriter      host_sub( w.mem(), NULL, 0 ),
+                   sess_sub( w.mem(), NULL, 0 ),
+                   subs_sub( w.mem(), NULL, 0 );
   RvSessionEntry * session;
   RvSubscription * script;
   size_t           pos, pos2;

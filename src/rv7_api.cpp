@@ -239,6 +239,8 @@ api_Msg::~api_Msg() noexcept
 bool
 api_Transport::on_rv_msg( EvPublish &pub ) noexcept
 {
+  if ( this == this->api.process_tport )
+    this->client.msg_in.mem.reuse();
   RvMsg * rvmsg = this->client.make_rv_msg( (void *) pub.msg, pub.msg_len,
                                             pub.msg_enc );
   if ( rvmsg == NULL )

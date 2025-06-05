@@ -449,7 +449,7 @@ struct api_Timer : public EvTimerCallback {
 struct TibrvMsgRef {
   TibrvMsgRef        * next,
                      * back;
-  MDMsgMem::MemBlock * blk_ptr;
+  MDMemBlock_t       * blk_ptr;
   uint32_t             mem_off;
   uint64_t             serial;
 

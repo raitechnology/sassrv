@@ -859,7 +859,7 @@ EvRvClient::publish2( EvPublish &pub,  const char *sub,  size_t sublen,
     rvmsg.append_string( SARG( "return" ), (const char *) reply, replen );
   }
   if ( rvmsg.err == 0 ) {
-    RvMsgWriter  submsg( rvmsg.mem, NULL, 0 );
+    RvMsgWriter  submsg( rvmsg.mem(), NULL, 0 );
     uint32_t     msg_enc = pub.msg_enc;
     size_t       msg_off = 0,
                  msg_len = pub.msg_len;

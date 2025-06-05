@@ -1093,7 +1093,7 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
     rvmsg.append_string( SARG( "return" ), reply, replen );
   }
   if ( rvmsg.err == 0 ) {
-    RvMsgWriter submsg( rvmsg.mem, NULL, 0 );
+    RvMsgWriter submsg( rvmsg.mem(), NULL, 0 );
     uint32_t msg_enc = pub.msg_enc,
              suf_len = pub.suf_len;
     size_t   msg_off = 0,

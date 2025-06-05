@@ -40,7 +40,7 @@ static char * hms( uint64_t now,  char *buf ) noexcept {
   struct tm tm;
   time_t t = now / NS;
   uint32_t ms = ( now % NS ) / 1000000;
-  md_localtime( t, tm );
+  md_localtime( t, &tm );
   ::snprintf( buf, 32, "%02d:%02d:%02d.%u%u%u",
               tm.tm_hour, tm.tm_min, tm.tm_sec,
               ms / 100, ( ms / 10 ) % 10, ms % 10);

@@ -526,6 +526,18 @@ $(bind)/rv7_test$(exe): $(rv7_test_objs) $(rv7_test_libs) $(lnk_dep)
 all_exes    += $(bind)/rv7_test$(exe)
 all_depends += $(rv7_test_deps)
 
+intra_test_files := intraprocess
+intra_test_cfile := $(addprefix src/, $(addsuffix .cpp, $(intra_test_files)))
+intra_test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(intra_test_files)))
+intra_test_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(intra_test_files)))
+intra_test_libs  := $(sassrv_lib) $(libd)/librv7ftlib.a $(libd)/librv7lib.a
+intra_test_lnk   := $(libd)/librv7ftlib.a $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+
+$(bind)/intra_test$(exe): $(intra_test_objs) $(intra_test_libs) $(lnk_dep)
+
+all_exes    += $(bind)/intra_test$(exe)
+all_depends += $(intra_test_deps)
+
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
 # the default targets
