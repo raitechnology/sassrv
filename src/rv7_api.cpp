@@ -866,9 +866,7 @@ Tibrv_API::TimedDispatchQueue( tibrvQueue q, tibrv_f64 timeout ) noexcept
   }
   if ( queue->list.is_empty() ) {
     pthread_mutex_unlock( &queue->mutex );
-    if ( timeout > 0.0 )
-      return TIBRV_TIMEOUT;
-    return TIBRV_OK;
+    return TIBRV_TIMEOUT;
   }
   TibrvQueueEventList list2 = queue->list;
   queue->list.init();
