@@ -767,7 +767,8 @@ tibrv_status
 tibrvMsg_AddBoolEx( tibrvMsg msg, const char * name, tibrv_bool value, tibrv_u16 id )
 {
   char fbuf[ 256 ];
-  get_writer( msg ).append_type( FNAME_ARG, value, MD_BOOLEAN );
+  uint8_t v = ( value ? 1 : 0 );
+  get_writer( msg ).append_type( FNAME_ARG, v, MD_BOOLEAN );
   return TIBRV_OK;
 }
 
@@ -1322,7 +1323,8 @@ tibrvMsg_UpdateBoolEx( tibrvMsg msg, const char * name, tibrv_bool value, tibrv_
 {
   char fbuf[ 256 ];
   UpdGeom g( get_writer( msg ), FNAME_ARG );
-  g.wr.append_type( FNAME_ARG, value, MD_BOOLEAN );
+  uint8_t v = ( value ? 1 : 0 );
+  g.wr.append_type( FNAME_ARG, v, MD_BOOLEAN );
   g.fin();
   return TIBRV_OK;
 }
