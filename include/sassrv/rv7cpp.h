@@ -478,6 +478,8 @@ struct api_Msg {
   MDMsgMem        mem;
   RvMsgWriter     wr;
   const void    * cl;
+  uint32_t        wr_refs,
+                  rd_refs;
   bool            in_queue;
   MsgTether       tether;
   uint64_t        serial;
@@ -488,8 +490,8 @@ struct api_Msg {
   api_Msg( tibrvEvent ev ) :
     next( 0 ), back( 0 ), owner( 0 ), subject( 0 ), reply( 0 ), msg_data( 0 ),
     subject_len( 0 ), reply_len( 0 ), msg_enc( 0 ), msg_len( 0 ), event( ev ),
-    rvmsg( 0 ), rd( 0 ), wr( this->mem, NULL, 0 ), cl( 0 ), in_queue( false ),
-    serial( 0 ) {}
+    rvmsg( 0 ), rd( 0 ), wr( this->mem, NULL, 0 ), cl( 0 ), wr_refs( 0 ),
+    rd_refs( 0 ), in_queue( false ), serial( 0 ) {}
   ~api_Msg() noexcept;
   void release( void ) noexcept;
 
