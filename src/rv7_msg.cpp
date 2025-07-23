@@ -469,22 +469,26 @@ const char *fid_name( char *fbuf,  const char *name,  uint16_t id ) {
 
 static inline RvMsgWriter &
 get_writer( tibrvMsg msg ) {
-  return ((api_Msg *) msg)->wr;
+  api_Msg *m = ((api_Msg *) msg);
+  m->wr_refs++;
+  return m->wr;
 }
 
 static inline MDFieldReader &
 get_reader( tibrvMsg msg )
 {
   api_Msg * m = (api_Msg *) msg;
-  if ( m->rd == NULL ) {
+  bool updated = m->rd_refs != m->wr_refs;
+  if ( m->rd == NULL || updated ) {
     RvMsg * rvmsg = m->rvmsg;
-    if ( rvmsg == NULL ) {
+    if ( rvmsg == NULL || updated ) {
       tibrv_u32 sz;
       void    * buf = get_as_bytes( msg, &sz );
       rvmsg = RvMsg::unpack_rv( buf, 0, sz, 0, NULL, m->mem );
     }
     m->rd = new ( m->mem.make( sizeof( MDFieldReader ) ) )
             MDFieldReader( *rvmsg );
+    m->rd_refs = m->wr_refs;
   }
   return *m->rd;
 }
