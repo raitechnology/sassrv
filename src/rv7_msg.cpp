@@ -374,7 +374,10 @@ tibrvMsg_CreateCopy( const tibrvMsg msg,  tibrvMsg * copy )
     cp->msg_len  = m->msg_len;
     cp->msg_data = cp->mem.memalloc( m->msg_len, m->msg_data );
   }
-  cp->wr.append_writer( m->wr );
+  else if ( m->rvmsg != NULL )
+    cp->wr.append_rvmsg( *m->rvmsg );
+  else
+    cp->wr.append_writer( m->wr );
   *copy = cp;
   return TIBRV_OK;
 }
