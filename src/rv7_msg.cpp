@@ -656,48 +656,84 @@ get_msg_array( tibrvMsg msg,  MDFieldReader &rd,  tibrvMsg **array,  tibrv_u32 *
 static tibrv_status
 get_field( tibrvMsg msg,  MDFieldReader &rd,  tibrvMsgField * field ) noexcept
 {
+  RvFieldIter & iter = *(RvFieldIter *) rd.iter;
   MDName nm;
-  ((RvFieldIter *) rd.iter)->get_name( nm );
+  iter.get_name( nm );
   field->name  = nm.fname;
   field->size  = 0;
   field->count = 0;
-  field->type  = ((RvFieldIter *) rd.iter)->type;
+  field->type  = iter.type;
   field->id    = nm.fid;
   memset( &field->data, 0, sizeof( field->data ) );
-  switch ( field->type ) {
-    case TIBRVMSG_MSG        : return get_msg( msg, rd, &field->data.msg );
-    case TIBRVMSG_DATETIME   : return get_datetime( rd, &field->data.date );
-    case TIBRVMSG_OPAQUE     : return get_opaque( rd, (void **) &field->data.buf, &field->size );
-    case TIBRVMSG_STRING     : return get_string( rd, (char **) &field->data.str, &field->size );
-    case TIBRVMSG_BOOL       : return get_value( rd, &field->data.boolean, MD_BOOLEAN );
-    case TIBRVMSG_I8         : return get_value( rd, &field->data.i8, MD_INT );
-    case TIBRVMSG_U8         : return get_value( rd, &field->data.u8, MD_UINT );
-    case TIBRVMSG_I16        : return get_value( rd, &field->data.i16, MD_INT );
-    case TIBRVMSG_U16        : return get_value( rd, &field->data.u16, MD_UINT );
-    case TIBRVMSG_I32        : return get_value( rd, &field->data.i32, MD_INT );
-    case TIBRVMSG_U32        : return get_value( rd, &field->data.u32, MD_UINT );
-    case TIBRVMSG_I64        : return get_value( rd, &field->data.i64, MD_INT );
-    case TIBRVMSG_U64        : return get_value( rd, &field->data.u64, MD_UINT );
-    case TIBRVMSG_F32        : return get_value( rd, &field->data.f32, MD_REAL );
-    case TIBRVMSG_F64        : return get_value( rd, &field->data.f64, MD_REAL );
-    case TIBRVMSG_IPPORT16   : return get_value( rd, &field->data.ipport16, MD_IPDATA );
-    case TIBRVMSG_IPADDR32   : return get_value( rd, &field->data.ipaddr32, MD_IPDATA );
-    case TIBRVMSG_ENCRYPTED  : return TIBRV_NOT_PERMITTED;
-    case TIBRVMSG_NONE       : return TIBRV_OK;
-    case TIBRVMSG_I8ARRAY    : return get_array_value( rd, (tibrv_i8 **) &field->data.array, MD_INT, &field->count );
-    case TIBRVMSG_U8ARRAY    : return get_array_value( rd, (tibrv_u8 **) &field->data.array, MD_UINT, &field->count );
-    case TIBRVMSG_I16ARRAY   : return get_array_value( rd, (tibrv_i16 **) &field->data.array, MD_INT, &field->count );
-    case TIBRVMSG_U16ARRAY   : return get_array_value( rd, (tibrv_u16 **) &field->data.array, MD_UINT, &field->count );
-    case TIBRVMSG_I32ARRAY   : return get_array_value( rd, (tibrv_i32 **) &field->data.array, MD_INT, &field->count );
-    case TIBRVMSG_U32ARRAY   : return get_array_value( rd, (tibrv_u32 **) &field->data.array, MD_UINT, &field->count );
-    case TIBRVMSG_I64ARRAY   : return get_array_value( rd, (tibrv_i64 **) &field->data.array, MD_INT, &field->count );
-    case TIBRVMSG_U64ARRAY   : return get_array_value( rd, (tibrv_u64 **) &field->data.array, MD_UINT, &field->count );
-    case TIBRVMSG_F32ARRAY   : return get_array_value( rd, (tibrv_f32 **) &field->data.array, MD_REAL, &field->count );
-    case TIBRVMSG_F64ARRAY   : return get_array_value( rd, (tibrv_f64 **) &field->data.array, MD_REAL, &field->count );
-    case TIBRVMSG_XML        : return get_string( rd, (char **) &field->data.str, &field->size );
-    case TIBRVMSG_STRINGARRAY: return get_array_value( rd, (char ***) &field->data.array, MD_STRING, &field->count );
-    case TIBRVMSG_MSGARRAY   : return get_msg_array( msg, rd, (tibrvMsg **) &field->data.array, &field->count );
-    default                  : return TIBRV_NOT_PERMITTED;
+  for (;;) {
+    switch ( field->type ) {
+      case TIBRVMSG_MSG        : return get_msg( msg, rd, &field->data.msg );
+      case TIBRVMSG_DATETIME   : return get_datetime( rd, &field->data.date );
+      case TIBRVMSG_OPAQUE     : return get_opaque( rd, (void **) &field->data.buf, &field->size );
+      case TIBRVMSG_STRING     : return get_string( rd, (char **) &field->data.str, &field->size );
+      case TIBRVMSG_BOOL       : return get_value( rd, &field->data.boolean, MD_BOOLEAN );
+      case TIBRVMSG_I8         : return get_value( rd, &field->data.i8, MD_INT );
+      case TIBRVMSG_U8         : return get_value( rd, &field->data.u8, MD_UINT );
+      case TIBRVMSG_I16        : return get_value( rd, &field->data.i16, MD_INT );
+      case TIBRVMSG_U16        : return get_value( rd, &field->data.u16, MD_UINT );
+      case TIBRVMSG_I32        : return get_value( rd, &field->data.i32, MD_INT );
+      case TIBRVMSG_U32        : return get_value( rd, &field->data.u32, MD_UINT );
+      case TIBRVMSG_I64        : return get_value( rd, &field->data.i64, MD_INT );
+      case TIBRVMSG_U64        : return get_value( rd, &field->data.u64, MD_UINT );
+      case TIBRVMSG_F32        : return get_value( rd, &field->data.f32, MD_REAL );
+      case TIBRVMSG_F64        : return get_value( rd, &field->data.f64, MD_REAL );
+      case TIBRVMSG_IPPORT16   : return get_value( rd, &field->data.ipport16, MD_IPDATA );
+      case TIBRVMSG_IPADDR32   : return get_value( rd, &field->data.ipaddr32, MD_IPDATA );
+      case TIBRVMSG_ENCRYPTED  : return TIBRV_NOT_PERMITTED;
+      case TIBRVMSG_NONE       : return TIBRV_OK;
+      case TIBRVMSG_I8ARRAY    : return get_array_value( rd, (tibrv_i8 **) &field->data.array, MD_INT, &field->count );
+      case TIBRVMSG_U8ARRAY    : return get_array_value( rd, (tibrv_u8 **) &field->data.array, MD_UINT, &field->count );
+      case TIBRVMSG_I16ARRAY   : return get_array_value( rd, (tibrv_i16 **) &field->data.array, MD_INT, &field->count );
+      case TIBRVMSG_U16ARRAY   : return get_array_value( rd, (tibrv_u16 **) &field->data.array, MD_UINT, &field->count );
+      case TIBRVMSG_I32ARRAY   : return get_array_value( rd, (tibrv_i32 **) &field->data.array, MD_INT, &field->count );
+      case TIBRVMSG_U32ARRAY   : return get_array_value( rd, (tibrv_u32 **) &field->data.array, MD_UINT, &field->count );
+      case TIBRVMSG_I64ARRAY   : return get_array_value( rd, (tibrv_i64 **) &field->data.array, MD_INT, &field->count );
+      case TIBRVMSG_U64ARRAY   : return get_array_value( rd, (tibrv_u64 **) &field->data.array, MD_UINT, &field->count );
+      case TIBRVMSG_F32ARRAY   : return get_array_value( rd, (tibrv_f32 **) &field->data.array, MD_REAL, &field->count );
+      case TIBRVMSG_F64ARRAY   : return get_array_value( rd, (tibrv_f64 **) &field->data.array, MD_REAL, &field->count );
+      case TIBRVMSG_XML        : return get_string( rd, (char **) &field->data.str, &field->size );
+      case TIBRVMSG_STRINGARRAY: return get_array_value( rd, (char ***) &field->data.array, MD_STRING, &field->count );
+      case TIBRVMSG_MSGARRAY   : return get_msg_array( msg, rd, (tibrvMsg **) &field->data.array, &field->count );
+      case RV_IPDATA:
+        switch ( iter.size ) {
+          case 2: field->type = TIBRVMSG_IPPORT16; break;
+          case 4: field->type = TIBRVMSG_IPADDR32; break;
+          default: return TIBRV_NOT_PERMITTED;
+        }
+        break;
+      case RV_INT:
+        switch ( iter.size ) {
+          case 1: field->type = TIBRVMSG_I8; break;
+          case 2: field->type = TIBRVMSG_I16; break;
+          case 4: field->type = TIBRVMSG_I32; break;
+          case 8: field->type = TIBRVMSG_I64; break;
+          default: return TIBRV_NOT_PERMITTED;
+        }
+        break;
+      case RV_UINT:
+        switch ( iter.size ) {
+          case 1: field->type = TIBRVMSG_U8; break;
+          case 2: field->type = TIBRVMSG_U16; break;
+          case 4: field->type = TIBRVMSG_U32; break;
+          case 8: field->type = TIBRVMSG_U64; break;
+          default: return TIBRV_NOT_PERMITTED;
+        }
+        break;
+      case RV_REAL:
+        switch ( iter.size ) {
+          case 4: field->type = TIBRVMSG_F32; break;
+          case 8: field->type = TIBRVMSG_F64; break;
+          default: return TIBRV_NOT_PERMITTED;
+        }
+        break;
+      default:
+        return TIBRV_NOT_PERMITTED;
+    }
   }
 }
 
