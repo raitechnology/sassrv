@@ -904,9 +904,7 @@ Tibrv_API::TimedDispatchQueueOneEvent( tibrvQueue q,
   }
   if ( queue->list.is_empty() ) {
     pthread_mutex_unlock( &queue->mutex );
-    if ( timeout > 0.0 )
-      return TIBRV_TIMEOUT;
-    return  TIBRV_OK;
+    return TIBRV_TIMEOUT;
   }
   TibrvQueueEvent * ev = queue->list.pop_hd();
   queue->count--;
@@ -1091,11 +1089,8 @@ Tibrv_API::TimedDispatchGroup( tibrvQueueGroup grp, tibrv_f64 timeout ) noexcept
     if ( queue->count > 0 )
       break;
   pthread_mutex_unlock( &g->mutex );
-  if ( queue == NULL ) {
-    if ( timeout > 0.0 )
-      return TIBRV_TIMEOUT;
-    return TIBRV_OK;
-  }
+  if ( queue == NULL )
+    return TIBRV_TIMEOUT;
   pthread_mutex_lock( &queue->mutex );
   TibrvQueueEventList list2;
   if ( queue->grp == g ) {
