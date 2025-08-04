@@ -92,6 +92,16 @@ tibrv_reconnect_thread( void *arg ) noexcept
     }
     pthread_mutex_unlock( &t.mutex );
   }
+  if ( t.client.rv_state == EvRvClient::DATA_RECV ) {
+    if ( t.x.session_len != t.client.session_len ||
+         ::memcmp( t.x.session, t.client.session, t.x.session_len ) != 0 ) {
+      fprintf( stderr, "Session different: %.*s (old) != %.*s (new)\n",
+              (int) t.x.session_len, t.x.session,
+              (int) t.client.session_len, t.client.session );
+      ::memcpy( t.x.session, t.client.session, t.client.session_len );
+      t.x.session_len = t.client.session_len;
+    }
+  }
 
   if ( ! t.is_destroyed ) {
     tibrvId max_id = t.api.next_id;
