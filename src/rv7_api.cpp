@@ -870,12 +870,16 @@ Tibrv_API::TimedDispatchQueue( tibrvQueue q, tibrv_f64 timeout ) noexcept
   if ( queue == NULL || queue->done )
     return TIBRV_INVALID_QUEUE;
   pthread_mutex_lock( &queue->mutex );
-  if ( queue->list.is_empty() ) {
-    struct timespec ts = ts_timeout( timeout, 10.0 );
+  while ( queue->list.is_empty() ) {
+    struct timespec ts = ts_timeout( timeout, 1.0 );
     pthread_cond_timedwait( &queue->cond, &queue->mutex, &ts );
+    if ( timeout != TIBRV_WAIT_FOREVER || queue->done )
+      break;
   }
   if ( queue->list.is_empty() ) {
     pthread_mutex_unlock( &queue->mutex );
+    if ( queue->done )
+      return queue->finish_queue();
     return TIBRV_TIMEOUT;
   }
   TibrvQueueEventList list2 = queue->list;
@@ -889,13 +893,21 @@ Tibrv_API::TimedDispatchQueue( tibrvQueue q, tibrv_f64 timeout ) noexcept
     list2.pop_hd()->dispatch();
   } while ( ! list2.is_empty() );
 
-  if ( queue->done && queue->cb != NULL ) {
-    pthread_mutex_lock( &queue->mutex );
-    if ( queue->cb != NULL ) {
-      queue->cb( q, (void *) queue->cl );
-      queue->cb = NULL;
+  if ( queue->done )
+    return queue->finish_queue();
+  return TIBRV_OK;
+}
+
+tibrv_status
+api_Queue::finish_queue( void ) noexcept
+{
+  if ( this->done && this->cb != NULL ) {
+    pthread_mutex_lock( &this->mutex );
+    if ( this->cb != NULL ) {
+      this->cb( this->id, (void *) this->cl );
+      this->cb = NULL;
     }
-    pthread_mutex_unlock( &queue->mutex );
+    pthread_mutex_unlock( &this->mutex );
   }
   return TIBRV_OK;
 }
@@ -905,18 +917,23 @@ Tibrv_API::TimedDispatchQueueOneEvent( tibrvQueue q,
                                        tibrv_f64 timeout ) noexcept
 {
   api_Queue * queue = this->get<api_Queue>( q, TIBRV_QUEUE );
+  TibrvQueueEvent * ev;
   if ( queue == NULL || queue->done )
     return TIBRV_INVALID_QUEUE;
   pthread_mutex_lock( &queue->mutex );
-  if ( queue->list.is_empty() ) {
-    struct timespec ts = ts_timeout( timeout, 10.0 );
+  while ( queue->list.is_empty() ) {
+    struct timespec ts = ts_timeout( timeout, 1.0 );
     pthread_cond_timedwait( &queue->cond, &queue->mutex, &ts );
+    if ( timeout != TIBRV_WAIT_FOREVER || queue->done )
+      break;
   }
   if ( queue->list.is_empty() ) {
     pthread_mutex_unlock( &queue->mutex );
+    if ( queue->done )
+      return queue->finish_queue();
     return TIBRV_TIMEOUT;
   }
-  TibrvQueueEvent * ev = queue->list.pop_hd();
+  ev = queue->list.pop_hd();
   queue->count--;
   if ( queue->list.is_empty() ) {
     queue->mptr = ( queue->mptr + 1 ) % 2;
@@ -926,14 +943,8 @@ Tibrv_API::TimedDispatchQueueOneEvent( tibrvQueue q,
 
   ev->dispatch();
 
-  if ( queue->done && queue->cb != NULL ) {
-    pthread_mutex_lock( &queue->mutex );
-    if ( queue->cb != NULL ) {
-      queue->cb( q, (void *) queue->cl );
-      queue->cb = NULL;
-    }
-    pthread_mutex_unlock( &queue->mutex );
-  }
+  if ( queue->done )
+    return queue->finish_queue();
   return TIBRV_OK;
 }
 
@@ -1088,19 +1099,33 @@ Tibrv_API::TimedDispatchGroup( tibrvQueueGroup grp, tibrv_f64 timeout ) noexcept
     g->list.sort<cmp_queue>();
     g->update = false;
   }
-  for ( queue = g->list.hd; queue != NULL; queue = queue->next )
-    if ( queue->count > 0 )
+  bool all_done;
+  for (;;) {
+    all_done = true;
+    for ( queue = g->list.hd; queue != NULL; queue = queue->next ) {
+      if ( queue->count > 0 )
+        break;
+      all_done &= queue->done;
+    }
+    if ( queue == NULL ) {
+      struct timespec ts = ts_timeout( timeout, 1.0 );
+      pthread_cond_timedwait( &g->cond, &g->mutex, &ts );
+    }
+    if ( queue != NULL || timeout != TIBRV_WAIT_FOREVER || all_done )
       break;
-  if ( queue == NULL ) {
-    struct timespec ts = ts_timeout( timeout, 10.0 );
-    pthread_cond_timedwait( &g->cond, &g->mutex, &ts );
   }
   for ( queue = g->list.hd; queue != NULL; queue = queue->next )
     if ( queue->count > 0 )
       break;
   pthread_mutex_unlock( &g->mutex );
-  if ( queue == NULL )
+  if ( queue == NULL ) {
+    if ( all_done ) {
+      for ( queue = g->list.hd; queue != NULL; queue = queue->next )
+        queue->finish_queue();
+      return TIBRV_OK;
+    }
     return TIBRV_TIMEOUT;
+  }
   pthread_mutex_lock( &queue->mutex );
   TibrvQueueEventList list2;
   if ( queue->grp == g ) {

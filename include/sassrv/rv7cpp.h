@@ -247,6 +247,7 @@ struct api_Queue {
   }
   bool push( tibrvId id,  tibrvEventCallback cb,  tibrvEventVectorCallback vcb,
              const void *cl,  api_Msg *msg ) noexcept;
+  tibrv_status finish_queue( void ) noexcept;
 };
 
 typedef DLinkList< api_Queue > TibrvQueueList;
