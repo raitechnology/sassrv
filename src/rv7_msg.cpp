@@ -502,6 +502,8 @@ get_value( MDFieldReader &rd, T * value, MDType type )
 {
   if ( rd.get_value( value, sizeof( *value ), type ) )
     return TIBRV_OK;
+  if ( rd.err == Err::BAD_CVT_NUMBER )
+    return TIBRV_CONVERSION_FAILED;
   return TIBRV_ARG_CONFLICT;
 }
 
