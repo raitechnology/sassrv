@@ -25,12 +25,12 @@ PROGRAM = subrv7test
 SOURCE = subrv7test.go
 
 # CGO configuration  
-CGO_CFLAGS = -I$(PWD)/../include -I$(PWD)/../../raimd/include -I$(PWD)/../../raikv/include -I$(PWD)/../../libdecnumber/include
-CGO_LDFLAGS = -L$(PWD)/../$(build_dir)/lib64 -L$(PWD)/../../raimd/$(build_dir)/lib64
-CGO_LDFLAGS += -L$(PWD)/../../raikv/$(build_dir)/lib64 -L$(PWD)/../../libdecnumber/$(build_dir)/lib64 
+CGO_CFLAGS = -I$(CURDIR)/../include -I$(CURDIR)/../../raimd/include -I$(CURDIR)/../../raikv/include -I$(CURDIR)/../../libdecnumber/include
+CGO_LDFLAGS = -L$(CURDIR)/../$(build_dir)/lib64 -L$(CURDIR)/../../raimd/$(build_dir)/lib64
+CGO_LDFLAGS += -L$(CURDIR)/../../raikv/$(build_dir)/lib64 -L$(CURDIR)/../../libdecnumber/$(build_dir)/lib64 
 CGO_LDFLAGS += -lsassrv -lrv7lib -lraimd -lraikv -ldecnumber -lpcre2-8 -lcares -lm -lpthread -lrt
-CGO_LDFLAGS += -Wl,-rpath,$(PWD)/../$(build_dir)/lib64 -Wl,-rpath,$(PWD)/../../raimd/$(build_dir)/lib64
-CGO_LDFLAGS += -Wl,-rpath,$(PWD)/../../raikv/$(build_dir)/lib64 -Wl,-rpath,$(PWD)/../../libdecnumber/$(build_dir)/lib64 
+CGO_LDFLAGS += -Wl,-rpath,$(CURDIR)/../$(build_dir)/lib64 -Wl,-rpath,$(CURDIR)/../../raimd/$(build_dir)/lib64
+CGO_LDFLAGS += -Wl,-rpath,$(CURDIR)/../../raikv/$(build_dir)/lib64 -Wl,-rpath,$(CURDIR)/../../libdecnumber/$(build_dir)/lib64 
 
 # Default target
 all: $(PROGRAM)
