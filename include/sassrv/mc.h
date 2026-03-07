@@ -49,10 +49,18 @@ struct TrdpHdr {
                total_len;
       uint16_t data_len,
                frag_num;
+      void zero( void ) {
+        this->seqno = this->total_len = 0;
+        this->data_len = this->frag_num = 0;
+      }
     } data;
     struct {
       uint32_t seqno_len,
                seqno[ 1 ];
+      void zero( void ) {
+        this->seqno_len = 0;
+        this->seqno[ 0 ] = 0;
+      }
     } nak;
     uint32_t seqno;
   };

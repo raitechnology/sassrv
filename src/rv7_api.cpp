@@ -378,9 +378,27 @@ void *
 tibrv_disp_thread( void *arg ) noexcept
 {
   api_Dispatcher & disp = *(api_Dispatcher *) arg;
+  tibrv_f64 t =
+    ( disp.idle_timeout == TIBRV_WAIT_FOREVER ? 10.0 : disp.idle_timeout );
   while ( ! disp.quit ) {
-    if ( tibrvQueue_TimedDispatch( disp.queue,
-                                   disp.idle_timeout ) == TIBRV_INVALID_QUEUE )
+    if ( tibrvQueue_TimedDispatch( disp.queue, t ) == TIBRV_INVALID_QUEUE )
+      break;
+  }
+  pthread_mutex_lock( &disp.mutex );
+  disp.done = true;
+  pthread_cond_broadcast( &disp.cond );
+  pthread_mutex_unlock( &disp.mutex );
+  return NULL;
+}
+
+void *
+tibrv_disp_group_thread( void *arg ) noexcept
+{
+  api_Dispatcher & disp = *(api_Dispatcher *) arg;
+  tibrv_f64 t =
+    ( disp.idle_timeout == TIBRV_WAIT_FOREVER ? 10.0 : disp.idle_timeout );
+  while ( ! disp.quit ) {
+    if ( tibrvQueueGroup_TimedDispatch( disp.queue, t ) == TIBRV_INVALID_QUEUE )
       break;
   }
   pthread_mutex_lock( &disp.mutex );
@@ -1567,7 +1585,14 @@ Tibrv_API::CreateDispatcher( tibrvDispatcher * disp, tibrvDispatchable able,
   pthread_attr_t attr;
   pthread_attr_init( &attr );
   pthread_attr_setdetachstate( &attr, 1 );
-  pthread_create( &d->thr_id, &attr, tibrv_disp_thread, d );
+  if ( this->get<api_Queue>( able, TIBRV_QUEUE ) != NULL ) {
+    d->is_queue = true;
+    pthread_create( &d->thr_id, &attr, tibrv_disp_thread, d );
+  }
+  else if ( this->get<api_QueueGroup>( able, TIBRV_QUEUE_GROUP ) ) {
+    d->is_queue_group = true;
+    pthread_create( &d->thr_id, &attr, tibrv_disp_group_thread, d );
+  }
 
   return TIBRV_OK;
 }
@@ -1579,13 +1604,28 @@ Tibrv_API::JoinDispatcher( tibrvDispatcher disp ) noexcept
   if ( d == NULL )
     return TIBRV_INVALID_DISPATCHER;
   if ( d != NULL ) {
-    api_Queue * q = this->get<api_Queue>( d->queue, TIBRV_QUEUE );
-    bool q_locked = ( q != NULL && pthread_mutex_trylock( &q->mutex ) == 0 );
-    d->quit = true;
-    if ( q_locked ) {
-      pthread_cond_broadcast( &q->cond );
-      pthread_mutex_unlock( &q->mutex );
-
+    bool wait_for_done = false;
+    if ( d->is_queue ) {
+      api_Queue * q = this->get<api_Queue>( d->queue, TIBRV_QUEUE );
+      bool q_locked = ( q != NULL && pthread_mutex_trylock( &q->mutex ) == 0 );
+      d->quit = true;
+      if ( q_locked ) {
+        pthread_cond_broadcast( &q->cond );
+        pthread_mutex_unlock( &q->mutex );
+        wait_for_done = true;
+      }
+    }
+    else if ( d->is_queue_group ) {
+      api_QueueGroup * q = this->get<api_QueueGroup>( d->queue, TIBRV_QUEUE_GROUP );
+      bool q_locked = ( q != NULL && pthread_mutex_trylock( &q->mutex ) == 0 );
+      d->quit = true;
+      if ( q_locked ) {
+        pthread_cond_broadcast( &q->cond );
+        pthread_mutex_unlock( &q->mutex );
+        wait_for_done = true;
+      }
+    }
+    if ( wait_for_done ) {
       if ( pthread_self() != d->thr_id ) {
         pthread_mutex_lock( &d->mutex );
         while ( ! d->done )
