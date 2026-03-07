@@ -380,7 +380,7 @@ struct RvHost : public kv::EvSocket {
              ::memcmp( this->network, hn.network, hn.network_len ) == 0 &&
              ::memcmp( this->service, hn.service, hn.service_len ) == 0 );
   }
-  uint16_t get_service( void ) {
+  uint16_t get_service_num( void ) {
     return (uint16_t) kv::string_to_uint64( this->service, this->service_len );
   }
   void zero_stats( uint64_t now ) {

@@ -35,6 +35,9 @@ TrdpHdr::copy_in( const void *msg_buf,  size_t msg_len ) noexcept
   this->dest_addr = get_u32<MD_BIG>( msg ); msg += 4;
   this->pkt_type  = get_u16<MD_BIG>( msg ); msg += 2;
   this->status    = get_u16<MD_BIG>( msg ); msg += 2;
+  this->data.zero();
+  this->nak.zero();
+  this->seqno = 0;
 
   switch ( this->type() ) {
     case DATA:

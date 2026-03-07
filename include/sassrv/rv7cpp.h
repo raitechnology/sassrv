@@ -277,7 +277,9 @@ struct api_Dispatcher {
   tibrv_f64       idle_timeout;
   char          * name;
   bool            quit,
-                  done;
+                  done,
+                  is_queue,
+                  is_queue_group;
   pthread_mutex_t mutex;
   pthread_cond_t  cond;
   pthread_t       thr_id;
@@ -286,7 +288,8 @@ struct api_Dispatcher {
   void operator delete( void *ptr ) { ::free( ptr ); }
   api_Dispatcher( Tibrv_API &a,  tibrvId i ) : api( a ), id( i ),
       queue( 0 ), idle_timeout( 0 ), name( 0 ),
-      quit( false ), done( false ), thr_id( 0 ) {
+      quit( false ), done( false ), is_queue( false ), is_queue_group( false ),
+      thr_id( 0 ) {
     pthread_mutex_init( &this->mutex, NULL );
     pthread_cond_init( &this->cond, NULL );
   }
