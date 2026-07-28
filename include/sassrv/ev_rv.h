@@ -450,6 +450,8 @@ struct EvRvService : public kv::EvConnection, public kv::BPData {
   RvIDLQueue * loss_queue;
   uint64_t     timer_id;       /* timerid unique for this service */
   md::MDMsgMem spc;
+  static const size_t REPLY_HINT_SIZE = 1024;
+  kv::ArrayCount<uint32_t, 32> reply_hint;
 
   EvRvService( kv::EvPoll &p,  const uint8_t t,  EvRvListen &l,
                kv::EvConnectionNotify *n )
@@ -492,6 +494,9 @@ struct EvRvService : public kv::EvConnection, public kv::BPData {
   void print_rv_msg_err( void *msgbuf,  size_t msglen,  int status ) noexcept;
   int fwd_pub( void *rvbuf,  size_t buflen ) noexcept; /* fwd msg from clnt */
   /* forward a message from network to client */
+  void update_reply_hint( const char *sub,  size_t sublen,
+                           const char *reply,  size_t replen ) noexcept;
+  uint32_t get_reply_hint( const char *reply,  size_t replen ) noexcept;
   bool fwd_msg( kv::EvPublish &pub ) noexcept;
   static bool convert_json( md::MDMsgMem &spc,  void *&msg,
                             size_t &msg_len ) noexcept;

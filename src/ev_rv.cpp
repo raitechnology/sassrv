@@ -403,6 +403,10 @@ EvRvService::fwd_pub( void *rvbuf,  size_t buflen ) noexcept
   EvPublish pub( sub, sublen, rep, replen, msg, msg_len,
                  this->sub_route, *this, h, ftype, PUB_TYPE_NORMAL,
                  0, this->host->host_ip );
+  if ( this->msg_in.sub_buf[ 0 ] == '_' &&
+       ::memcmp( this->msg_in.sub_buf, "_INBOX.", 7 ) == 0 ) {
+    pub.path_hint = this->get_reply_hint( sub, sublen );
+  }
   if ( this->msg_in.suffix_len != 0 ) {
     uint32_t suf_len = this->msg_in.suffix_len;
     if ( &((uint8_t *) msg)[ msg_len + (size_t) suf_len ] ==
@@ -1030,6 +1034,33 @@ EvRvService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
   return true;
 }
 
+void
+EvRvService::update_reply_hint( const char *sub,  size_t sublen,
+                                const char *reply,  size_t replen ) noexcept
+{
+  const char *p = &reply[ replen - 1 ];
+  uint32_t i = 0;
+  for ( ; p > reply && p[ 0 ] >= '0' && p[ 0 ] <= '9'; p-- )
+    i = ( i * 10 ) + ( p[ 0 ] - '0' );
+  this->reply_hint[ i % REPLY_HINT_SIZE ] =
+    kv_crc_c( sub, sublen, 0 );
+}
+
+uint32_t
+EvRvService::get_reply_hint( const char *reply,  size_t replen ) noexcept
+{
+  if ( this->reply_hint.count > 0 ) {
+    const char *p = &reply[ replen - 1 ];
+    uint32_t i = 0;
+    for ( ; p > reply && p[ 0 ] >= '0' && p[ 0 ] <= '9'; p-- )
+      i = ( i * 10 ) + ( p[ 0 ] - '0' );
+    i %= REPLY_HINT_SIZE;
+    if ( i < this->reply_hint.count )
+      return this->reply_hint.ptr[ i ];
+  }
+  return 0;
+}
+
 /* message from network, encapsulate the message into the client format:
  * { mtype: 'D', sub: <subject>, data: <msg-data> }
  */
@@ -1073,16 +1104,20 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
 
   rvmsg.append_subject( SARG( "sub" ), sub, sublen );
   /* some subjects may not encode */
+  const char * mtype = "D"; /* data */
   if ( rvmsg.err == 0 ) {
-    const char * mtype = "D"; /* data */
     if ( sublen > 16 && sub[ 0 ] == '_' ) {
       if ( ::memcmp( "_RV.INFO.SYSTEM.", sub, 16 ) == 0 ) {
+        bool is_listen = false;
         /* HOST.START, SESSION.START, LISTEN.START, UNREACHABLE.TRANSPORT */
         if ( ::memcmp( "HOST.", &sub[ 16 ], 5 ) == 0 ||
              ::memcmp( "SESSION.", &sub[ 16 ], 8 ) == 0 ||
-             ::memcmp( "LISTEN.", &sub[ 16 ], 7 ) == 0 ||
-             ::memcmp( "UNREACHABLE.", &sub[ 16 ], 12 ) == 0 )
+             (is_listen = (::memcmp( "LISTEN.", &sub[ 16 ], 7 ) == 0) ) ||
+             ::memcmp( "UNREACHABLE.", &sub[ 16 ], 12 ) == 0 ) {
           mtype = "A"; /* advisory */
+          if ( is_listen && sublen > 29 && replen > 0 )
+            this->update_reply_hint( &sub[ 29 ], sublen - 29, reply, replen );
+        }
       }
       else if ( ::memcmp( "_RV.ERROR.SYSTEM.", sub, 17 ) == 0 )
         mtype = "A"; /* advisory */
@@ -1091,6 +1126,11 @@ EvRvService::fwd_msg( EvPublish &pub ) noexcept
   }
   if ( rvmsg.err == 0 && replen > 0 ) {
     rvmsg.append_string( SARG( "return" ), reply, replen );
+    if ( mtype[ 0 ] == 'D' ) {
+      if ( ::memcmp( "_SNAP.", sub, 6 ) == 0 )
+        this->update_reply_hint( &sub[ 6 ], sublen - 6, reply, replen );
+      /* else if _SASS.*.SUB, then need to find subjects within */
+    }
   }
   if ( rvmsg.err == 0 ) {
     RvMsgWriter submsg( rvmsg.mem(), NULL, 0 );
@@ -1303,6 +1343,7 @@ EvRvService::release( void ) noexcept
     this->notify->on_shutdown( *this, NULL, 0 );
   this->EvConnection::release_buffers();
   this->spc.reuse();
+  this->reply_hint.reset();
   this->timer_id = 0;
 }
 
