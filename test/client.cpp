@@ -1160,6 +1160,7 @@ main( int argc, char *argv[] )
              "  [-S|-seed1]   hex     = random seed1 (for random distribution)\n"
              "  [-T|-seed2]   hex     = random seed2\n"
              "  [-A|-stamp]           = track timestamp in message\n"
+             "  [-o|-seqno]           = track sequence numbers\n"
              "  [-l|-log]     log     = output to log with time\n"
              "  [subject subject2...] = subject(s) to subscribe\n", argv[ 0 ] );
     return 1;
