@@ -332,12 +332,12 @@ struct RvSubscriptionListener {
 
   struct Snap {
     RvSubscription & sub;
-    RvSessionEntry & session;
+    RvSessionEntry * session;
     const char     * reply;
     uint16_t         reply_len,
                      flags;
 
-    Snap( RvSubscription &script,  RvSessionEntry &sess,
+    Snap( RvSubscription &script,  RvSessionEntry *sess,
           const char *rep,  size_t len,  uint16_t fl )
       : sub( script ), session( sess ), reply( rep ), reply_len( len ),
         flags( fl ) {}
@@ -360,10 +360,22 @@ struct RvSubscriptionListener {
         is_asserted( assert ) {}
   };
 
+  struct Tic {
+    RvSubscription & sub;
+    RvSessionEntry * session;
+    const char     * reply;
+    uint16_t         reply_len;
+
+    Tic( RvSubscription &script,  RvSessionEntry *sess,
+         const char *rep,  size_t len )
+      : sub( script ), session( sess ), reply( rep ), reply_len( len ) {}
+  };
+
   virtual void on_listen_start( Start &add ) noexcept;
   virtual void on_listen_stop ( Stop  &rem ) noexcept;
   virtual void on_snapshot    ( Snap  &snp ) noexcept;
   virtual void on_sass3       ( Sass3 &sa3 ) noexcept;
+  virtual void on_tic_reply   ( Tic   &tic ) noexcept;
 };
 
 struct EvRvClient;
@@ -418,7 +430,8 @@ struct RvSubscriptionDB {
   bool                       is_subscribed, /* start_subscriptions() called */
                              is_all_subscribed, /* no filtering */
                              is_sass2,
-                             is_sass3;
+                             is_sass3,
+                             is_tic;
   md::MDOutput             * mout; /* debug log output */
 
   RvSubscriptionDB( EvRvClient &c,  RvSubscriptionListener *sl ) noexcept;
@@ -426,7 +439,7 @@ struct RvSubscriptionDB {
   void release( void ) noexcept;
   void add_wildcard( const char *wildcard ) noexcept;
   bool is_matched( const char *sub,  size_t sub_len ) noexcept;
-  void start_subscriptions( bool all,  bool s2,  bool s3 ) noexcept;
+  void start_subscriptions( bool all,  bool s2,  bool s3,  bool tic ) noexcept;
   void stop_subscriptions( void ) noexcept;
   void do_subscriptions( bool is_subscribe ) noexcept;
   void do_wild_subscription( Filter &f,  bool is_subscribe,  int k ) noexcept;
@@ -503,6 +516,9 @@ struct RvSubscriptionDB {
   RvSubscription & snapshot( const char *sub,  size_t sub_len,
                              const char *sess,  size_t sess_len,
                              RvSessionEntry *&session ) noexcept;
+  RvSubscription & tic( const char *sub,  size_t sub_len,
+                        const char *sess,  size_t sess_len,
+                        RvSessionEntry *&session ) noexcept;
   RvSass3Entry & sass3( RvSubscription &script,
                         const char *u, size_t ulen,
                         const char *h, size_t hlen,

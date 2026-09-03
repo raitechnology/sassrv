@@ -1,6 +1,0 @@
-[submodule "raikv"]
-	path = raikv
-	url = https://github.com/raitechnology/raikv
-[submodule "raimd"]
-	path = raimd
-	url = https://github.com/raitechnology/raimd

@@ -33,7 +33,8 @@ static const char host_status[]   = _RV_INFO_HOST_STATUS ".>",
                   listen_stop[]   = _RV_INFO_LISTEN_STOP ".>",
                   unreachable[]   = _RV_INFO_UNREACHABLE_TPORT ".>",
                   snap[]          = "_SNAP.>",
-                  sass[]          = "_SASS.>";
+                  sass[]          = "_SASS.>",
+                  tic_reply[]     = "_TIC.REPLY.>";
 enum SubKind {
   IS_HOST_STATUS   = 0,
   IS_HOST_START    = 1,
@@ -45,7 +46,8 @@ enum SubKind {
   IS_LISTEN_STOP   = 7,
   IS_SNAP          = 8,
   IS_SASS          = 9,
-  MAX_SUB_KIND     = 10
+  IS_TIC_REPLY     = 10,
+  MAX_SUB_KIND     = 11
 };
 
 struct SubMatch {
@@ -64,7 +66,8 @@ static const SubMatch rv_info_sub[ MAX_SUB_KIND ] = {
 { listen_start , sizeof( listen_start ) - 1 , IS_LISTEN_START },
 { listen_stop  , sizeof( listen_stop ) - 1  , IS_LISTEN_STOP },
 { snap         , sizeof( snap ) - 1         , IS_SNAP },
-{ sass         , sizeof( sass ) - 1         , IS_SASS }
+{ sass         , sizeof( sass ) - 1         , IS_SASS },
+{ tic_reply    , sizeof( tic_reply ) - 1    , IS_TIC_REPLY }
 };
 
 static const SubMatch *
@@ -224,6 +227,7 @@ void RvSubscriptionListener::on_listen_start( Start & ) noexcept {}
 void RvSubscriptionListener::on_listen_stop ( Stop  & ) noexcept {}
 void RvSubscriptionListener::on_snapshot    ( Snap  & ) noexcept {}
 void RvSubscriptionListener::on_sass3       ( Sass3 & ) noexcept {}
+void RvSubscriptionListener::on_tic_reply   ( Tic   & ) noexcept {}
 
 void
 RvSubscriptionDB::add_wildcard( const char *wildcard ) noexcept
@@ -260,7 +264,8 @@ RvSubscriptionDB::is_matched( const char *sub,  size_t sub_len ) noexcept
 }
 
 void
-RvSubscriptionDB::start_subscriptions( bool all,  bool s2,  bool s3 ) noexcept
+RvSubscriptionDB::start_subscriptions( bool all,  bool s2,  bool s3,
+                                       bool tic ) noexcept
 {
   if ( this->is_subscribed )
     return;
@@ -270,6 +275,7 @@ RvSubscriptionDB::start_subscriptions( bool all,  bool s2,  bool s3 ) noexcept
   this->is_all_subscribed = all;
   this->is_sass2          = s2;
   this->is_sass3          = s3;
+  this->is_tic            = tic;
   this->cur_mono          = this->client.poll.mono_ns / NS;
   this->next_gc           = this->cur_mono + 131;
   this->do_subscriptions( true );
@@ -297,21 +303,27 @@ void
 RvSubscriptionDB::do_subscriptions( bool is_subscribe ) noexcept
 {
   const char * un = ( is_subscribe ? "" : "un" );
+
   for ( int i = 0; i < MAX_SUB_KIND; i++ ) {
     const SubMatch & match = rv_info_sub[ i ];
 
     if ( this->is_sass3 && i == IS_SASS ) {
       if ( this->is_all_subscribed ) {
         char star[ 2 ]  = { '*', 0 };
-        struct Filter f = { star, 1 };
-        this->do_wild_subscription( f, is_subscribe, i );
+        struct Filter all = { star, 1 };
+        this->do_wild_subscription( all, is_subscribe, i );
       }
       else {
         for ( size_t j = 0; j < this->filters.count; j++ )
           this->do_wild_subscription( this->filters.ptr[ j ], is_subscribe, i );
       }
     }
-    if ( this->is_sass2 && i != IS_SASS ) {
+    if ( this->is_tic && i == IS_TIC_REPLY ) {
+      char gt[ 2 ]  = { '>', 0 };
+      struct Filter all = { gt, 1 };
+      this->do_wild_subscription( all, is_subscribe, i );
+    }
+    if ( this->is_sass2 && i != IS_SASS && i != IS_TIC_REPLY ) {
       if ( ! this->is_all_subscribed &&
               ( i == IS_LISTEN_START || i == IS_LISTEN_STOP ||
                 i == IS_SNAP ) ) {
@@ -791,7 +803,12 @@ RvSubscriptionDB::snapshot( const char *sub,  size_t sub_len,
     this->mout->printf( "> snapshot %.*s\n", (int) sub_len, sub );
   RvSubscription & script = this->get_subscription( sub, sub_len );
   session = this->get_session( sess, sess_len );
-  if ( session != NULL && script.refcnt != 0 && script.ref7cnt == 0 ) {
+  if ( session == NULL ) {
+    uint32_t id = string_to_host_id( sess );
+    RvHostEntry &host = this->host_ref( id, 0, false );
+    host.state = RvHostEntry::RV_HOST_QUERY;
+  }
+  else if ( script.refcnt != 0 && script.ref7cnt == 0 ) {
     if ( session->state != RvSessionEntry::RV_SESSION_SELF &&
          session->state != RvSessionEntry::RV_SESSION_CID ) {
       if ( session->state != RvSessionEntry::RV_SESSION_QUERY ) {
@@ -801,6 +818,23 @@ RvSubscriptionDB::snapshot( const char *sub,  size_t sub_len,
                               sess );
       }
     }
+  }
+  return script;
+}
+
+RvSubscription &
+RvSubscriptionDB::tic( const char *sub,  size_t sub_len,
+                       const char *sess,  size_t sess_len,
+                       RvSessionEntry *&session ) noexcept
+{
+  if ( this->mout != NULL )
+    this->mout->printf( "> tic %.*s\n", (int) sub_len, sub );
+  RvSubscription & script = this->get_subscription( sub, sub_len );
+  session = this->get_session( sess, sess_len );
+  if ( session == NULL ) {
+    uint32_t id = string_to_host_id( sess );
+    RvHostEntry &host = this->host_ref( id, 0, false );
+    host.state = RvHostEntry::RV_HOST_QUERY;
   }
   return script;
 }
@@ -1066,7 +1100,7 @@ RvSubscriptionDB::send_host_query( uint32_t i ) noexcept
     this->mout->printf( "> pub get session to %08X %u (%s) -> %s\n",
                         host.host_id, host.cid, host_id_buf, daemon_inbox );
   }
-  printf( "SDB: host %08X, get session -> %s\n", host.host_id, daemon_inbox );
+  /*printf( "SDB: host %08X, get session -> %s\n", host.host_id, daemon_inbox );*/
 }
 
 void
@@ -1117,8 +1151,8 @@ RvSubscriptionDB::send_session_query( RvHostEntry &host,
                           host.host_id, host.cid, host_id_buf,
                           session.len, session.value, daemon_inbox );
     }
-    printf( "SDB: session %.*s, get subscriptions -> %s\n",
-            session.len, session.value, daemon_inbox );
+    /*printf( "SDB: session %.*s, get subscriptions -> %s\n",
+            session.len, session.value, daemon_inbox );*/
   }
 }
 
@@ -1531,16 +1565,26 @@ RvSubscriptionDB::process_pub2( EvPublish &pub,  const char *subject,
       }
       /* _SNAP.<subject> = strip 6 char prefix */
       case IS_SNAP:
-        if ( this->cb != NULL && subject_len > 6 ) {
+        if ( this->cb != NULL && subject_len > 6 && reply_len > 7 + 8 ) {
           RvSessionEntry *session;
           RvSubscription & script =
             this->snapshot( &subject[ 6 ], subject_len - 6, &reply[ 7 ],
                             inbox_session_len( reply, reply_len ), session );
-          if ( session != NULL ) {
-            RvSubscriptionListener::Snap
-              op( script, *session, reply, reply_len, flags );
-            this->cb->on_snapshot( op );
-          }
+          RvSubscriptionListener::Snap
+            op( script, session, reply, reply_len, flags );
+          this->cb->on_snapshot( op );
+        }
+        break;
+
+      case IS_TIC_REPLY:
+        if ( this->cb != NULL && reply_len > 7 + 8 ) {
+          RvSessionEntry *session;
+          RvSubscription & script = 
+            this->tic( subject, subject_len, &reply[ 7 ],
+                       inbox_session_len( reply, reply_len ), session );
+          RvSubscriptionListener::Tic
+            op( script, session, reply, reply_len );
+          this->cb->on_tic_reply( op );
         }
         break;
 

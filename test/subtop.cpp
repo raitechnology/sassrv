@@ -23,12 +23,13 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   size_t           sub_count;       /* count of sub[] */
   bool             top,
                    sass2,
-                   sass3;
+                   sass3,
+                   tic;
 
   RvDataCallback( EvPoll &p,  EvRvClient &c,  const char **s,  size_t cnt,
-                  bool t,  bool s2,  bool s3 )
+                  bool t,  bool s2,  bool s3,  bool x )
     : poll( p ), client( c ), sub_db( c, this ), sub( s ), sub_count( cnt ),
-      top( t ), sass2( s2 ), sass3( s3 ) {}
+      top( t ), sass2( s2 ), sass3( s3 ), tic( x ) {}
 
   /* after CONNECTED message */
   virtual void on_connect( EvSocket &conn ) noexcept;
@@ -48,6 +49,7 @@ struct RvDataCallback : public EvConnectionNotify, public RvClientCB,
   virtual void on_listen_stop ( Stop  &rem ) noexcept;
   virtual void on_snapshot    ( Snap  &snp ) noexcept;
   virtual void on_sass3       ( Sass3 &s3  ) noexcept;
+  virtual void on_tic_reply   ( Tic   &tic ) noexcept;
   const char * ts( uint32_t mono,  const char *str,  char *buf ) noexcept;
 };
 
@@ -68,7 +70,7 @@ void
 RvDataCallback::start_subscriptions( void ) noexcept
 {
   this->sub_db.start_subscriptions( this->sub_count == 0, this->sass2,
-                                    this->sass3 );
+                                    this->sass3, this->tic );
   this->poll.timer.add_timer_seconds( *this, 3, 1, 0 );
 }
 
@@ -177,10 +179,19 @@ RvDataCallback::on_listen_stop( Stop &rem ) noexcept
 void
 RvDataCallback::on_snapshot( Snap &snp ) noexcept
 {
+  RvSessionEntry * sess = snp.session;
   printf( "snap %.*s reply %.*s refs %u,%u flags %u from %.*s %s\n",
     snp.sub.len, snp.sub.value, snp.reply_len, snp.reply, snp.sub.refcnt,
-    snp.sub.ref7cnt, snp.flags, snp.session.len, snp.session.value,
-    snp.session.user_id );
+    snp.sub.ref7cnt, snp.flags,
+    sess != NULL ? sess->len : 0, sess != NULL ? sess->value : "",
+    sess != NULL ? sess->user_id : "" );
+}
+
+void
+RvDataCallback::on_tic_reply( Tic &tic ) noexcept
+{
+  printf( "tic %.*s reply %.*s\n",
+    tic.sub.len, tic.sub.value, tic.reply_len, tic.reply );
 }
 
 void
@@ -238,6 +249,7 @@ main( int argc, const char *argv[] )
              * log     = get_arg( x, argc, argv, 1, "-l", "-log", NULL ),
              * top     = get_arg( x, argc, argv, 0, "-t", "-top", NULL ),
              * s3      = get_arg( x, argc, argv, 0, "-3", "-sass3", NULL ),
+             * tic     = get_arg( x, argc, argv, 0, "-x", "-tic", NULL ),
              * help    = get_arg( x, argc, argv, 0, "-h", "-help", 0 );
   int first_sub = x, idle_count = 0;
 
@@ -259,7 +271,8 @@ main( int argc, const char *argv[] )
   EvRvClientParameters parm( daemon, network, service, user, 0 );
   EvRvClient           conn( poll );
   RvDataCallback       data( poll, conn, &argv[ first_sub ], argc - first_sub,
-                             top != NULL, s3 == NULL, s3 != NULL );
+                             top != NULL, s3 == NULL, s3 != NULL,
+                             tic != NULL );
   MDOutput             mout;
 
   if ( log != NULL ) {

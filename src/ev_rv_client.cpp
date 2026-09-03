@@ -292,7 +292,7 @@ EvRvClient::rv_connect( EvRvClientParameters &p,
       }
     }
     if ( this->listen_subs.count > 0 ) {
-      this->sub_db.start_subscriptions( false, true, false );
+      this->sub_db.start_subscriptions( false, true, false, false );
       this->timer_id = this->poll.mono_ns;
       this->poll.timer.add_timer_seconds( this->fd, 1, this->timer_id, 0 );
     }
@@ -601,7 +601,7 @@ EvRvClient::recv_conn( void ) noexcept
     }
   }
   if ( this->listen_subs.count > 0 ) {
-    this->sub_db.start_subscriptions( false, true, false );
+    this->sub_db.start_subscriptions( false, true, false, false );
     this->timer_id = this->poll.mono_ns;
     this->poll.timer.add_timer_seconds( this->fd, 1, this->timer_id, 0 );
   }

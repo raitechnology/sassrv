@@ -4,7 +4,11 @@
 #include <signal.h>
 #include <string.h>
 #include <time.h>
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+#include <raikv/win.h> /* winsock: gethostname, htonl, ... */
+#else
 #include <unistd.h>
+#endif
 
 #include <sassrv/rv7api.h>
 #include <raimd/md_msg.h>
