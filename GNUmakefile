@@ -63,6 +63,8 @@ gcc_wflags  := -Wall -Wextra
 # if windows cross compile
 ifeq (true,$(mingw))
 dll         := dll
+# mingw time.h provides localtime_r/gmtime_r behind this
+default_cflags += -D_POSIX_THREAD_SAFE_FUNCTIONS
 exe         := .exe
 soflag      := -shared -Wl,--subsystem,windows
 fpicflags   := -fPIC -DRV_SHARED
@@ -331,6 +333,8 @@ $(bind)/rv_ftmon$(exe): $(rv_ftmon_objs) $(rv_ftmon_libs) $(lnk_dep)
 all_exes    += $(bind)/rv_ftmon$(exe)
 all_depends += $(rv_ftmon_deps)
 
+# rv5 api is not ported to windows (mingw); rv7 is the supported client api
+ifneq (true,$(mingw))
 rv5_api_defines := -DSASSRV_VER=$(ver_build)
 librv5lib_files := rv5_api
 librv5lib_cfile := $(addprefix src/, $(addsuffix .cpp, $(librv5lib_files)))
@@ -348,6 +352,7 @@ $(libd)/librv5lib.$(dll): $(librv5lib_dbjs) $(rv_dlnk_dep) $(dlnk_dep)
 all_libs    += $(libd)/librv5lib.a
 all_dlls    += $(libd)/librv5lib.$(dll)
 all_depends += $(librv5lib_deps)
+endif
 
 rv7_api_defines := -DSASSRV_VER=$(ver_build)
 librv7lib_files := rv7_api rv7_msg
@@ -374,18 +379,19 @@ librv7ftlib_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(librv7ftlib_files))
 librv7ftlib_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(librv7ftlib_files)))
 librv7ftlib_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(librv7ftlib_files))) \
                   $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(librv7ftlib_files)))
-librv7ftlib_dlnk  := $(rv_dlnk_lib) $(dlnk_lib)
+librv7ftlib_dlnk  := -L$(pwd)/$(libd) -lrv7lib $(rv_dlnk_lib) $(dlnk_lib)
 librv7ftlib_spec  := $(version)-$(build_num)_$(git_hash)
 librv7ftlib_ver   := $(major_num).$(minor_num)
 
 $(libd)/librv7ftlib.a: $(librv7ftlib_objs)
-$(libd)/librv7ftlib.$(dll): $(librv7ftlib_dbjs) $(rv_dlnk_dep) $(dlnk_dep)
+$(libd)/librv7ftlib.$(dll): $(librv7ftlib_dbjs) $(libd)/librv7lib.$(dll) $(rv_dlnk_dep) $(dlnk_dep)
 
 all_libs    += $(libd)/librv7ftlib.a
 all_dlls    += $(libd)/librv7ftlib.$(dll)
 all_depends += $(librv7ftlib_deps)
 
 rv5_api_test_includes = -Iinclude/sassrv
+ifneq (true,$(mingw))
 rv5_api_test_files := rv5_api_test
 rv5_api_test_cfile := $(addprefix src/, $(addsuffix .cpp, $(rv5_api_test_files)))
 rv5_api_test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(rv5_api_test_files)))
@@ -410,6 +416,7 @@ $(bind)/rv5_cpp_test$(exe): $(rv5_cpp_test_objs) $(rv5_cpp_test_libs) $(lnk_dep)
 
 all_exes    += $(bind)/rv5_cpp_test$(exe)
 all_depends += $(rv5_cpp_test_deps)
+endif
 
 # tibrvclient_files := tibrvclient
 # tibrvclient_cfile := $(addprefix src/, $(addsuffix .cpp, $(tibrvclient_files)))
@@ -537,6 +544,7 @@ $(bind)/rv7_test$(exe): $(rv7_test_objs) $(rv7_test_libs) $(lnk_dep)
 all_exes    += $(bind)/rv7_test$(exe)
 all_depends += $(rv7_test_deps)
 
+ifndef NO_STL # uses std::thread
 intra_test_files := intraprocess
 intra_test_cfile := $(addprefix src/, $(addsuffix .cpp, $(intra_test_files)))
 intra_test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(intra_test_files)))
@@ -548,6 +556,7 @@ $(bind)/intra_test$(exe): $(intra_test_objs) $(intra_test_libs) $(lnk_dep)
 
 all_exes    += $(bind)/intra_test$(exe)
 all_depends += $(intra_test_deps)
+endif
 
 subrv7test_files := subrv7test
 subrv7test_cfile := $(addprefix src/, $(addsuffix .cpp, $(subrv7test_files)))

@@ -2,11 +2,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
 #include <fcntl.h>
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
+#include <unistd.h>
 #include <poll.h>
+#else
+#include <raikv/win.h>
+#endif
 
 #include <sassrv/ev_rv_client.h>
 #include <raikv/ev_publish.h>
@@ -445,14 +449,23 @@ EvPipe::exec( EvPipeRec &rec ) noexcept
   bool      complete = false;
   rec.complete = &complete;
   for (;;) {
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
     int n = ::write( this->write_fd, p, e - p );
+#else
+    struct iovec iov = { p, (size_t) ( e - p ) };
+    int n = (int) ::wp_send( this->write_fd, &iov, 1 );
+#endif
     if ( n > 0 ) {
       p += n;
       if ( p == e )
         break;
     }
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
     struct pollfd fds = { this->write_fd, POLLOUT, POLLOUT };
     ::poll( &fds, 1, 10 );
+#else
+    ::Sleep( 1 ); /* loopback socketpair, rarely full */
+#endif
   }
   while ( ! *rec.complete )
     pthread_cond_wait( rec.cond, rec.mutex );
@@ -593,10 +606,15 @@ void api_Transport::release( void ) noexcept {}
 tibrv_status
 Tibrv_API::Open( void ) noexcept
 {
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
   if ( pipe2( this->pfd, O_CLOEXEC ) != 0 )
     return TIBRV_INIT_FAILURE;
   fcntl( this->pfd[ 0 ], F_SETFL, O_NONBLOCK | 
          fcntl( this->pfd[ 0 ], F_GETFL ) );
+#else
+  if ( wp_socketpair( this->pfd ) != 0 ) /* pipe substitute, non-blocking */
+    return TIBRV_INIT_FAILURE;
+#endif
   pthread_mutex_init( &this->map_mutex, NULL );
   pthread_cond_init( &this->cond, NULL );
   this->poll.init( 128, false );
