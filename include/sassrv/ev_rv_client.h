@@ -4,6 +4,11 @@
 #include <sassrv/ev_rv.h>
 #include <sassrv/submgr.h>
 
+extern "C" {
+/* factory used by raims (dlsym / built in table) for the ipc transport */
+rai::kv::EvConnection *rv_create_connection( rai::kv::EvPoll *p,  rai::kv::RoutePublish *sr,
+                           rai::kv::EvConnectionNotify *n );
+}
 namespace rai {
 namespace trdp {
   struct TrdpSvc;

@@ -68,7 +68,7 @@ default_cflags += -D_POSIX_THREAD_SAFE_FUNCTIONS
 exe         := .exe
 soflag      := -shared -Wl,--subsystem,windows
 fpicflags   := -fPIC -DRV_SHARED
-sock_lib    := -lcares -lws2_32
+sock_lib    := -lcares -lws2_32 -lpsapi
 dynlink_lib := -lpcre2-8 -lz
 NO_STL      := 1
 else

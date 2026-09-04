@@ -33,7 +33,7 @@ DEPFILE="$HERE/build_depends.mak"
 
 # global topological order (leaves first); filtered by what DEPFILE names
 TOPO="libdecnumber raikv raimd h3 linecook rdbparser HdrHistogram_c openpgm
-      sassrv natsmd raids omm raims"
+      sassrv natsmd raids omm raims raimdapi"
 
 build=0; dry=0
 while getopts "bnh" o; do case "$o" in
