@@ -10,6 +10,11 @@
 #include <poll.h>
 #else
 #include <raikv/win.h>
+/* RV7_TRACE=1 in the environment prints the api<->epoll thread handshake,
+ * for debugging the windows port */
+static int rv7_trace = -1;
+#define RV7_TRACE( ... ) do { if ( rv7_trace < 0 ) rv7_trace = ( getenv( "RV7_TRACE" ) != NULL ); \
+  if ( rv7_trace ) { fprintf( stderr, __VA_ARGS__ ); fflush( stderr ); } } while ( 0 )
 #endif
 
 #include <sassrv/ev_rv_client.h>
@@ -402,6 +407,9 @@ tibrv_epoll_thread( void *arg ) noexcept
       idle_count++;
     else
       idle_count = 0; 
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+    if ( idle_count == 11 ) RV7_TRACE( "epoll thread: idle, sleeping waits\n" );
+#endif
     poll.wait( idle_count > 10 ? 100 : 0 );
   }
   return NULL;
@@ -454,6 +462,7 @@ EvPipe::exec( EvPipeRec &rec ) noexcept
 #else
     struct iovec iov = { p, (size_t) ( e - p ) };
     int n = (int) ::wp_send( this->write_fd, &iov, 1 );
+    RV7_TRACE( "exec: wp_send fd=%d n=%d of %d (err %d)\n", this->write_fd, n, (int) ( e - p ), n < 0 ? (int) WSAGetLastError() : 0 );
 #endif
     if ( n > 0 ) {
       p += n;
@@ -467,8 +476,14 @@ EvPipe::exec( EvPipeRec &rec ) noexcept
     ::Sleep( 1 ); /* loopback socketpair, rarely full */
 #endif
   }
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+  RV7_TRACE( "exec: waiting for completion\n" );
+#endif
   while ( ! *rec.complete )
     pthread_cond_wait( rec.cond, rec.mutex );
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+  RV7_TRACE( "exec: complete\n" );
+#endif
   rec.complete = NULL;
 }
 
@@ -482,6 +497,9 @@ EvPipe::start( int fd,  const char *name ) noexcept
 void
 EvPipe::process( void ) noexcept
 {
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+  RV7_TRACE( "process: len=%u off=%u\n", (unsigned) this->len, (unsigned) this->off );
+#endif
   for (;;) {
     size_t buflen = this->len - this->off; 
     if ( buflen < sizeof( EvPipeRec ) ) {
@@ -614,6 +632,7 @@ Tibrv_API::Open( void ) noexcept
 #else
   if ( wp_socketpair( this->pfd ) != 0 ) /* pipe substitute, non-blocking */
     return TIBRV_INIT_FAILURE;
+  RV7_TRACE( "open: socketpair fds %d %d\n", this->pfd[ 0 ], this->pfd[ 1 ] );
 #endif
   pthread_mutex_init( &this->map_mutex, NULL );
   pthread_cond_init( &this->cond, NULL );
@@ -654,6 +673,9 @@ Tibrv_API::Open( void ) noexcept
   pthread_attr_init( &attr );
   pthread_attr_setdetachstate( &attr, 1 );
   pthread_create( &id, &attr, tibrv_epoll_thread, this );
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+  RV7_TRACE( "open: epoll thread created, null fd %d\n", fd );
+#endif
   return TIBRV_OK;
 }
 
@@ -1327,9 +1349,18 @@ Tibrv_API::CreateTransport( tibrvTransport * tport, const char * service,
   this->ev_read->exec( rec );
 
   struct timespec ts = ts_timeout( 10.0 );
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+  RV7_TRACE( "create_tport: after connect rv_state=%d (ERR_CLOSE=%d DATA_RECV=%d) tick=%lu sock_err=%d\n",
+             (int) t->client.rv_state, (int) EvRvClient::ERR_CLOSE, (int) EvRvClient::DATA_RECV,
+             (unsigned long) GetTickCount(), (int) t->client.sock_err );
+#endif
   while ( t->client.rv_state > EvRvClient::ERR_CLOSE &&
           t->client.rv_state < EvRvClient::DATA_RECV ) {
-    if ( pthread_cond_timedwait( &t->cond, &t->mutex, &ts ) == ETIMEDOUT ) {
+    int wr = pthread_cond_timedwait( &t->cond, &t->mutex, &ts );
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
+    RV7_TRACE( "create_tport: timedwait=%d rv_state=%d tick=%lu\n", wr, (int) t->client.rv_state, (unsigned long) GetTickCount() );
+#endif
+    if ( wr == ETIMEDOUT ) {
       EvPipeRec rec2( OP_CLOSE_TPORT, t, &parm, &t->mutex, &t->cond );
       this->ev_read->exec( rec2 );
     }
