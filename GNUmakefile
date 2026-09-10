@@ -606,6 +606,30 @@ $(bind)/fanrv7test$(exe): $(fanrv7test_objs) $(fanrv7test_libs) $(lnk_dep)
 all_exes    += $(bind)/fanrv7test$(exe)
 all_depends += $(fanrv7test_deps)
 
+mtbatchrv7test_files := mtbatchrv7test
+mtbatchrv7test_cfile := $(addprefix src/, $(addsuffix .cpp, $(mtbatchrv7test_files)))
+mtbatchrv7test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(mtbatchrv7test_files)))
+mtbatchrv7test_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(mtbatchrv7test_files)))
+mtbatchrv7test_libs  := $(sassrv_lib) $(libd)/librv7ftlib.a $(libd)/librv7lib.a
+mtbatchrv7test_lnk   := $(libd)/librv7ftlib.a $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+
+$(bind)/mtbatchrv7test$(exe): $(mtbatchrv7test_objs) $(mtbatchrv7test_libs) $(lnk_dep)
+
+all_exes    += $(bind)/mtbatchrv7test$(exe)
+all_depends += $(mtbatchrv7test_deps)
+
+relayrv7test_files := relayrv7test
+relayrv7test_cfile := $(addprefix src/, $(addsuffix .cpp, $(relayrv7test_files)))
+relayrv7test_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(relayrv7test_files)))
+relayrv7test_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(relayrv7test_files)))
+relayrv7test_libs  := $(sassrv_lib) $(libd)/librv7ftlib.a $(libd)/librv7lib.a
+relayrv7test_lnk   := $(libd)/librv7ftlib.a $(libd)/librv7lib.a $(sassrv_lib) $(lnk_lib)
+
+$(bind)/relayrv7test$(exe): $(relayrv7test_objs) $(relayrv7test_libs) $(lnk_dep)
+
+all_exes    += $(bind)/relayrv7test$(exe)
+all_depends += $(relayrv7test_deps)
+
 #resendmsg_files := resendmsg
 #resendmsg_cfile := $(addprefix src/, $(addsuffix .cpp, $(resendmsg_files)))
 #resendmsg_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(resendmsg_files)))
@@ -634,90 +658,7 @@ all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
 # the default targets
 .PHONY: all
-all: $(all_libs) $(all_dlls) $(all_exes) cmake
-
-.PHONY: cmake
-cmake: CMakeLists.txt
-
-.ONESHELL: CMakeLists.txt
-CMakeLists.txt: .copr/Makefile
-	@cat <<'EOF' > $@
-	cmake_minimum_required (VERSION 3.9.0)
-	if (POLICY CMP0111)
-	  cmake_policy(SET CMP0111 OLD)
-	endif ()
-	project (sassrv)
-	include_directories (
-	  include
-	  $${CMAKE_SOURCE_DIR}/raimd/include
-	  $${CMAKE_SOURCE_DIR}/raikv/include
-	  $${CMAKE_SOURCE_DIR}/libdecnumber/include
-	  $${CMAKE_SOURCE_DIR}/raimd/libdecnumber/include
-	)
-	if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
-	  add_definitions(/DPCRE2_STATIC)
-	  if ($$<CONFIG:Release>)
-	    add_compile_options (/arch:AVX2 /GL /std:c11)
-	  else ()
-	    add_compile_options (/arch:AVX2 /std:c11)
-	  endif ()
-	  if (NOT TARGET pcre2-8-static)
-	    add_library (pcre2-8-static STATIC IMPORTED)
-	    set_property (TARGET pcre2-8-static PROPERTY IMPORTED_LOCATION_DEBUG ../pcre2/build/Debug/pcre2-8-staticd.lib)
-	    set_property (TARGET pcre2-8-static PROPERTY IMPORTED_LOCATION_RELEASE ../pcre2/build/Release/pcre2-8-static.lib)
-	    include_directories (../pcre2/build)
-	  else ()
-	    include_directories ($${CMAKE_BINARY_DIR}/pcre2)
-	  endif ()
-	  if (NOT TARGET raikv)
-	    add_library (raikv STATIC IMPORTED)
-	    set_property (TARGET raikv PROPERTY IMPORTED_LOCATION_DEBUG ../raikv/build/Debug/raikv.lib)
-	    set_property (TARGET raikv PROPERTY IMPORTED_LOCATION_RELEASE ../raikv/build/Release/raikv.lib)
-	  endif ()
-	  if (NOT TARGET raimd)
-	    add_library (raimd STATIC IMPORTED)
-	    set_property (TARGET raimd PROPERTY IMPORTED_LOCATION_DEBUG ../raimd/build/Debug/raimd.lib)
-	    set_property (TARGET raimd PROPERTY IMPORTED_LOCATION_RELEASE ../raimd/build/Release/raimd.lib)
-	  endif ()
-	  if (NOT TARGET decnumber)
-	    add_library (decnumber STATIC IMPORTED)
-	    set_property (TARGET decnumber PROPERTY IMPORTED_LOCATION_DEBUG ../raimd/libdecnumber/build/Debug/decnumber.lib)
-	    set_property (TARGET decnumber PROPERTY IMPORTED_LOCATION_RELEASE ../raimd/libdecnumber/build/Release/decnumber.lib)
-	  endif ()
-	else ()
-	  add_compile_options ($(cflags))
-	  if (TARGET pcre2-8-static)
-	    include_directories ($${CMAKE_BINARY_DIR}/pcre2)
-	  endif ()
-	  if (NOT TARGET raikv)
-	    add_library (raikv STATIC IMPORTED)
-	    set_property (TARGET raikv PROPERTY IMPORTED_LOCATION ../raikv/build/libraikv.a)
-	  endif ()
-	  if (NOT TARGET raimd)
-	    add_library (raimd STATIC IMPORTED)
-	    set_property (TARGET raimd PROPERTY IMPORTED_LOCATION ../raimd/build/libraimd.a)
-	  endif ()
-	  if (NOT TARGET decnumber)
-	    add_library (decnumber STATIC IMPORTED)
-	    set_property (TARGET decnumber PROPERTY IMPORTED_LOCATION ../raimd/libdecnumber/build/libdecnumber.a)
-	  endif ()
-	endif ()
-	add_library (sassrv STATIC $(libsassrv_cfile))
-	if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
-	  link_libraries (sassrv raikv raimd decnumber pcre2-8-static ws2_32)
-	else ()
-	  if (TARGET pcre2-8-static)
-	    link_libraries (sassrv raikv raimd decnumber pcre2-8-static -lcares -lpthread -lrt)
-	  else ()
-	    link_libraries (sassrv raikv raimd decnumber -lpcre2-8 -lcares -lpthread -lrt)
-	  endif ()
-	endif ()
-	add_definitions(-DSASSRV_VER=$(ver_build))
-	add_executable (rv_server $(rv_server_cfile))
-	add_executable (rv_client $(rv_client_cfile))
-	add_executable (rv_pub $(rv_pub_cfile))
-	add_executable (replayrv $(replayrv_cfile))
-	EOF
+all: $(all_libs) $(all_dlls) $(all_exes)
 
 .PHONY: dnf_depend
 dnf_depend:
