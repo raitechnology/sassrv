@@ -288,6 +288,11 @@ tibrv_status tibrvTransport_GetSendingWaitLimit( tibrvTransport tport, tibrv_u32
 tibrv_status tibrvTransport_SetBatchMode( tibrvTransport tport, tibrvTransportBatchMode mode );
 tibrv_status tibrvTransport_SetBatchSize( tibrvTransport tport, tibrv_u32 num_bytes );
 tibrv_status tibrvTransport_SetBatchInterval( tibrvTransport tport, tibrv_f64 secs );
+/* Dispatch-flush: when a queue dispatch thread publishes to a batching
+ * transport from inside a callback, the dispatch loop flushes that transport
+ * once at the end of the dispatch pass (recv burst -> send burst keeps its
+ * packing).  Batch size and the batch timer remain the backstops. */
+tibrv_status tibrvTransport_SetBatchDispatchFlush( tibrvTransport tport, tibrv_bool on );
 tibrv_status tibrvTransport_CreateLicensed( tibrvTransport * tport, const char * service,
                                             const char * network, const char * daemon, const char * );
 tibrv_status tibrvTransport_RequestReliability( tibrvTransport tport, tibrv_f64 reliability );

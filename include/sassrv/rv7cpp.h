@@ -41,9 +41,11 @@ struct Tibrv_API {
   int             pfd[ 2 ];
   api_Queue     * default_queue;
   api_Transport * process_tport;
+  pthread_t       ev_thr_id;       /* the E (epoll) thread, set at its start */
   void * operator new( size_t, void *ptr ) { return ptr; }
   Tibrv_API() : next_id( 11 ), free_id( 0 ), map_size( 0 ), idle_count( 0 ),
-               map( 0 ), ev_read( 0 ), default_queue( 0 ), process_tport( 0 ) {}
+               map( 0 ), ev_read( 0 ), default_queue( 0 ), process_tport( 0 ),
+               ev_thr_id( pthread_self() ) {}
   bool do_poll( uint64_t nsecs,  bool once ) noexcept;
 
   template<class T>
@@ -151,7 +153,8 @@ struct Tibrv_API {
   tibrv_status Flush( tibrvTransport tport ) noexcept;
   SendCtx * get_send_ctx( api_Transport * t ) noexcept;
   tibrv_status flush_send_ctx( SendCtx * c ) noexcept;
-  void drain_send_buf( api_Transport * t ) noexcept; /* inline publish on E */
+  tibrv_status flush_transport( api_Transport * t ) noexcept; /* any thread */
+  void drain_transport( api_Transport * t ) noexcept; /* inline publish on E */
   void free_send_buf( api_Transport * t ) noexcept;
   void free_transport_writers( api_Transport * t ) noexcept;
   tibrv_status SendRequest( tibrvTransport tport, tibrvMsg msg, tibrvMsg * reply, tibrv_f64 idle_timeout ) noexcept;
@@ -168,6 +171,12 @@ struct Tibrv_API {
   tibrv_status SetBatchMode( tibrvTransport tport, tibrvTransportBatchMode mode ) noexcept;
   tibrv_status SetBatchSize( tibrvTransport tport, tibrv_u32 num_bytes ) noexcept;
   tibrv_status SetBatchInterval( tibrvTransport tport, tibrv_f64 secs ) noexcept;
+  tibrv_status SetBatchDispatchFlush( tibrvTransport tport, bool on ) noexcept;
+  void note_dispatch_send( api_Transport * t ) noexcept; /* mark dirty in TLS */
+  void flush_dispatch_sends( void ) noexcept;             /* end of dispatch pass */
+  bool on_ev_thread( void ) const noexcept {
+    return pthread_equal( pthread_self(), this->ev_thr_id ) != 0;
+  }
   tibrv_status RequestReliability( tibrvTransport tport, tibrv_f64 reliability ) noexcept;
   tibrv_status CreateDispatcher( tibrvDispatcher * disp, tibrvDispatchable able, tibrv_f64 idle_timeout ) noexcept;
   tibrv_status JoinDispatcher( tibrvDispatcher disp ) noexcept;
@@ -411,7 +420,18 @@ struct SendCtx {
 };
 typedef DLinkList< SendCtx > SendCtxList;
 
-struct api_BatchTimer;
+/* Periodic flush timer for SINGLE_BATCH mode.  Lives on (and fires on) the E
+ * thread, so its callback drains the shared buffer with a direct inline
+ * t->client.publish() loop -- no EvPipe hand-off.  This is the latency backstop
+ * (tx-usecs analog) for low-rate publishers that never reach batch_size. */
+struct api_BatchTimer : public EvTimerCallback {
+  api_Transport * t;
+
+  api_BatchTimer( api_Transport * tp ) : t( tp ) {}
+  virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
+  virtual ~api_BatchTimer() {}
+};
+
 
 struct api_Transport : public EvConnectionNotify, public RvClientCB,
                        public kv::EvSocket {
@@ -430,18 +450,18 @@ struct api_Transport : public EvConnectionNotify, public RvClientCB,
   char          * descr;
   pthread_mutex_t mutex;
   pthread_cond_t  cond;
+  pthread_mutex_t batch_mutex;
   SendCtxList     writers;         /* registered per-thread send accumulators */
-  pthread_mutex_t writers_mutex;
   /* SINGLE_BATCH mode: one shared, double-buffered send accumulator drained by
    * an inline publish on the E thread (owner threshold-flush via OP_TPORT_DRAIN,
    * latency backstop via the batch timer).  sb_fill is the owners' append
    * target; sb_spare is the idle (empty) buffer the E-thread swaps in. */
   SendCtx       * sb_fill, * sb_spare;
-  pthread_mutex_t sb_lock;          /* guards owner append vs E-thread swap */
   tibrv_f64       batch_ival;       /* batch-timer period in seconds (0=off) */
-  api_BatchTimer* sb_timer;         /* EvTimerCallback fired on E */
+  api_BatchTimer  sb_timer;         /* EvTimerCallback fired on E */
   bool            sb_pending,       /* an OP_TPORT_DRAIN is already in flight */
                   sb_timer_active,
+                  dispatch_flush,   /* flush at end of a dispatch pass that sent */
                   reconnect_active,
                   is_destroyed;
 
@@ -462,12 +482,11 @@ struct api_Transport : public EvConnectionNotify, public RvClientCB,
     inbox_count( 1 ), wait_limit( 0 ), batch_size( 0 ),
     batch_mode( TIBRV_TRANSPORT_DEFAULT_BATCH ), descr( 0 ),
     sb_fill( 0 ), sb_spare( 0 ), batch_ival( 0 ),
-    sb_timer( 0 ), sb_pending( false ), sb_timer_active( false ),
-    reconnect_active( false ), is_destroyed( false ) {
+    sb_timer( this ), sb_pending( false ), sb_timer_active( false ),
+    dispatch_flush( false ), reconnect_active( false ), is_destroyed( false ) {
     pthread_mutex_init( &this->mutex, NULL );
     pthread_cond_init( &this->cond, NULL );
-    pthread_mutex_init( &this->writers_mutex, NULL );
-    pthread_mutex_init( &this->sb_lock, NULL );
+    pthread_mutex_init( &this->batch_mutex, NULL );
   }
   virtual void on_connect( EvSocket &conn ) noexcept;
   virtual void on_shutdown( EvSocket &conn,  const char *err,
@@ -481,20 +500,6 @@ struct api_Transport : public EvConnectionNotify, public RvClientCB,
   virtual void read( void ) noexcept;
   virtual void process( void ) noexcept;
   virtual void release( void ) noexcept;
-};
-
-/* Periodic flush timer for SINGLE_BATCH mode.  Lives on (and fires on) the E
- * thread, so its callback drains the shared buffer with a direct inline
- * t->client.publish() loop -- no EvPipe hand-off.  This is the latency backstop
- * (tx-usecs analog) for low-rate publishers that never reach batch_size. */
-struct api_BatchTimer : public EvTimerCallback {
-  api_Transport * t;
-
-  void * operator new( size_t, void *ptr ) { return ptr; }
-  void operator delete( void *ptr ) { ::free( ptr ); }
-  api_BatchTimer( api_Transport * tp ) : t( tp ) {}
-  virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
-  virtual ~api_BatchTimer() {}
 };
 
 struct api_Timer : public EvTimerCallback {
