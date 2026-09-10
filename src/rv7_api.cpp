@@ -787,6 +787,8 @@ Tibrv_API::CreateTimer( tibrvEvent * event,  tibrvQueue queue,
   *event = TIBRV_INVALID_ID;
   api_Queue * q = this->get<api_Queue>( queue, TIBRV_QUEUE );
   if ( q == NULL ) return TIBRV_INVALID_QUEUE;
+  if ( ival < 0.0 || ival != ival )      /* negative or NaN; 0.0 is legal */
+    return TIBRV_INVALID_TIME_INTERVAL;
   api_Timer * t = this->make<api_Timer>( TIBRV_TIMER );
   t->queue = queue;
   t->cb    = cb;
@@ -980,6 +982,8 @@ Tibrv_API::GetTimerInterval( tibrvEvent event,  tibrv_f64 * ival ) noexcept
 tibrv_status
 Tibrv_API::ResetTimerInterval( tibrvEvent event,  tibrv_f64 ival ) noexcept
 {
+  if ( ival < 0.0 || ival != ival )      /* negative or NaN; 0.0 is legal */
+    return TIBRV_INVALID_TIME_INTERVAL;
   api_Timer * t = this->get<api_Timer>( event, TIBRV_TIMER );
   if ( t != NULL ) {
     t->ival = ival;
