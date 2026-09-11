@@ -224,8 +224,16 @@ typedef DLinkList< TibrvQueueEvent > TibrvQueueEventList;
 struct MsgTether : public DLinkList< api_Msg > {
   pthread_mutex_t mutex;
   uint64_t serial;
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  void operator delete( void *ptr ) { ::free( ptr ); }
   MsgTether() : serial( 0 ) {
     pthread_mutex_init( &this->mutex, NULL );
+  }
+  /* one MsgTether per api_Msg: on winpthreads a mutex is a heap block that
+   * only pthread_mutex_destroy() frees (24 B per message leaked otherwise;
+   * glibc mutexes are inline so Linux never showed it) */
+  ~MsgTether() {
+    pthread_mutex_destroy( &this->mutex );
   }
 };
 
@@ -315,15 +323,15 @@ struct api_Dispatcher {
 struct api_Listener {
   Tibrv_API              & api;
   api_Listener           * next, * back;
-  char                   * subject;
+  char                   * subject; /* subjecct subscribed */
   const void             * cl;
-  uint16_t                 len, wild;
-  uint32_t                 hash;
+  uint16_t                 len, wild; /* len of subject, wild prefix if any */
+  uint32_t                 hash; /* hash of subject */
   tibrvEventCallback       cb;
   tibrvEventVectorCallback vcb;
-  tibrvEvent               id;
-  tibrvQueue               queue;
-  tibrvTransport           tport;
+  tibrvEvent               id;    /* listener id */
+  tibrvQueue               queue; /* the queue that messages go to */
+  tibrvTransport           tport; /* transport that has subscription */
   
   void * operator new( size_t, void *ptr ) { return ptr; }
   void operator delete( void *ptr ) { ::free( ptr ); }
@@ -396,38 +404,34 @@ struct api_Rpc {
 
 typedef DLinkList< api_Rpc > TibrvRpcList;
 
-/* Per-thread, per-transport send accumulator for TIMER_BATCH mode.  The owning
- * thread appends marshaled copies of each Send() here; the batch is shipped in
- * one EvPipe round-trip (amortizing the synchronous send hand-off).  Each ctx
- * is cached in thread-local storage for the owner's fast path AND linked into
- * its transport's writers registry, so a foreign flusher (batch timer, explicit
- * Flush, teardown) can reach it even though TLS is private to the owner. */
+/* Batch buffer */
 struct SendCtx {
   SendCtx       * next, * back;   /* api_Transport::writers registry links */
   SendCtx       * tls_next;       /* this thread's chain of ctxs */
   api_Transport * t;              /* owning transport */
-  uint64_t        gen;            /* bumped on recycle (future leak-bound) */
   pthread_mutex_t lock;           /* guards append vs foreign flush */
-  EvPublish     * pubs;           /* contiguous batch (high-water, realloc) */
-  uint32_t        cnt, cap, bytes;/* entries used / allocated / pending bytes */
-  MDMsgMem        byte_mem;       /* stable copies of subject/reply/data */
+  EvPublish     * pubs;           /* array of sends pending */
+  uint32_t        cnt, cap, bytes;/* pubs[] used / allocated / pending bytes */
+  MDMsgMem        byte_mem;       /* msg data, cleared when flushed */
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   SendCtx( api_Transport * tp ) : next( 0 ), back( 0 ), tls_next( 0 ), t( tp ),
-    gen( 0 ), pubs( 0 ), cnt( 0 ), cap( 0 ), bytes( 0 ) {
+    pubs( 0 ), cnt( 0 ), cap( 0 ), bytes( 0 ) {
     pthread_mutex_init( &this->lock, NULL );
+  }
+  ~SendCtx() {
+    pthread_mutex_destroy( &this->lock );
   }
 };
 typedef DLinkList< SendCtx > SendCtxList;
 
-/* Periodic flush timer for SINGLE_BATCH mode.  Lives on (and fires on) the E
- * thread, so its callback drains the shared buffer with a direct inline
- * t->client.publish() loop -- no EvPipe hand-off.  This is the latency backstop
- * (tx-usecs analog) for low-rate publishers that never reach batch_size. */
+/* Timer for flushing batched buffers */
 struct api_BatchTimer : public EvTimerCallback {
   api_Transport * t;
 
   api_BatchTimer( api_Transport * tp ) : t( tp ) {}
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  void operator delete( void * ) {}
   virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
   virtual ~api_BatchTimer() {}
 };
@@ -435,28 +439,25 @@ struct api_BatchTimer : public EvTimerCallback {
 
 struct api_Transport : public EvConnectionNotify, public RvClientCB,
                        public kv::EvSocket {
-  Tibrv_API     & api;
-  EvRvClient      client;
+  Tibrv_API     & api;              /* only one of these usually */
+  EvRvClient      client;           /* the tport client connection data */
   const PeerId  * me;
-  api_Listener_ht ht;
-  TibrvRpcList    rpc_list;
-  UIntHashTab   * wild_ht;
-  tibrvTransport  id;
-  tibrv_u32       inbox_count,
+  api_Listener_ht ht;               /* subscription matches */
+  TibrvRpcList    rpc_list;         /* rpc send reply pending list */
+  UIntHashTab   * wild_ht;          /* wild subscription matches */
+  tibrvTransport  id;               /* tport id */
+  tibrv_u32       inbox_count,      /* next available inbox number */
                   wait_limit,
-                  batch_size;
+                  batch_size;       /* buf batch grows and flushes at this size */
   tibrvTransportBatchMode
-                  batch_mode;
+                  batch_mode;       /* none, single buf, or multiple one per thr */
   char          * descr;
-  pthread_mutex_t mutex;
-  pthread_cond_t  cond;
-  pthread_mutex_t batch_mutex;
-  SendCtxList     writers;         /* registered per-thread send accumulators */
-  /* SINGLE_BATCH mode: one shared, double-buffered send accumulator drained by
-   * an inline publish on the E thread (owner threshold-flush via OP_TPORT_DRAIN,
-   * latency backstop via the batch timer).  sb_fill is the owners' append
-   * target; sb_spare is the idle (empty) buffer the E-thread swaps in. */
-  SendCtx       * sb_fill, * sb_spare;
+  pthread_mutex_t mutex;            /* locking transport */
+  pthread_cond_t  cond;             /* for signalling transport sends */
+  pthread_mutex_t batch_mutex;      /* mutex for batch buffers */
+  SendCtxList     writers;          /* registered per-thread send accumulators */
+  SendCtx       * sb_fill,          /* batch fill, single buffer (multille thr) */
+                * sb_spare;         /* single buffer exchange pipeline writes */
   tibrv_f64       batch_ival;       /* batch-timer period in seconds (0=off) */
   api_BatchTimer  sb_timer;         /* EvTimerCallback fired on E */
   bool            sb_pending,       /* an OP_TPORT_DRAIN is already in flight */
@@ -551,7 +552,7 @@ struct api_Msg {
   uint32_t        wr_refs,
                   rd_refs;
   bool            in_queue;
-  MsgTether       tether;
+  MsgTether     * submsg_tether; /* submsgs owned by this msg (tibrvMsg_GetMsg)*/
   uint64_t        serial,
                   id_used;
   TibrvMsgRefList refs;
@@ -562,10 +563,10 @@ struct api_Msg {
     next( 0 ), back( 0 ), owner( 0 ), subject( 0 ), reply( 0 ),
     subject_len( 0 ), reply_len( 0 ), event( ev ),
     rvmsg( 0 ), rd( 0 ), wr( this->mem, NULL, 0 ), cl( 0 ), wr_refs( 0 ),
-    rd_refs( 0 ), in_queue( false ), serial( 0 ), id_used( 0 ) {}
+    rd_refs( 0 ), in_queue( false ), submsg_tether( 0 ), serial( 0 ),
+    id_used( 0 ) {}
   ~api_Msg() noexcept;
   void release( void ) noexcept;
-
   static api_Msg * make( EvPublish &pub, RvMsg *rvmsg, MsgTether *tether,
                          tibrvEvent ev, const void *cl ) noexcept;
   api_Msg * make_submsg( void ) noexcept;

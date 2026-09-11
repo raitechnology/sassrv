@@ -195,13 +195,16 @@ api_Msg::make( EvPublish &pub,  RvMsg *rvmsg,  MsgTether *tether,
       api_Msg * x = tether->hd;
       if ( ! x->in_queue ) {
         tether->pop_hd();
+        x->~api_Msg(); /* recycled: run the dtor before constructing over it
+                        * (frees a lazily created submsg_tether, whose mutex
+                        * is a heap block on winpthreads) */
         p = x;
       }
     }
   }
   if ( p == NULL )
     p = ::malloc( sizeof( api_Msg ) );
-  api_Msg * m   = new ( p ) api_Msg( ev );
+  api_Msg * m = new ( p ) api_Msg( ev );
   size_t    len = rvmsg->msg_end - rvmsg->msg_off;
   uint8_t * ptr = &((uint8_t *) rvmsg->msg_buf)[ rvmsg->msg_off ];
   void    * buf = m->mem.memalloc( len, ptr );
@@ -251,34 +254,50 @@ api_Msg::get_as_bytes( tibrv_u32 *size ) noexcept
 void
 api_Msg::release( void ) noexcept
 {
-  pthread_mutex_lock( &this->tether.mutex );
-  while ( ! this->tether.is_empty() ) {
-    api_Msg *m = this->tether.pop_tl();
-    m->owner = NULL;
-    delete m;
+  MsgTether * t = this->submsg_tether;
+  if ( t != NULL ) {
+    pthread_mutex_lock( &t->mutex );
+    while ( ! t->is_empty() ) {
+      api_Msg *m = t->pop_tl();
+      m->owner = NULL;
+      delete m;
+    }
   }
   while ( ! this->refs.is_empty() ) {
     TibrvMsgRef * ref = this->refs.pop_hd();
     delete ref;
   }
-  pthread_mutex_unlock( &this->tether.mutex );
+  if ( t != NULL )
+    pthread_mutex_unlock( &t->mutex );
 }
 
+/* Lazy: the first sub-msg creates the tether (mutex + serial counter).  A
+ * tibrvMsg is not thread-safe for concurrent modification, so the NULL check
+ * is not raced by design. */
 api_Msg *
 api_Msg::make_submsg( void ) noexcept
 {
+  MsgTether * t = this->submsg_tether;
+  if ( t == NULL ) {
+    t = new ( ::malloc( sizeof( MsgTether ) ) ) MsgTether();
+    this->submsg_tether = t;
+  }
   api_Msg *m = new ( ::malloc( sizeof( api_Msg ) ) ) api_Msg( 0 );
-  pthread_mutex_lock( &this->tether.mutex );
-  m->owner = &this->tether;
-  this->tether.push_tl( m );
-  m->serial = this->tether.serial++;
-  pthread_mutex_unlock( &this->tether.mutex );
+  pthread_mutex_lock( &t->mutex );
+  m->owner = t;
+  t->push_tl( m );
+  m->serial = t->serial++;
+  pthread_mutex_unlock( &t->mutex );
   return m;
 }
 
 api_Msg::~api_Msg() noexcept
 {
   this->release();
+  if ( this->submsg_tether != NULL ) {
+    delete this->submsg_tether;   /* ~MsgTether destroys the mutex */
+    this->submsg_tether = NULL;
+  }
 }
 
 bool
@@ -1425,9 +1444,7 @@ EvPipe::close_tport( EvPipeRec &rec ) noexcept
     rec.t->client.idle_push( EV_CLOSE );
 }
 
-/* Head of the calling thread's chain of send accumulators (one per transport
- * it has published on).  Only ever read/written by the owning thread, so no
- * lock; the authoritative, foreign-reachable list is api_Transport::writers. */
+/* head of the calling thread's chain of send accumulators (one per tport) */
 static thread_local SendCtx * tls_send_head = NULL;
 
 void
@@ -1515,15 +1532,9 @@ send_ctx_append( SendCtx * c,  api_Transport * t,  tibrvMsg * vec,
   return ( t->batch_size != 0 && c->bytes >= t->batch_size );
 }
 
-/* Ship this writer's accumulated batch: one synchronous EvPipe round-trip that
- * drains the whole transport on E.  Blocking here once per batch is the
- * backpressure point. */
 tibrv_status
 Tibrv_API::flush_send_ctx( SendCtx * c ) noexcept
 {
-  /* Drain on E (drain_transport takes c->lock itself).  Do NOT hold c->lock
-   * across the exec(): E may be inside drain_transport() waiting for this
-   * very lock on behalf of another thread's Flush -> deadlock. */
   return this->flush_transport( c->t );
 }
 
@@ -1548,8 +1559,7 @@ EvPipe::tport_drain( EvPipeRec &rec ) noexcept
   rec.t->api.drain_transport( rec.t );
 }
 
-/* Flush every registered writer of a transport (foreign flush path: explicit
- * Flush, and reused by teardown). */
+/* flush every registered writer of a transport */
 tibrv_status
 Tibrv_API::Flush( tibrvTransport tport ) noexcept
 {
@@ -1562,9 +1572,6 @@ Tibrv_API::Flush( tibrvTransport tport ) noexcept
 void
 Tibrv_API::free_transport_writers( api_Transport * t ) noexcept
 {
-  /* one drain on E flushes every writer (and the shared buffer); do it before
-   * taking batch_mutex -- E needs that lock inside drain_transport(), so an
-   * exec() while holding it would deadlock */
   this->flush_transport( t );
   pthread_mutex_lock( &t->batch_mutex );
   while ( ! t->writers.is_empty() ) {
@@ -1626,8 +1633,6 @@ Tibrv_API::drain_transport( api_Transport * t ) noexcept
   full->byte_mem.reuse();
 }
 
-/* Teardown for the shared buffer: stop the timer + final drain (both on E),
- * then free the two buffers and the timer object. */
 void
 Tibrv_API::free_send_buf( api_Transport * t ) noexcept
 {
@@ -1796,8 +1801,6 @@ EvPipe::stop_batch_timer( EvPipeRec &rec ) noexcept
   rec.t->sb_timer_active = false;
 }
 
-/* Batch-timer expiry, fired on E: latency backstop for sub-batch_size traffic.
- * Rearms while the transport stays in SINGLE_BATCH mode. */
 bool
 api_BatchTimer::timer_cb( uint64_t,  uint64_t ) noexcept
 {
