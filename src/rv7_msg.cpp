@@ -745,7 +745,7 @@ tibrvMsg_MarkReferences( tibrvMsg msg )
   TibrvMsgRef * ref = new ( ::malloc( sizeof( TibrvMsgRef ) ) ) TibrvMsgRef();
   ref->blk_ptr = m->mem.blk_ptr;
   ref->mem_off = m->mem.mem_off;
-  ref->serial  = m->tether.serial;
+  ref->serial  = ( m->submsg_tether != NULL ? m->submsg_tether->serial : 0 );
   m->refs.push_hd( ref );
   return TIBRV_OK;
 }
@@ -753,22 +753,27 @@ tibrvMsg_MarkReferences( tibrvMsg msg )
 tibrv_status
 tibrvMsg_ClearReferences( tibrvMsg msg )
 {
-  api_Msg * m = (api_Msg *) msg, * sub, * next;
-  pthread_mutex_lock( &m->tether.mutex );
+  api_Msg   * m = (api_Msg *) msg, * sub, * next;
+  MsgTether * t = m->submsg_tether;
+  if ( t != NULL )
+    pthread_mutex_lock( &t->mutex );
   if ( ! m->refs.is_empty() ) {
     TibrvMsgRef * ref = m->refs.pop_hd();
-    for ( sub = m->tether.hd; sub != NULL; sub = next ) {
-      next = sub->next;
-      if ( sub->serial > ref->serial ) {
-        m->tether.pop( sub );
-        sub->owner = NULL;
-        delete sub;
+    if ( t != NULL ) {
+      for ( sub = t->hd; sub != NULL; sub = next ) {
+        next = sub->next;
+        if ( sub->serial > ref->serial ) {
+          t->pop( sub );
+          sub->owner = NULL;
+          delete sub;
+        }
       }
     }
     m->mem.reset( ref->blk_ptr, ref->mem_off );
     delete ref;
   }
-  pthread_mutex_unlock( &m->tether.mutex );
+  if ( t != NULL )
+    pthread_mutex_unlock( &t->mutex );
   return TIBRV_OK;
 }
 
