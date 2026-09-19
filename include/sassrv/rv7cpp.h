@@ -1,6 +1,8 @@
 #ifndef __rai__sassrv__rv7cpp_h__
 #define __rai__sassrv__rv7cpp_h__
 
+#include <raikv/ev_api_queue.h>
+
 using namespace rai;
 using namespace md;
 using namespace kv;
@@ -19,105 +21,33 @@ typedef enum { TIBRV_NONE     = 0,
                TIBRV_FTMEMBER,
                TIBRV_FTMONITOR } ElemType;
 
-struct tibrv_Elem {
-  tibrvId  id;
-  ElemType type;
-  void   * ptr;
-};
+typedef ApiElem tibrv_Elem; /* { id, type, ptr } registry entry */
 
 struct EvPipe;
 struct api_Queue;
 struct api_Transport;
 struct SendCtx;
 
-struct Tibrv_API {
-  EvPoll          poll;
-  tibrvId         next_id, free_id, map_size;
-  int             idle_count;
-  tibrv_Elem    * map;
-  pthread_mutex_t map_mutex;
-  pthread_cond_t  cond;
-  EvPipe        * ev_read;
-  int             pfd[ 2 ];
+struct api_Msg;
+/* the tibrv 7 api: the queue / timer / dispatcher / registry / epoll-thread
+ * machinery is kv::ApiCore (raikv/ev_api_queue.h); this adds the rv
+ * transport, listeners, messages and the tibrv callback shapes */
+struct Tibrv_API : public ApiCore {
   api_Queue     * default_queue;
   api_Transport * process_tport;
-  pthread_t       ev_thr_id;       /* the E (epoll) thread, set at its start */
   void * operator new( size_t, void *ptr ) { return ptr; }
-  Tibrv_API() : next_id( 11 ), free_id( 0 ), map_size( 0 ), idle_count( 0 ),
-               map( 0 ), ev_read( 0 ), default_queue( 0 ), process_tport( 0 ),
-               ev_thr_id( pthread_self() ) {}
-  bool do_poll( uint64_t nsecs,  bool once ) noexcept;
+  Tibrv_API() : ApiCore( 11 ), default_queue( 0 ), process_tport( 0 ) {}
 
   template<class T>
   T *make( ElemType type,  size_t add = 0,  tibrvId id = 0 ) {
-    void * mem;
-    if ( type == TIBRV_TRANSPORT )
-      mem = aligned_malloc( sizeof( T ) + add );
-    else
-      mem = ::malloc( sizeof( T ) + add );
-
-    pthread_mutex_lock( &this->map_mutex );
-    if ( id == 0 ) {
-      if ( this->free_id != 0 ) {
-        for (;;) {
-          id = this->free_id++;
-          if ( id >= this->next_id ) {
-            id = this->next_id++;
-            this->free_id = 0;
-            break;
-          }
-          if ( this->map[ id ].ptr == NULL )
-            break;
-        }
-      }
-      else {
-        id = this->next_id++;
-      }
-    }
-    T *p = new ( mem ) T( *this, id );
-    if ( id >= this->map_size ) {
-      this->map = (tibrv_Elem *)
-        ::realloc( this->map, ( this->map_size + 16 ) * sizeof( tibrv_Elem ) );
-      ::memset( &this->map[ this->map_size ], 0, 16 * sizeof( tibrv_Elem ) );
-      this->map_size += 16;
-    }
-    this->map[ id ].id   = id;
-    this->map[ id ].type = type;
-    this->map[ id ].ptr  = p;
-    pthread_mutex_unlock( &this->map_mutex );
-    return p;
+    return this->ApiCore::make<T, Tibrv_API>( *this, (uint32_t) type, add, id,
+                                              type == TIBRV_TRANSPORT );
   }
-
-  template<class T>
-  T *get( tibrvId id, ElemType type ) {
-    pthread_mutex_lock( &this->map_mutex );
-    bool b = ( id < this->map_size && id == this->map[ id ].id &&
-               type == this->map[ id ].type );
-    T  * p = (T *) ( b ? this->map[ id ].ptr : NULL );
-    pthread_mutex_unlock( &this->map_mutex );
-    return p;
-  }
-
-  template<class T>
-  T *rem( tibrvId id, ElemType type ) {
-    pthread_mutex_lock( &this->map_mutex );
-    bool b = ( id < this->map_size && id == this->map[ id ].id &&
-               type == this->map[ id ].type );
-    T  * p = NULL;
-    if ( b ) {
-      p = (T *) this->map[ id ].ptr;
-      this->map[ id ].ptr = NULL;
-    }
-    if ( this->free_id == 0 || id < this->free_id )
-      this->free_id = id;
-    pthread_mutex_unlock( &this->map_mutex );
-    return p;
-  }
-
-  void set_string( char *&str,  const char *value ) {
-    if ( str != NULL ) { ::free( str ); str = NULL; }
-    if ( value != NULL ) { str = ::strdup( value ); }
-  }
+  /* ApiCore protocol hooks */
+  virtual void dispatch_event( ApiQueueEvent &ev ) noexcept;
+  virtual void dispatch_end( void ) noexcept;
+  static void release_msg( api_Msg *m ) noexcept;
+  static void release_vec( api_Msg **vec,  tibrv_u32 count ) noexcept;
 
   tibrv_status Open( void ) noexcept;
   tibrv_status CreateListener( tibrvEvent * event,  tibrvQueue queue, tibrvTransport tport,  tibrvEventCallback cb, tibrvEventVectorCallback vcb,  const char * subj, const void * closure ) noexcept;
@@ -174,9 +104,6 @@ struct Tibrv_API {
   tibrv_status SetBatchDispatchFlush( tibrvTransport tport, bool on ) noexcept;
   void note_dispatch_send( api_Transport * t ) noexcept; /* mark dirty in TLS */
   void flush_dispatch_sends( void ) noexcept;             /* end of dispatch pass */
-  bool on_ev_thread( void ) const noexcept {
-    return pthread_equal( pthread_self(), this->ev_thr_id ) != 0;
-  }
   tibrv_status RequestReliability( tibrvTransport tport, tibrv_f64 reliability ) noexcept;
   tibrv_status CreateDispatcher( tibrvDispatcher * disp, tibrvDispatchable able, tibrv_f64 idle_timeout ) noexcept;
   tibrv_status JoinDispatcher( tibrvDispatcher disp ) noexcept;
@@ -198,28 +125,9 @@ struct Tibrv_API {
   tibrv_status GetFtMonitorGroupName( tibrvftMonitor m, const char ** name ) noexcept;
 };
 
-struct api_Msg;
-struct TibrvQueueEvent {
-  Tibrv_API              & api;
-  TibrvQueueEvent        * next, * back;
-  api_Msg                * msg, ** vec;
-  tibrvEventCallback       cb;
-  tibrvEventVectorCallback vcb;
-  const void             * cl;
-  tibrvEvent               id;
-  tibrv_u32                cnt;
+typedef ApiQueueEvent     TibrvQueueEvent;
+typedef ApiQueueEventList TibrvQueueEventList;
 
-  void * operator new( size_t, void *ptr ) { return ptr; }
-  TibrvQueueEvent( Tibrv_API &a,  tibrvId i,  tibrvEventCallback e,
-                   tibrvEventVectorCallback v, const void *c,  api_Msg *m )
-    : api( a ), next( 0 ), back( 0 ), msg( m ), vec( 0 ), cb( e ), vcb( v ),
-      cl( c ), id( i ), cnt( 1 ) {}
-  void dispatch( void ) noexcept;
-  void release( api_Msg *m ) noexcept;
-  void release( api_Msg **vec,  tibrv_u32 count ) noexcept;
-};
-
-typedef DLinkList< TibrvQueueEvent > TibrvQueueEventList;
 
 struct MsgTether : public DLinkList< api_Msg > {
   pthread_mutex_t mutex;
@@ -237,88 +145,18 @@ struct MsgTether : public DLinkList< api_Msg > {
   }
 };
 
-struct api_QueueGroup;
-struct api_Queue {
-  Tibrv_API           & api;
-  api_Queue           * next, * back;
-  tibrvQueue            id;
-  tibrv_u32             priority,
-                        count;
-  tibrvQueueHook        hook;
-  void                * hook_cl;
-  char                * name;
-  tibrvQueueLimitPolicy policy;
-  tibrv_u32             max_ev,
-                        discard;
-  pthread_mutex_t       mutex;
-  pthread_cond_t        cond;
-  TibrvQueueEventList   list;
-  MsgTether             tether;
-  MDMsgMem              mem_x[ 2 ];
-  uint8_t               mptr;
-  bool                  done;
-  tibrvQueueOnComplete  cb;
-  const void          * cl;
-  api_QueueGroup      * grp;
-
+/* a tibrv queue is the generic queue plus the message tether that owns the
+ * api_Msg objects queued on it */
+struct api_Queue : public ApiQueue {
+  MsgTether tether;
   void * operator new( size_t, void *ptr ) { return ptr; }
   void operator delete( void *ptr ) { ::free( ptr ); }
-  api_Queue( Tibrv_API &a,  tibrvId i ) : api( a ), next( 0 ), back( 0 ),
-      id( i ), priority( 0 ), count( 0 ), hook( 0 ), hook_cl( 0 ), name( 0 ),
-      policy( TIBRVQUEUE_DISCARD_NONE ), max_ev( 0 ), discard( 0 ), mptr( 0 ),
-      done( false ), cb( 0 ), cl( 0 ), grp( 0 ) {
-    pthread_mutex_init( &this->mutex, NULL );
-    pthread_cond_init( &this->cond, NULL );
-  }
-  bool push( tibrvId id,  tibrvEventCallback cb,  tibrvEventVectorCallback vcb,
-             const void *cl,  api_Msg *msg ) noexcept;
-  tibrv_status finish_queue( void ) noexcept;
+  api_Queue( Tibrv_API &a,  tibrvId i ) : ApiQueue( a, i ) {}
 };
-
-typedef DLinkList< api_Queue > TibrvQueueList;
-
-struct api_QueueGroup {
-  Tibrv_API     & api;
-  TibrvQueueList  list;
-  tibrvQueueGroup id;
-  pthread_mutex_t mutex;
-  pthread_cond_t  cond;
-  tibrv_u32       count;
-  bool            update,
-                  done;
-  void * operator new( size_t, void *ptr ) { return ptr; }
-  void operator delete( void *ptr ) { ::free( ptr ); }
-  api_QueueGroup( Tibrv_API &a, tibrvId i ) : api( a ), id( i ), count( 0 ),
-      update( false ), done( false ) {
-    pthread_mutex_init( &this->mutex, NULL );
-    pthread_cond_init( &this->cond, NULL );
-  }
-};
-
-struct api_Dispatcher {
-  Tibrv_API     & api;
-  tibrvDispatcher id;
-  tibrvQueue      queue;
-  tibrv_f64       idle_timeout;
-  char          * name;
-  bool            quit,
-                  done,
-                  is_queue,
-                  is_queue_group;
-  pthread_mutex_t mutex;
-  pthread_cond_t  cond;
-  pthread_t       thr_id;
-
-  void * operator new( size_t, void *ptr ) { return ptr; }
-  void operator delete( void *ptr ) { ::free( ptr ); }
-  api_Dispatcher( Tibrv_API &a,  tibrvId i ) : api( a ), id( i ),
-      queue( 0 ), idle_timeout( 0 ), name( 0 ),
-      quit( false ), done( false ), is_queue( false ), is_queue_group( false ),
-      thr_id( 0 ) {
-    pthread_mutex_init( &this->mutex, NULL );
-    pthread_cond_init( &this->cond, NULL );
-  }
-};
+typedef ApiQueueList   TibrvQueueList;
+typedef ApiQueueGroup  api_QueueGroup;
+typedef ApiDispatcher  api_Dispatcher;
+typedef ApiTimer       api_Timer;
 
 struct api_Listener {
   Tibrv_API              & api;
@@ -503,23 +341,6 @@ struct api_Transport : public EvConnectionNotify, public RvClientCB,
   virtual void release( void ) noexcept;
 };
 
-struct api_Timer : public EvTimerCallback {
-  Tibrv_API        & api;
-  tibrvEvent         id;
-  tibrvQueue         queue;
-  tibrvEventCallback cb;
-  const void       * cl;
-  tibrv_f64          ival;
-  bool               in_queue;
-
-  void * operator new( size_t, void *ptr ) { return ptr; }
-  void operator delete( void *ptr ) { ::free( ptr ); }
-  api_Timer( Tibrv_API &a,  tibrvId i ) : api( a ), id( i ), queue( 0 ),
-      cb( 0 ), cl( 0 ), ival( 0 ), in_queue( false ) {}
-  virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
-  virtual ~api_Timer() {}
-};
-
 struct TibrvMsgRef {
   TibrvMsgRef        * next,
                      * back;
@@ -587,22 +408,15 @@ struct api_Msg {
   }
   void *get_as_bytes( tibrv_u32 *size ) noexcept;
 };
+/* the rv protocol's epoll-thread operations; the pipe itself, the timer ops
+ * and the wait/complete handshake are kv::ApiPipe / kv::ApiOp */
 struct EvPipeRec;
-struct EvPipe : public EvConnection {
-  int write_fd;
-
+struct EvPipe : public ApiPipe {
   void * operator new( size_t, void *ptr ) { return ptr; }
-  EvPipe( EvPoll &poll,  int wfd ) :
-    EvConnection( poll, poll.register_type( "tibrv_api" ) ), write_fd( wfd ) {}
-  bool start( int rfd,  const char *name ) noexcept;
-  virtual void process( void ) noexcept final;
-  virtual void release( void ) noexcept final {}
+  EvPipe( EvPoll &poll,  int wfd ) : ApiPipe( poll, wfd, "tibrv_api" ) {}
 
   void subscribe( EvPipeRec &rec ) noexcept;
   void unsubscribe( EvPipeRec &rec ) noexcept;
-  void create_timer( EvPipeRec &rec ) noexcept;
-  void destroy_timer( EvPipeRec &rec ) noexcept;
-  void reset_timer( EvPipeRec &rec ) noexcept;
   void create_tport( EvPipeRec &rec ) noexcept;
   void close_tport( EvPipeRec &rec ) noexcept;
   void tport_send( EvPipeRec &rec ) noexcept;
@@ -610,15 +424,10 @@ struct EvPipe : public EvConnection {
   void tport_drain( EvPipeRec &rec ) noexcept;
   void start_batch_timer( EvPipeRec &rec ) noexcept;
   void stop_batch_timer( EvPipeRec &rec ) noexcept;
-
-  void exec( EvPipeRec &rec ) noexcept;
 };
 
 #define OP_SUBSCRIBE        &EvPipe::subscribe
 #define OP_UNSUBSCRIBE      &EvPipe::unsubscribe
-#define OP_CREATE_TIMER     &EvPipe::create_timer
-#define OP_DESTROY_TIMER    &EvPipe::destroy_timer
-#define OP_RESET_TIMER      &EvPipe::reset_timer
 #define OP_CREATE_TPORT     &EvPipe::create_tport
 #define OP_CLOSE_TPORT      &EvPipe::close_tport
 #define OP_TPORT_SEND       &EvPipe::tport_send
@@ -627,41 +436,30 @@ struct EvPipe : public EvConnection {
 #define OP_START_BATCH_TMR  &EvPipe::start_batch_timer
 #define OP_STOP_BATCH_TMR   &EvPipe::stop_batch_timer
 
-struct EvPipeRec {
+struct EvPipeRec : public ApiOp {
   void ( EvPipe::*func )( EvPipeRec &rec ) noexcept;
   api_Transport   * t;
   api_Listener    * l;
-  api_Timer       * timer;
-  pthread_mutex_t * mutex;
-  pthread_cond_t  * cond;
   EvPublish       * pub;
   tibrv_u32         cnt;
   EvRvClientParameters
                   * parm;
-  bool            * complete;
 
   EvPipeRec( void ( EvPipe::*f )( EvPipeRec &rec ),
              api_Transport   * transport,
              EvRvClientParameters * p,
              pthread_mutex_t * m,
              pthread_cond_t  * c )
-    : func( f ), t( transport ), l( 0 ), timer( 0 ),
-      mutex( m ), cond( c ), pub( 0 ), cnt( 0 ), parm( p ), complete( 0 ) {}
+    : ApiOp( m, c ), func( f ), t( transport ), l( 0 ), pub( 0 ), cnt( 0 ),
+      parm( p ) {}
 
   EvPipeRec( void ( EvPipe::*f )( EvPipeRec &rec ),
              api_Transport   * transport,
              api_Listener    * listener,
              pthread_mutex_t * m,
              pthread_cond_t  * c )
-    : func( f ), t( transport ), l( listener ), timer( 0 ),
-      mutex( m ), cond( c ), pub( 0 ), cnt( 0 ), parm( 0 ), complete( 0 ) {}
-
-  EvPipeRec( void ( EvPipe::*f )( EvPipeRec &rec ),
-             api_Timer       * tmr,
-             pthread_mutex_t * m,
-             pthread_cond_t  * c )
-    : func( f ), t( 0 ), l( 0 ), timer( tmr ),
-      mutex( m ), cond( c ), pub( 0 ), cnt( 0 ), parm( 0 ), complete( 0 ) {}
+    : ApiOp( m, c ), func( f ), t( transport ), l( listener ), pub( 0 ),
+      cnt( 0 ), parm( 0 ) {}
 
   EvPipeRec( void ( EvPipe::*f )( EvPipeRec &rec ),
              api_Transport   * transport,
@@ -669,12 +467,12 @@ struct EvPipeRec {
              tibrv_u32         count,
              pthread_mutex_t * m,
              pthread_cond_t  * c )
-    : func( f ), t( transport ), l( 0 ), timer( 0 ),
-      mutex( m ), cond( c ), pub( p ), cnt( count ), parm( 0 ), complete( 0 ) {}
+    : ApiOp( m, c ), func( f ), t( transport ), l( 0 ), pub( p ),
+      cnt( count ), parm( 0 ) {}
 
-  EvPipeRec() : func( NULL ), t( 0 ), l( 0 ), timer( 0 ),
-                mutex( 0 ), cond( 0 ), pub( 0 ), cnt( 0 ), parm( 0 ),
-                complete( 0 ) {}
+  virtual void run( ApiPipe &pipe ) noexcept {
+    ( static_cast<EvPipe &>( pipe ).*this->func )( *this );
+  }
 };
 
 }
