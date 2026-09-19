@@ -30,25 +30,22 @@ int debug_api;
 
 static inline timespec
 ts_timeout( double timeout, double default_timeout = 0 ) {
-  struct timespec ts;
-  if ( timeout < 0.0 )
-    timeout = default_timeout;
-  if ( timeout > 0.0 ) {
-    clock_gettime( CLOCK_REALTIME, &ts );
-    double frac, i;
-    frac = modf( timeout, &i );
-    ts.tv_sec  += i;
-    ts.tv_nsec += frac * 1000000000.0;
-    if ( ts.tv_nsec >= 1000000000 ) {
-      ts.tv_sec++;
-      ts.tv_nsec -= 1000000000;
-    }
+  return api_ts_timeout( timeout, default_timeout );
+}
+
+static tibrv_status
+api_status( ApiStatus st )
+{
+  switch ( st ) {
+    case API_OK:                  return TIBRV_OK;
+    case API_TIMEOUT:             return TIBRV_TIMEOUT;
+    case API_INVALID_QUEUE:       return TIBRV_INVALID_QUEUE;
+    case API_INVALID_QUEUE_GROUP: return TIBRV_INVALID_QUEUE_GROUP;
+    case API_INVALID_EVENT:       return TIBRV_INVALID_EVENT;
+    case API_INVALID_DISPATCHER:  return TIBRV_INVALID_DISPATCHER;
+    case API_INVALID_ARG:         return TIBRV_INVALID_TIME_INTERVAL;
+    default:                      return TIBRV_INIT_FAILURE;
   }
-  else {
-    ts.tv_sec  = 0;
-    ts.tv_nsec = 0;
-  }
-  return ts;
 }
 
 void
@@ -332,19 +329,11 @@ api_Transport::on_rv_msg( EvPublish &pub ) noexcept
         continue;
       api_Queue * q = this->api.get<api_Queue>( l->queue, TIBRV_QUEUE );
       if ( q != NULL ) {
-        api_QueueGroup * g = NULL;
         pthread_mutex_lock( &q->mutex );
-        if ( q->push( l->id, l->cb, l->vcb, l->cl,
-                      api_Msg::make( pub, rvmsg, &q->tether, l->id, l->cl ) ) ) {
-          if ( (g = q->grp) == NULL )
-            pthread_cond_broadcast( &q->cond );
-        }
+        if ( q->push( l->id, (void *) l->cb, (void *) l->vcb, l->cl,
+                      api_Msg::make( pub, rvmsg, &q->tether, l->id, l->cl ) ) )
+          ApiCore::queue_signal( *q );
         pthread_mutex_unlock( &q->mutex );
-        if ( g != NULL ) {
-          pthread_mutex_lock( &g->mutex );
-          pthread_cond_broadcast( &g->cond );
-          pthread_mutex_unlock( &g->mutex );
-        }
       }
     }
   }
@@ -365,19 +354,11 @@ api_Transport::on_rv_msg( EvPublish &pub ) noexcept
           continue;
         api_Queue * q = this->api.get<api_Queue>( l->queue, TIBRV_QUEUE );
         if ( q != NULL ) {
-          api_QueueGroup * g = NULL;
           pthread_mutex_lock( &q->mutex );
-          if ( q->push( l->id, l->cb, l->vcb, l->cl,
-                   api_Msg::make( pub, rvmsg, &q->tether, l->id, l->cl ) ) ) {
-            if ( (g = q->grp) == NULL )
-              pthread_cond_broadcast( &q->cond );
-          }
+          if ( q->push( l->id, (void *) l->cb, (void *) l->vcb, l->cl,
+                   api_Msg::make( pub, rvmsg, &q->tether, l->id, l->cl ) ) )
+            ApiCore::queue_signal( *q );
           pthread_mutex_unlock( &q->mutex );
-          if ( g != NULL ) {
-            pthread_mutex_lock( &g->mutex );
-            pthread_cond_broadcast( &g->cond );
-            pthread_mutex_unlock( &g->mutex );
-          }
         }
       }
     }
@@ -387,181 +368,27 @@ api_Transport::on_rv_msg( EvPublish &pub ) noexcept
   return true;
 }
 
-bool
-api_Timer::timer_cb( uint64_t /*timer_id*/,  uint64_t /*event_id*/ ) noexcept
-{
-  if ( this->cb == NULL )
-    return false;
-  if ( this->in_queue )
-    return true;
-  api_Queue * q = this->api.get<api_Queue>( this->queue, TIBRV_QUEUE );
-  if ( q != NULL ) {
-    api_QueueGroup * g = NULL;
-    pthread_mutex_lock( &q->mutex );
-    this->in_queue = true;
-    if ( q->push( this->id, this->cb, NULL, this->cl, NULL ) ) {
-      if ( ( g = q->grp ) == NULL )
-        pthread_cond_broadcast( &q->cond );
-    }
-    pthread_mutex_unlock( &q->mutex );
-    if ( g != NULL ) {
-      pthread_mutex_lock( &g->mutex );
-      pthread_cond_broadcast( &g->cond );
-      pthread_mutex_unlock( &g->mutex );
-    }
-    return true;
-  }
-  return false;
-}
-
-/* Dispatch-flush bookkeeping, per thread.  depth > 0 while this thread is
- * inside a queue dispatch pass; ids[] are the batching transports that a
- * callback on this thread appended to without triggering a flush.  Ids, not
- * pointers: a transport destroyed mid-pass just fails the lookup. */
+/* Dispatch-flush bookkeeping, per thread: ids[] are the batching transports
+ * that a callback on this thread appended to without triggering a flush.
+ * Ids, not pointers: a transport destroyed mid-pass just fails the lookup.
+ * The pass nesting itself is tracked by ApiCore (dispatch_end() runs when
+ * the outermost pass on this thread finishes). */
 static const uint32_t MAX_DISPATCH_DIRTY = 16;
 struct DispatchTLS {
-  uint32_t depth, cnt;
+  uint32_t cnt;
   tibrvId  ids[ MAX_DISPATCH_DIRTY ];
 };
-static thread_local DispatchTLS tls_dispatch = { 0, 0, { 0 } };
+static thread_local DispatchTLS tls_dispatch = { 0, { 0 } };
 
-/* RAII: brackets one dispatch pass (TimedDispatchQueue & co).  Nested
- * dispatch from inside a callback flushes when the outermost pass ends. */
-struct DispatchScope {
-  Tibrv_API & api;
-  DispatchScope( Tibrv_API & a ) : api( a ) { tls_dispatch.depth++; }
-  ~DispatchScope() {
-    if ( --tls_dispatch.depth == 0 && tls_dispatch.cnt > 0 )
-      this->api.flush_dispatch_sends();
-  }
-};
-
-
-void *
-tibrv_epoll_thread( void *arg ) noexcept
+void
+Tibrv_API::dispatch_end( void ) noexcept
 {
-  Tibrv_API & api = *(Tibrv_API *) arg;
-  EvPoll &poll = api.poll;
-  api.ev_thr_id = pthread_self();
-  int idle_count = 0;
-  for (;;) {
-    int idle = poll.dispatch();
-    if ( idle == EvPoll::DISPATCH_IDLE )
-      idle_count++;
-    else
-      idle_count = 0; 
-#if defined( _MSC_VER ) || defined( __MINGW32__ )
-    if ( idle_count == 11 ) RV7_TRACE( "epoll thread: idle, sleeping waits\n" );
-#endif
-    poll.wait( idle_count > 10 ? 100 : 0 );
-  }
-  return NULL;
-}
-
-void *
-tibrv_disp_thread( void *arg ) noexcept
-{
-  api_Dispatcher & disp = *(api_Dispatcher *) arg;
-  tibrv_f64 t =
-    ( disp.idle_timeout == TIBRV_WAIT_FOREVER ? 10.0 : disp.idle_timeout );
-  while ( ! disp.quit ) {
-    if ( tibrvQueue_TimedDispatch( disp.queue, t ) == TIBRV_INVALID_QUEUE )
-      break;
-  }
-  pthread_mutex_lock( &disp.mutex );
-  disp.done = true;
-  pthread_cond_broadcast( &disp.cond );
-  pthread_mutex_unlock( &disp.mutex );
-  return NULL;
-}
-
-void *
-tibrv_disp_group_thread( void *arg ) noexcept
-{
-  api_Dispatcher & disp = *(api_Dispatcher *) arg;
-  tibrv_f64 t =
-    ( disp.idle_timeout == TIBRV_WAIT_FOREVER ? 10.0 : disp.idle_timeout );
-  while ( ! disp.quit ) {
-    if ( tibrvQueueGroup_TimedDispatch( disp.queue, t ) == TIBRV_INVALID_QUEUE )
-      break;
-  }
-  pthread_mutex_lock( &disp.mutex );
-  disp.done = true;
-  pthread_cond_broadcast( &disp.cond );
-  pthread_mutex_unlock( &disp.mutex );
-  return NULL;
+  if ( tls_dispatch.cnt > 0 )
+    this->flush_dispatch_sends();
 }
 
 void
-EvPipe::exec( EvPipeRec &rec ) noexcept
-{
-  uint8_t * p = (uint8_t *) &rec,
-          * e = &p[ sizeof( EvPipeRec ) ];
-  bool      complete = false;
-  rec.complete = &complete;
-  for (;;) {
-#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
-    int n = ::write( this->write_fd, p, e - p );
-#else
-    struct iovec iov = { p, (size_t) ( e - p ) };
-    int n = (int) ::wp_send( this->write_fd, &iov, 1 );
-    RV7_TRACE( "exec: wp_send fd=%d n=%d of %d (err %d)\n", this->write_fd, n, (int) ( e - p ), n < 0 ? (int) WSAGetLastError() : 0 );
-#endif
-    if ( n > 0 ) {
-      p += n;
-      if ( p == e )
-        break;
-    }
-#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
-    struct pollfd fds = { this->write_fd, POLLOUT, POLLOUT };
-    ::poll( &fds, 1, 10 );
-#else
-    ::Sleep( 1 ); /* loopback socketpair, rarely full */
-#endif
-  }
-#if defined( _MSC_VER ) || defined( __MINGW32__ )
-  RV7_TRACE( "exec: waiting for completion\n" );
-#endif
-  while ( ! *rec.complete )
-    pthread_cond_wait( rec.cond, rec.mutex );
-#if defined( _MSC_VER ) || defined( __MINGW32__ )
-  RV7_TRACE( "exec: complete\n" );
-#endif
-  rec.complete = NULL;
-}
-
-bool
-EvPipe::start( int fd,  const char *name ) noexcept
-{
-  this->PeerData::init_peer( this->poll.get_next_id(), fd, -1, NULL, name );
-  return this->poll.add_sock( this ) == 0;
-}
-
-void
-EvPipe::process( void ) noexcept
-{
-#if defined( _MSC_VER ) || defined( __MINGW32__ )
-  RV7_TRACE( "process: len=%u off=%u\n", (unsigned) this->len, (unsigned) this->off );
-#endif
-  for (;;) {
-    size_t buflen = this->len - this->off; 
-    if ( buflen < sizeof( EvPipeRec ) ) {
-      this->pop( EV_PROCESS );
-      return;
-    }
-    EvPipeRec rec;
-    ::memcpy( &rec, &this->recv[ this->off ], sizeof( EvPipeRec ) );
-    this->off += sizeof( EvPipeRec );
-    (this->*rec.func)( rec );
-    pthread_mutex_lock( rec.mutex );
-    *rec.complete = true;
-    pthread_cond_broadcast( rec.cond );
-    pthread_mutex_unlock( rec.mutex );
-  }
-}
-
-void
-TibrvQueueEvent::release( api_Msg *m ) noexcept
+Tibrv_API::release_msg( api_Msg *m ) noexcept
 {
   MsgTether *t = m->owner;
   if ( t != NULL ) {
@@ -577,7 +404,7 @@ TibrvQueueEvent::release( api_Msg *m ) noexcept
 }
 
 void
-TibrvQueueEvent::release( api_Msg **vec,  tibrv_u32 count ) noexcept
+Tibrv_API::release_vec( api_Msg **vec,  tibrv_u32 count ) noexcept
 {
   MsgTether *t = vec[ 0 ]->owner;
   tibrv_u32 i;
@@ -597,61 +424,30 @@ TibrvQueueEvent::release( api_Msg **vec,  tibrv_u32 count ) noexcept
 }
 
 void
-TibrvQueueEvent::dispatch( void ) noexcept
+Tibrv_API::dispatch_event( ApiQueueEvent &ev ) noexcept
 {
-  if ( this->cb != NULL ) {
-    this->cb( this->id, this->msg, (void *) this->cl );
-    if ( this->msg != NULL )
-      this->release( this->msg );
+  api_Msg  * msg = (api_Msg *) ev.msg;
+  api_Msg ** vec = (api_Msg **) ev.vec;
+  if ( ev.cb != NULL ) {
+    ( (tibrvEventCallback) ev.cb )( ev.id, msg, (void *) ev.cl );
+    if ( msg != NULL )
+      release_msg( msg );
     else {
-      api_Timer *t = this->api.get<api_Timer>( this->id, TIBRV_TIMER );
+      api_Timer *t = this->get<api_Timer>( ev.id, TIBRV_TIMER );
       if ( t != NULL )
         t->in_queue = false;
     }
   }
-  else if ( this->vcb != NULL ) {
-    if ( this->cnt == 1 ) {
-      this->vcb( (void **) &this->msg, 1 );
-      this->release( this->msg );
+  else if ( ev.vcb != NULL ) {
+    if ( ev.cnt == 1 ) {
+      ( (tibrvEventVectorCallback) ev.vcb )( (void **) &ev.msg, 1 );
+      release_msg( msg );
     }
     else {
-      this->vcb( (void **) this->vec, this->cnt );
-      this->release( this->vec, this->cnt );
+      ( (tibrvEventVectorCallback) ev.vcb )( (void **) vec, ev.cnt );
+      release_vec( vec, ev.cnt );
     }
   }
-}
-
-bool
-api_Queue::push( tibrvId id,  tibrvEventCallback cb,
-                 tibrvEventVectorCallback vcb,
-                 const void *cl,  api_Msg *msg ) noexcept
-{
-  if ( vcb != NULL && ! this->list.is_empty() && id == this->list.tl->id ) {
-    TibrvQueueEvent * e = this->list.tl;
-    if ( e->cnt == 1 ) {
-      size_t sz = 4 * sizeof( api_Msg * );
-      this->mem_x[ this->mptr ].alloc( sz, &e->vec );
-      e->vec[ 0 ] = e->msg;
-      e->vec[ 1 ] = msg;
-      e->cnt = 2;
-    }
-    else {
-      if ( ( e->cnt & 3 ) == 0 ) {
-        size_t osz = e->cnt * sizeof( api_Msg * ),
-               nsz = ( e->cnt + 4 ) * sizeof( api_Msg * );
-        this->mem_x[ this->mptr ].extend( osz, nsz, &e->vec );
-      }
-      e->vec[ e->cnt++ ] = msg;
-    }
-  }
-  else {
-    this->list.push_tl(
-      new ( this->mem_x[ this->mptr ].make( sizeof( TibrvQueueEvent ) ) )
-        TibrvQueueEvent( this->api, id, cb, vcb, cl, msg ) );
-    if ( this->count++ == 0 )
-      return true;
-  }
-  return false;
 }
 
 bool api_Transport::on_msg( kv::EvPublish &pub ) noexcept
@@ -667,22 +463,15 @@ void api_Transport::release( void ) noexcept {}
 tibrv_status
 Tibrv_API::Open( void ) noexcept
 {
-#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
-  if ( pipe2( this->pfd, O_CLOEXEC ) != 0 )
+  if ( this->open_pipe( 128 ) != API_OK )
     return TIBRV_INIT_FAILURE;
-  fcntl( this->pfd[ 0 ], F_SETFL, O_NONBLOCK | 
-         fcntl( this->pfd[ 0 ], F_GETFL ) );
-#else
-  if ( wp_socketpair( this->pfd ) != 0 ) /* pipe substitute, non-blocking */
-    return TIBRV_INIT_FAILURE;
+#if defined( _MSC_VER ) || defined( __MINGW32__ )
   RV7_TRACE( "open: socketpair fds %d %d\n", this->pfd[ 0 ], this->pfd[ 1 ] );
 #endif
-  pthread_mutex_init( &this->map_mutex, NULL );
-  pthread_cond_init( &this->cond, NULL );
-  this->poll.init( 128, false );
-  this->ev_read = new ( aligned_malloc( sizeof( EvPipe ) ) )
-                 EvPipe( this->poll, this->pfd[ 1 ] );
-  this->ev_read->start( this->pfd[ 0 ], "tibrv_api_pipe" );
+  EvPipe * pipe = new ( aligned_malloc( sizeof( EvPipe ) ) )
+                  EvPipe( this->poll, this->pfd[ 1 ] );
+  pipe->start( this->pfd[ 0 ], "tibrv_api_pipe" );
+  this->ev_read = pipe;
   this->default_queue =
     this->make<api_Queue>( TIBRV_QUEUE, 0, TIBRV_DEFAULT_QUEUE );
   api_Transport * t =
@@ -711,14 +500,7 @@ Tibrv_API::Open( void ) noexcept
   NotifyPattern npat( cvt, ibx, len, NULL, 0, h, false, 'A', *t );
   sub_route.add_pat( npat );
 
-  pthread_t id;
-  pthread_attr_t attr;
-  pthread_attr_init( &attr );
-  pthread_attr_setdetachstate( &attr, 1 );
-  pthread_create( &id, &attr, tibrv_epoll_thread, this );
-#if defined( _MSC_VER ) || defined( __MINGW32__ )
-  RV7_TRACE( "open: epoll thread created, null fd %d\n", fd );
-#endif
+  this->start_ev_thread();
   return TIBRV_OK;
 }
 
@@ -803,32 +585,10 @@ Tibrv_API::CreateTimer( tibrvEvent * event,  tibrvQueue queue,
                         tibrvEventCallback cb,  tibrv_f64 ival,
                         const void * closure ) noexcept
 {
-  *event = TIBRV_INVALID_ID;
-  api_Queue * q = this->get<api_Queue>( queue, TIBRV_QUEUE );
-  if ( q == NULL ) return TIBRV_INVALID_QUEUE;
-  if ( ival < 0.0 || ival != ival )      /* negative or NaN; 0.0 is legal */
-    return TIBRV_INVALID_TIME_INTERVAL;
-  api_Timer * t = this->make<api_Timer>( TIBRV_TIMER );
-  t->queue = queue;
-  t->cb    = cb;
-  t->cl    = closure;
-  t->ival  = ival;
-
-  EvPipeRec rec( OP_CREATE_TIMER, t, &q->mutex, &q->cond );
-  pthread_mutex_lock( &q->mutex );
-  this->ev_read->exec( rec );
-  pthread_mutex_unlock( &q->mutex );
-
-  *event = t->id;
-  return TIBRV_OK;
-}
-
-void
-EvPipe::create_timer( EvPipeRec &rec ) noexcept
-{
-  TimerQueue & timer_q = this->poll.timer;
-  api_Timer * t = rec.timer;
-  timer_q.add_timer_double( *t, t->ival, t->id, 0 );
+  uint32_t  id;
+  ApiStatus st = this->create_timer( id, queue, (void *) cb, ival, closure );
+  *event = ( st == API_OK ? id : TIBRV_INVALID_ID );
+  return api_status( st );
 }
 
 tibrv_status
@@ -839,17 +599,9 @@ Tibrv_API::DestroyEvent( tibrvEvent event,  tibrvEventOnComplete cb ) noexcept
     bool ok = true;
     switch ( type ) {
       case TIBRV_TIMER: {
-        api_Timer * t = this->rem<api_Timer>( event, TIBRV_TIMER );
+        api_Timer * t = this->destroy_timer( event );
         if ( t == NULL )
           break;
-        api_Queue * q = this->get<api_Queue>( t->queue, TIBRV_QUEUE );
-        t->cb = NULL;
-        if ( q != NULL ) {
-          EvPipeRec rec( OP_DESTROY_TIMER, t, &q->mutex, &q->cond );
-          pthread_mutex_lock( &q->mutex );
-          this->ev_read->exec( rec );
-          pthread_mutex_unlock( &q->mutex );
-        }
         delete t;
         break;
       }
@@ -887,14 +639,6 @@ Tibrv_API::DestroyEvent( tibrvEvent event,  tibrvEventOnComplete cb ) noexcept
       return TIBRV_OK;
   }
   return TIBRV_INVALID_EVENT;
-}
-
-void
-EvPipe::destroy_timer( EvPipeRec &rec ) noexcept
-{
-  TimerQueue & timer_q = this->poll.timer;
-  api_Timer * t = rec.timer;
-  timer_q.remove_timer_cb( *t, t->id, 0 );
 }
 
 void
@@ -990,40 +734,17 @@ Tibrv_API::GetListenerTransport( tibrvEvent event,  tibrvTransport * tport ) noe
 tibrv_status
 Tibrv_API::GetTimerInterval( tibrvEvent event,  tibrv_f64 * ival ) noexcept
 {
-  api_Timer *t = this->get<api_Timer>( event, TIBRV_TIMER );
-  if ( t != NULL ) {
-    *ival = t->ival;
-    return TIBRV_OK;
-  }
-  return TIBRV_INVALID_EVENT;
+  double d;
+  ApiStatus st = this->get_timer_interval( event, d );
+  if ( st == API_OK )
+    *ival = d;
+  return api_status( st );
 }
 
 tibrv_status
 Tibrv_API::ResetTimerInterval( tibrvEvent event,  tibrv_f64 ival ) noexcept
 {
-  if ( ival < 0.0 || ival != ival )      /* negative or NaN; 0.0 is legal */
-    return TIBRV_INVALID_TIME_INTERVAL;
-  api_Timer * t = this->get<api_Timer>( event, TIBRV_TIMER );
-  if ( t != NULL ) {
-    t->ival = ival;
-    api_Queue * q = this->get<api_Queue>( t->queue, TIBRV_QUEUE );
-    if ( q == NULL ) return TIBRV_INVALID_QUEUE;
-    EvPipeRec rec( OP_RESET_TIMER, t, &q->mutex, &q->cond );
-    pthread_mutex_lock( &q->mutex );
-    this->ev_read->exec( rec );
-    pthread_mutex_unlock( &q->mutex );
-    return TIBRV_OK;
-  }
-  return TIBRV_INVALID_EVENT;
-}
-
-void
-EvPipe::reset_timer( EvPipeRec &rec ) noexcept
-{
-  TimerQueue & timer_q = this->poll.timer;
-  api_Timer * t = rec.timer;
-  timer_q.remove_timer_cb( *t, t->id, 0 );
-  timer_q.add_timer_double( *t, t->ival, t->id, 0 );
+  return api_status( this->reset_timer_interval( event, ival ) );
 }
 
 tibrv_status
@@ -1037,125 +758,31 @@ Tibrv_API::CreateQueue( tibrvQueue * q ) noexcept
 tibrv_status
 Tibrv_API::TimedDispatchQueue( tibrvQueue q, tibrv_f64 timeout ) noexcept
 {
-  api_Queue * queue = this->get<api_Queue>( q, TIBRV_QUEUE );
-  if ( queue == NULL || queue->done )
-    return TIBRV_INVALID_QUEUE;
-  pthread_mutex_lock( &queue->mutex );
-  while ( queue->list.is_empty() ) {
-    struct timespec ts = ts_timeout( timeout, 1.0 );
-    pthread_cond_timedwait( &queue->cond, &queue->mutex, &ts );
-    if ( timeout != TIBRV_WAIT_FOREVER || queue->done )
-      break;
-  }
-  if ( queue->list.is_empty() ) {
-    pthread_mutex_unlock( &queue->mutex );
-    if ( queue->done )
-      return queue->finish_queue();
-    return TIBRV_TIMEOUT;
-  }
-  TibrvQueueEventList list2 = queue->list;
-  queue->list.init();
-  queue->mptr = ( queue->mptr + 1 ) % 2;
-  queue->mem_x[ queue->mptr ].reuse();
-  queue->count = 0;
-  pthread_mutex_unlock( &queue->mutex );
-
-  {
-    DispatchScope scope( *this );  /* flushes dispatch-flush transports on exit */
-    do {
-      list2.pop_hd()->dispatch();
-    } while ( ! list2.is_empty() );
-  }
-
-  if ( queue->done )
-    return queue->finish_queue();
-  return TIBRV_OK;
-}
-
-tibrv_status
-api_Queue::finish_queue( void ) noexcept
-{
-  if ( this->done && this->cb != NULL ) {
-    pthread_mutex_lock( &this->mutex );
-    if ( this->cb != NULL ) {
-      this->cb( this->id, (void *) this->cl );
-      this->cb = NULL;
-    }
-    pthread_mutex_unlock( &this->mutex );
-  }
-  return TIBRV_OK;
+  return api_status( this->timed_dispatch_queue( q, timeout ) );
 }
 
 tibrv_status
 Tibrv_API::TimedDispatchQueueOneEvent( tibrvQueue q,
                                        tibrv_f64 timeout ) noexcept
 {
-  api_Queue * queue = this->get<api_Queue>( q, TIBRV_QUEUE );
-  TibrvQueueEvent * ev;
-  if ( queue == NULL || queue->done )
-    return TIBRV_INVALID_QUEUE;
-  pthread_mutex_lock( &queue->mutex );
-  while ( queue->list.is_empty() ) {
-    struct timespec ts = ts_timeout( timeout, 1.0 );
-    pthread_cond_timedwait( &queue->cond, &queue->mutex, &ts );
-    if ( timeout != TIBRV_WAIT_FOREVER || queue->done )
-      break;
-  }
-  if ( queue->list.is_empty() ) {
-    pthread_mutex_unlock( &queue->mutex );
-    if ( queue->done )
-      return queue->finish_queue();
-    return TIBRV_TIMEOUT;
-  }
-  ev = queue->list.pop_hd();
-  queue->count--;
-  if ( queue->list.is_empty() ) {
-    queue->mptr = ( queue->mptr + 1 ) % 2;
-    queue->mem_x[ queue->mptr ].reuse();
-  }
-  pthread_mutex_unlock( &queue->mutex );
-
-  {
-    DispatchScope scope( *this );
-    ev->dispatch();
-  }
-
-  if ( queue->done )
-    return queue->finish_queue();
-  return TIBRV_OK;
+  return api_status( this->timed_dispatch_one_event( q, timeout ) );
 }
 
 tibrv_status
 Tibrv_API::DestroyQueue( tibrvQueue q, tibrvQueueOnComplete cb,
                         const void * cl ) noexcept
 {
-  api_Queue * queue = this->get<api_Queue>( q, TIBRV_QUEUE );
-  if ( queue == NULL || queue->done )
-    return TIBRV_INVALID_QUEUE;
-  queue->done = true;
-  if ( pthread_mutex_trylock( &queue->mutex ) == 0 ) {
-    if ( cb != NULL )
-      cb( q, (void *) cl );
-    pthread_mutex_unlock( &queue->mutex );
-  }
-  else {
-    queue->cb = cb;
-    queue->cl = cl;
-  }
-  return TIBRV_OK;
+  return api_status( this->destroy_queue( q, (ApiQueueOnComplete) cb, cl ) );
 }
 
 tibrv_status
 Tibrv_API::GetQueueCount( tibrvQueue q, tibrv_u32 * num ) noexcept
 {
-  api_Queue * queue = this->get<api_Queue>( q, TIBRV_QUEUE );
-  *num = 0;
-  if ( queue == NULL || queue->done )
-    return TIBRV_INVALID_QUEUE;
-  pthread_mutex_lock( &queue->mutex );
-  *num = queue->count;
-  pthread_mutex_unlock( &queue->mutex );
-  return TIBRV_OK;
+  uint32_t n;
+  ApiStatus st = this->get_queue_count( q, n );
+  if ( st == API_OK )
+    *num = n;
+  return api_status( st );
 }
 
 tibrv_status
@@ -1187,7 +814,7 @@ Tibrv_API::GetQueueLimitPolicy( tibrvQueue q, tibrvQueueLimitPolicy * policy,
   api_Queue * queue = this->get<api_Queue>( q, TIBRV_QUEUE );
   if ( queue == NULL || queue->done )
     return TIBRV_INVALID_QUEUE;
-  *policy  = queue->policy;
+  *policy  = (tibrvQueueLimitPolicy) queue->policy;
   *max_ev  = queue->max_ev;
   *discard = queue->discard;
   return TIBRV_OK;
@@ -1200,7 +827,7 @@ Tibrv_API::SetQueueLimitPolicy( tibrvQueue q, tibrvQueueLimitPolicy policy,
   api_Queue * queue = this->get<api_Queue>( q, TIBRV_QUEUE );
   if ( queue == NULL || queue->done )
     return TIBRV_INVALID_QUEUE;
-  queue->policy  = policy;
+  queue->policy  = (ApiQueueLimitPolicy) policy;
   queue->max_ev  = max_ev;
   queue->discard = discard;
   return TIBRV_OK;
@@ -1255,123 +882,28 @@ Tibrv_API::CreateQueueGroup( tibrvQueueGroup * grp ) noexcept
   return TIBRV_OK;
 }
 
-static int
-cmp_queue( const api_Queue &x,  const api_Queue &y )
-{
-  if ( x.priority > y.priority ) return -1;
-  if ( x.priority == y.priority ) return 0;
-  return 1;
-}
-
 tibrv_status
 Tibrv_API::TimedDispatchGroup( tibrvQueueGroup grp, tibrv_f64 timeout ) noexcept
 {
-  api_QueueGroup * g = this->get<api_QueueGroup>( grp, TIBRV_QUEUE_GROUP );
-  api_Queue      * queue;
-  if ( g == NULL || g->done )
-    return TIBRV_INVALID_QUEUE_GROUP;
-
-  pthread_mutex_lock( &g->mutex );
-  if ( g->update ) {
-    g->list.sort<cmp_queue>();
-    g->update = false;
-  }
-  bool all_done;
-  for (;;) {
-    all_done = true;
-    for ( queue = g->list.hd; queue != NULL; queue = queue->next ) {
-      if ( queue->count > 0 )
-        break;
-      all_done &= queue->done;
-    }
-    if ( queue == NULL ) {
-      struct timespec ts = ts_timeout( timeout, 1.0 );
-      pthread_cond_timedwait( &g->cond, &g->mutex, &ts );
-    }
-    if ( queue != NULL || timeout != TIBRV_WAIT_FOREVER || all_done )
-      break;
-  }
-  for ( queue = g->list.hd; queue != NULL; queue = queue->next )
-    if ( queue->count > 0 )
-      break;
-  pthread_mutex_unlock( &g->mutex );
-  if ( queue == NULL ) {
-    if ( all_done ) {
-      for ( queue = g->list.hd; queue != NULL; queue = queue->next )
-        queue->finish_queue();
-      return TIBRV_OK;
-    }
-    return TIBRV_TIMEOUT;
-  }
-  pthread_mutex_lock( &queue->mutex );
-  TibrvQueueEventList list2;
-  if ( queue->grp == g ) {
-    list2 = queue->list;
-    queue->list.init();
-    queue->mptr = ( queue->mptr + 1 ) % 2;
-    queue->mem_x[ queue->mptr ].reuse();
-    queue->count = 0;
-  }
-  pthread_mutex_unlock( &queue->mutex );
-
-  {
-    DispatchScope scope( *this );
-    while ( ! list2.is_empty() )
-      list2.pop_hd()->dispatch();
-  }
-  return TIBRV_OK;
+  return api_status( this->timed_dispatch_group( grp, timeout ) );
 }
 
 tibrv_status
 Tibrv_API::DestroyQueueGroup( tibrvQueueGroup grp ) noexcept
 {
-  api_QueueGroup * g = this->get<api_QueueGroup>( grp, TIBRV_QUEUE_GROUP );
-  if ( g == NULL || g->done )
-    return TIBRV_INVALID_QUEUE_GROUP;
-  g->done = true;
-  return TIBRV_OK;
+  return api_status( this->destroy_queue_group( grp ) );
 }
 
 tibrv_status
 Tibrv_API::AddQueueGroup( tibrvQueueGroup grp, tibrvQueue q ) noexcept
 {
-  api_QueueGroup * g     = this->get<api_QueueGroup>( grp, TIBRV_QUEUE_GROUP );
-  api_Queue      * queue = this->get<api_Queue>( q, TIBRV_QUEUE );
-  if ( queue == NULL || queue->done )
-    return TIBRV_INVALID_QUEUE;
-  if ( g == NULL || g->done )
-    return TIBRV_INVALID_QUEUE_GROUP;
-  pthread_mutex_lock( &queue->mutex );
-  pthread_mutex_lock( &g->mutex );
-  queue->grp = g;
-  g->list.push_tl( queue );
-  if ( g->count++ > 0 )
-    g->list.sort<cmp_queue>();
-  g->update = false;
-  if ( queue->count > 0 )
-    pthread_cond_broadcast( &g->cond );
-  pthread_mutex_unlock( &g->mutex );
-  pthread_mutex_unlock( &queue->mutex );
-  return TIBRV_OK;
+  return api_status( this->add_queue_group( grp, q ) );
 }
 
 tibrv_status
 Tibrv_API::RemoveQueueGroup( tibrvQueueGroup grp, tibrvQueue q ) noexcept
 {
-  api_QueueGroup * g     = this->get<api_QueueGroup>( grp, TIBRV_QUEUE_GROUP );
-  api_Queue      * queue = this->get<api_Queue>( q, TIBRV_QUEUE );
-  if ( queue == NULL || queue->done )
-    return TIBRV_INVALID_QUEUE;
-  if ( g == NULL || g->done )
-    return TIBRV_INVALID_QUEUE_GROUP;
-  pthread_mutex_lock( &queue->mutex );
-  pthread_mutex_lock( &g->mutex );
-  queue->grp = NULL;
-  g->list.pop( queue );
-  g->count--;
-  pthread_mutex_unlock( &g->mutex );
-  pthread_mutex_unlock( &queue->mutex );
-  return TIBRV_OK;
+  return api_status( this->remove_queue_group( grp, q ) );
 }
 
 tibrv_status
@@ -1451,7 +983,7 @@ void
 Tibrv_API::note_dispatch_send( api_Transport * t ) noexcept
 {
   DispatchTLS & d = tls_dispatch;
-  if ( d.depth == 0 )          /* not a dispatch thread: backstops only */
+  if ( api_dispatch_tls.depth == 0 )          /* not a dispatch thread: backstops only */
     return;
   for ( uint32_t i = 0; i < d.cnt; i++ )
     if ( d.ids[ i ] == t->id )
@@ -2064,64 +1596,15 @@ tibrv_status
 Tibrv_API::CreateDispatcher( tibrvDispatcher * disp, tibrvDispatchable able,
                              tibrv_f64 idle_timeout ) noexcept
 {
-  api_Dispatcher * d = this->make<api_Dispatcher>( TIBRV_DISPATCHER );
+  api_Dispatcher * d = this->create_dispatcher( able, idle_timeout );
   *disp = d->id;
-  d->queue = able;
-  d->idle_timeout = idle_timeout;
-
-  pthread_attr_t attr;
-  pthread_attr_init( &attr );
-  pthread_attr_setdetachstate( &attr, 1 );
-  if ( this->get<api_Queue>( able, TIBRV_QUEUE ) != NULL ) {
-    d->is_queue = true;
-    pthread_create( &d->thr_id, &attr, tibrv_disp_thread, d );
-  }
-  else if ( this->get<api_QueueGroup>( able, TIBRV_QUEUE_GROUP ) ) {
-    d->is_queue_group = true;
-    pthread_create( &d->thr_id, &attr, tibrv_disp_group_thread, d );
-  }
-
   return TIBRV_OK;
 }
 
 tibrv_status
 Tibrv_API::JoinDispatcher( tibrvDispatcher disp ) noexcept
 {
-  api_Dispatcher * d = this->get<api_Dispatcher>( disp, TIBRV_DISPATCHER );
-  if ( d == NULL )
-    return TIBRV_INVALID_DISPATCHER;
-  if ( d != NULL ) {
-    bool wait_for_done = false;
-    if ( d->is_queue ) {
-      api_Queue * q = this->get<api_Queue>( d->queue, TIBRV_QUEUE );
-      bool q_locked = ( q != NULL && pthread_mutex_trylock( &q->mutex ) == 0 );
-      d->quit = true;
-      if ( q_locked ) {
-        pthread_cond_broadcast( &q->cond );
-        pthread_mutex_unlock( &q->mutex );
-        wait_for_done = true;
-      }
-    }
-    else if ( d->is_queue_group ) {
-      api_QueueGroup * q = this->get<api_QueueGroup>( d->queue, TIBRV_QUEUE_GROUP );
-      bool q_locked = ( q != NULL && pthread_mutex_trylock( &q->mutex ) == 0 );
-      d->quit = true;
-      if ( q_locked ) {
-        pthread_cond_broadcast( &q->cond );
-        pthread_mutex_unlock( &q->mutex );
-        wait_for_done = true;
-      }
-    }
-    if ( wait_for_done ) {
-      if ( pthread_self() != d->thr_id ) {
-        pthread_mutex_lock( &d->mutex );
-        while ( ! d->done )
-          pthread_cond_wait( &d->cond, &d->mutex );
-        pthread_mutex_unlock( &d->mutex );
-      }
-    }
-  }
-  return TIBRV_OK;
+  return api_status( this->join_dispatcher( disp ) );
 }
 
 tibrv_status
