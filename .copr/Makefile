@@ -12,7 +12,7 @@ _ensure_git := $(shell command -v git >/dev/null 2>&1 || dnf -y install git-core
 
 git_hash    := $(shell git rev-parse --short=8 HEAD)
 major_num   := 1
-minor_num   := 47
+minor_num   := 48
 patch_num   := 0
 build_num   := 87
 version     := $(major_num).$(minor_num).$(patch_num)
