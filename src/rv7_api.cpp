@@ -26,7 +26,8 @@ static int rv7_trace = -1;
 namespace rv7 {
 
 Tibrv_API * tibrv_api;
-int debug_api;
+static pthread_mutex_t rv7_open_mutex = PTHREAD_MUTEX_INITIALIZER;
+int debug_rv7_api;
 
 static inline timespec
 ts_timeout( double timeout, double default_timeout = 0 ) {
@@ -51,7 +52,7 @@ api_status( ApiStatus st )
 void
 api_Transport::on_connect( EvSocket &conn ) noexcept
 {
-  if ( debug_api ) {
+  if ( debug_rv7_api ) {
     int len = (int) conn.get_peer_address_strlen();
     printf( "Connected: %.*s\n", len, conn.peer_address.buf );
   }
@@ -79,7 +80,7 @@ tibrv_reconnect_thread( void *arg ) noexcept
       if ( ! t.is_destroyed )
         t.api.ev_read->exec( rec );
 
-      if ( debug_api )
+      if ( debug_rv7_api )
         printf( "Reconnecting...\n" );
       struct timespec ts = ts_timeout( 10.0 );
       while ( ! t.is_destroyed  &&
@@ -92,7 +93,7 @@ tibrv_reconnect_thread( void *arg ) noexcept
       }
     }
     if ( t.is_destroyed || t.client.rv_state == EvRvClient::DATA_RECV ) {
-      if ( debug_api )
+      if ( debug_rv7_api )
         printf( "Succussful reconnect...\n" );
       break;
     }
@@ -131,7 +132,7 @@ void
 api_Transport::on_shutdown( EvSocket &conn,  const char *err,
                             size_t err_len ) noexcept
 {
-  if ( debug_api ) {
+  if ( debug_rv7_api ) {
     int len = (int) conn.get_peer_address_strlen();
     printf( "Shutdown: %.*s %.*s\n", len, conn.peer_address.buf,
                                      (int) err_len, err );
@@ -1642,11 +1643,14 @@ tibrv_Version( void )
 tibrv_status
 tibrv_Open( void )
 {
+  tibrv_status st = TIBRV_OK;
+  pthread_mutex_lock( &rv7_open_mutex );
   if ( tibrv_api == NULL ) {
     tibrv_api = new ( aligned_malloc( sizeof( Tibrv_API ) ) ) Tibrv_API();
-    return tibrv_api->Open();
+    st = tibrv_api->Open();
   }
-  return TIBRV_OK;
+  pthread_mutex_unlock( &rv7_open_mutex );
+  return st;
 }
 
 tibrv_status
@@ -1679,12 +1683,13 @@ tibrv_IsIPM( void )
   return TIBRV_FALSE;
 }
 
+#define API_CALL( CALL ) if ( tibrv_api == NULL ) return TIBRV_NOT_INITIALIZED; else return tibrv_api->CALL
 tibrv_status
 tibrvEvent_CreateListener( tibrvEvent * event,  tibrvQueue q,
                            tibrvEventCallback cb,  tibrvTransport tport,
                            const char * subj,  const void * closure )
 {
-  return tibrv_api->CreateListener( event, q, tport, cb, NULL, subj, closure );
+  API_CALL( CreateListener )( event, q, tport, cb, NULL, subj, closure );
 }
 
 tibrv_status
@@ -1693,7 +1698,7 @@ tibrvEvent_CreateVectorListener( tibrvEvent * event,  tibrvQueue q,
                                  tibrvTransport tport, const char * subj,
                                  const void * closure )
 {
-  return tibrv_api->CreateListener( event, q, tport, NULL, vcb, subj, closure );
+  API_CALL( CreateListener )( event, q, tport, NULL, vcb, subj, closure );
 }
 
 tibrv_status
@@ -1701,279 +1706,279 @@ tibrvEvent_CreateTimer( tibrvEvent * event,  tibrvQueue q,
                         tibrvEventCallback cb,  tibrv_f64 ival,
                         const void * closure )
 {
-  return tibrv_api->CreateTimer( event, q, cb, ival, closure );
+  API_CALL( CreateTimer )( event, q, cb, ival, closure );
 }
 
 tibrv_status
 tibrvEvent_DestroyEx( tibrvEvent event,  tibrvEventOnComplete cb )
 {
-  return tibrv_api->DestroyEvent( event, cb );
+  API_CALL( DestroyEvent )( event, cb );
 }
 
 tibrv_status
 tibrvEvent_GetType( tibrvEvent event,  tibrvEventType * type )
 {
-  return tibrv_api->GetEventType( event, type );
+  API_CALL( GetEventType )( event, type );
 }
 
 tibrv_status
 tibrvEvent_GetQueue( tibrvEvent event,  tibrvQueue * q )
 {
-  return tibrv_api->GetEventQueue( event, q );
+  API_CALL( GetEventQueue )( event, q );
 }
 
 tibrv_status
 tibrvEvent_GetListenerSubject( tibrvEvent event,  const char ** subject )
 {
-  return tibrv_api->GetListenerSubject( event, subject );
+  API_CALL( GetListenerSubject )( event, subject );
 }
 
 tibrv_status
 tibrvEvent_GetListenerTransport( tibrvEvent event,  tibrvTransport * tport )
 {
-  return tibrv_api->GetListenerTransport( event, tport );
+  API_CALL( GetListenerTransport )( event, tport );
 }
 
 tibrv_status
 tibrvEvent_GetTimerInterval( tibrvEvent event,  tibrv_f64 * ival )
 {
-  return tibrv_api->GetTimerInterval( event, ival );
+  API_CALL( GetTimerInterval )( event, ival );
 }
 
 tibrv_status
 tibrvEvent_ResetTimerInterval( tibrvEvent event,  tibrv_f64 ival )
 {
-  return tibrv_api->ResetTimerInterval( event, ival );
+  API_CALL( ResetTimerInterval )( event, ival );
 }
 
 tibrv_status
 tibrvQueue_Create( tibrvQueue * q )
 {
-  return tibrv_api->CreateQueue( q );
+  API_CALL( CreateQueue )( q );
 }
 
 tibrv_status
 tibrvQueue_TimedDispatch( tibrvQueue q, tibrv_f64 timeout )
 {
-  return tibrv_api->TimedDispatchQueue( q, timeout );
+  API_CALL( TimedDispatchQueue )( q, timeout );
 }
 
 tibrv_status
 tibrvQueue_TimedDispatchOneEvent( tibrvQueue q, tibrv_f64 timeout )
 {
-  return tibrv_api->TimedDispatchQueueOneEvent( q, timeout );
+  API_CALL( TimedDispatchQueueOneEvent )( q, timeout );
 }
 
 tibrv_status
 tibrvQueue_DestroyEx( tibrvQueue q, tibrvQueueOnComplete cb, const void * cl )
 {
-  return tibrv_api->DestroyQueue( q, cb, cl );
+  API_CALL( DestroyQueue )( q, cb, cl );
 }
 
 tibrv_status
 tibrvQueue_GetCount( tibrvQueue q, tibrv_u32 * num )
 {
-  return tibrv_api->GetQueueCount( q, num );
+  API_CALL( GetQueueCount )( q, num );
 }
 
 tibrv_status
 tibrvQueue_GetPriority( tibrvQueue q, tibrv_u32 * priority )
 {
-  return tibrv_api->GetQueuePriority( q, priority );
+  API_CALL( GetQueuePriority )( q, priority );
 }
 
 tibrv_status
 tibrvQueue_SetPriority( tibrvQueue q, tibrv_u32 prio )
 {
-  return tibrv_api->SetQueuePriority( q, prio );
+  API_CALL( SetQueuePriority )( q, prio );
 }
 
 tibrv_status
 tibrvQueue_GetLimitPolicy( tibrvQueue q, tibrvQueueLimitPolicy * policy,
                            tibrv_u32 * max_ev, tibrv_u32 * discard )
 {
-  return tibrv_api->GetQueueLimitPolicy( q, policy, max_ev, discard );
+  API_CALL( GetQueueLimitPolicy )( q, policy, max_ev, discard );
 }
 
 tibrv_status
 tibrvQueue_SetLimitPolicy( tibrvQueue q, tibrvQueueLimitPolicy policy,
                            tibrv_u32 max_ev, tibrv_u32 discard )
 {
-  return tibrv_api->SetQueueLimitPolicy( q, policy, max_ev, discard );
+  API_CALL( SetQueueLimitPolicy )( q, policy, max_ev, discard );
 }
 
 tibrv_status
 tibrvQueue_SetName( tibrvQueue q, const char * name )
 {
-  return tibrv_api->SetQueueName( q, name );
+  API_CALL( SetQueueName )( q, name );
 }
 
 tibrv_status
 tibrvQueue_GetName( tibrvQueue q, const char ** name )
 {
-  return tibrv_api->GetQueueName( q, name );
+  API_CALL( GetQueueName )( q, name );
 }
 
 tibrv_status
 tibrvQueue_SetHook( tibrvQueue q, tibrvQueueHook hook, void * closure )
 {
-  return tibrv_api->SetQueueHook( q, hook, closure );
+  API_CALL( SetQueueHook )( q, hook, closure );
 }
 
 tibrv_status
 tibrvQueue_GetHook( tibrvQueue q, tibrvQueueHook * hook )
 {
-  return tibrv_api->GetQueueHook( q, hook );
+  API_CALL( GetQueueHook )( q, hook );
 }
 
 tibrv_status
 tibrvQueueGroup_Create( tibrvQueueGroup * grp )
 {
-  return tibrv_api->CreateQueueGroup( grp );
+  API_CALL( CreateQueueGroup )( grp );
 }
 
 tibrv_status
 tibrvQueueGroup_TimedDispatch( tibrvQueueGroup grp, tibrv_f64 timeout )
 {
-  return tibrv_api->TimedDispatchGroup( grp, timeout );
+  API_CALL( TimedDispatchGroup )( grp, timeout );
 }
 
 tibrv_status
 tibrvQueueGroup_Destroy( tibrvQueueGroup grp )
 {
-  return tibrv_api->DestroyQueueGroup( grp );
+  API_CALL( DestroyQueueGroup )( grp );
 }
 
 tibrv_status
 tibrvQueueGroup_Add( tibrvQueueGroup grp, tibrvQueue q )
 {
-  return tibrv_api->AddQueueGroup( grp, q );
+  API_CALL( AddQueueGroup )( grp, q );
 }
 
 tibrv_status
 tibrvQueueGroup_Remove( tibrvQueueGroup grp, tibrvQueue q )
 {
-  return tibrv_api->RemoveQueueGroup( grp, q );
+  API_CALL( RemoveQueueGroup )( grp, q );
 }
 
 tibrv_status
 tibrvTransport_Create( tibrvTransport * tport, const char * service,
                        const char * network, const char * daemon )
 {
-  return tibrv_api->CreateTransport( tport, service, network, daemon );
+  API_CALL( CreateTransport )( tport, service, network, daemon );
 }
 
 tibrv_status
 tibrvTransport_Send( tibrvTransport tport, tibrvMsg msg )
 {
-  return tibrv_api->Send( tport, msg );
+  API_CALL( Send )( tport, msg );
 }
 
 tibrv_status
 tibrvTransport_Sendv( tibrvTransport tport, tibrvMsg * vec, tibrv_u32 cnt )
 {
-  return tibrv_api->Sendv( tport, vec, cnt );
+  API_CALL( Sendv )( tport, vec, cnt );
 }
 
 tibrv_status
 tibrvTransport_Flush( tibrvTransport tport )
 {
-  return tibrv_api->Flush( tport );
+  API_CALL( Flush )( tport );
 }
 
 tibrv_status
 tibrvTransport_SendRequest( tibrvTransport tport, tibrvMsg msg,
                             tibrvMsg * reply, tibrv_f64 idle_timeout )
 {
-  return tibrv_api->SendRequest( tport, msg, reply, idle_timeout );
+  API_CALL( SendRequest )( tport, msg, reply, idle_timeout );
 }
 
 tibrv_status
 tibrvTransport_SendReply( tibrvTransport tport, tibrvMsg msg,
                           tibrvMsg request_msg )
 {
-  return tibrv_api->SendReply( tport, msg, request_msg );
+  API_CALL( SendReply )( tport, msg, request_msg );
 }
 
 tibrv_status
 tibrvTransport_Destroy( tibrvTransport tport )
 {
-  return tibrv_api->DestroyTransport( tport );
+  API_CALL( DestroyTransport )( tport );
 }
 
 tibrv_status
 tibrvTransport_CreateInbox( tibrvTransport tport, char * inbox_str,
                             tibrv_u32 inbox_len )
 {
-  return tibrv_api->CreateInbox( tport, inbox_str, inbox_len );
+  API_CALL( CreateInbox )( tport, inbox_str, inbox_len );
 }
 
 tibrv_status
 tibrvTransport_GetService( tibrvTransport tport, const char ** service_string )
 {
-  return tibrv_api->GetService( tport, service_string );
+  API_CALL( GetService )( tport, service_string );
 }
 
 tibrv_status
 tibrvTransport_GetNetwork( tibrvTransport tport, const char ** network_string )
 {
-  return tibrv_api->GetNetwork( tport, network_string );
+  API_CALL( GetNetwork )( tport, network_string );
 }
 
 tibrv_status
 tibrvTransport_GetDaemon( tibrvTransport tport, const char ** daemon_string )
 {
-  return tibrv_api->GetDaemon( tport, daemon_string );
+  API_CALL( GetDaemon )( tport, daemon_string );
 }
 
 tibrv_status
 tibrvTransport_SetDescription( tibrvTransport tport, const char * descr )
 {
-  return tibrv_api->SetDescription( tport, descr );
+  API_CALL( SetDescription )( tport, descr );
 }
 
 tibrv_status
 tibrvTransport_GetDescription( tibrvTransport tport, const char ** descr )
 {
-  return tibrv_api->GetDescription( tport, descr );
+  API_CALL( GetDescription )( tport, descr );
 }
 
 tibrv_status
 tibrvTransport_SetSendingWaitLimit( tibrvTransport tport, tibrv_u32 num_bytes )
 {
-  return tibrv_api->SetSendingWaitLimit( tport, num_bytes );
+  API_CALL( SetSendingWaitLimit )( tport, num_bytes );
 }
 
 tibrv_status
 tibrvTransport_GetSendingWaitLimit( tibrvTransport tport,
                                     tibrv_u32 * num_bytes )
 {
-  return tibrv_api->GetSendingWaitLimit( tport, num_bytes );
+  API_CALL( GetSendingWaitLimit )( tport, num_bytes );
 }
 
 tibrv_status
 tibrvTransport_SetBatchMode( tibrvTransport tport,
                              tibrvTransportBatchMode mode )
 {
-  return tibrv_api->SetBatchMode( tport, mode );
+  API_CALL( SetBatchMode )( tport, mode );
 }
 
 tibrv_status
 tibrvTransport_SetBatchSize( tibrvTransport tport, tibrv_u32 num_bytes )
 {
-  return tibrv_api->SetBatchSize( tport, num_bytes );
+  API_CALL( SetBatchSize )( tport, num_bytes );
 }
 
 tibrv_status
 tibrvTransport_SetBatchInterval( tibrvTransport tport, tibrv_f64 secs )
 {
-  return tibrv_api->SetBatchInterval( tport, secs );
+  API_CALL( SetBatchInterval )( tport, secs );
 }
 
 tibrv_status
 tibrvTransport_SetBatchDispatchFlush( tibrvTransport tport, tibrv_bool on )
 {
-  return tibrv_api->SetBatchDispatchFlush( tport, on != TIBRV_FALSE );
+  API_CALL( SetBatchDispatchFlush )( tport, on != TIBRV_FALSE );
 }
 
 tibrv_status
@@ -1987,20 +1992,20 @@ tibrvTransport_CreateLicensed( tibrvTransport * tport, const char * service,
 tibrv_status
 tibrvTransport_RequestReliability( tibrvTransport tport, tibrv_f64 reliability )
 {
-  return tibrv_api->RequestReliability( tport, reliability );
+  API_CALL( RequestReliability )( tport, reliability );
 }
 
 tibrv_status
 tibrvDispatcher_CreateEx( tibrvDispatcher * disp,
                           tibrvDispatchable able, tibrv_f64 idle_timeout )
 {
-  return tibrv_api->CreateDispatcher( disp, able, idle_timeout );
+  API_CALL( CreateDispatcher )( disp, able, idle_timeout );
 }
 
 tibrv_status
 tibrvDispatcher_Join( tibrvDispatcher disp )
 {
-  return tibrv_api->JoinDispatcher( disp );
+  API_CALL( JoinDispatcher )( disp );
 }
 
 tibrv_status
@@ -2012,13 +2017,13 @@ tibrvDispatcher_Destroy( tibrvDispatcher disp )
 tibrv_status
 tibrvDispatcher_SetName( tibrvDispatcher disp, const char * name )
 {
-  return tibrv_api->SetDispatcherName( disp, name );
+  API_CALL( SetDispatcherName )( disp, name );
 }
 
 tibrv_status
 tibrvDispatcher_GetName( tibrvDispatcher disp, const char ** name )
 {
-  return tibrv_api->GetDispatcherName( disp, name );
+  API_CALL( GetDispatcherName )( disp, name );
 }
 
 const char *
