@@ -105,6 +105,7 @@ struct Tibrv_API : public ApiCore {
   void note_dispatch_send( api_Transport * t ) noexcept; /* mark dirty in TLS */
   void flush_dispatch_sends( void ) noexcept;             /* end of dispatch pass */
   tibrv_status RequestReliability( tibrvTransport tport, tibrv_f64 reliability ) noexcept;
+  tibrv_status SetStateListener( tibrvTransport tport, tibrvQueue q, tibrvEventCallback cb, const void * closure, tibrvEvent * event ) noexcept;
   tibrv_status CreateDispatcher( tibrvDispatcher * disp, tibrvDispatchable able, tibrv_f64 idle_timeout ) noexcept;
   tibrv_status JoinDispatcher( tibrvDispatcher disp ) noexcept;
   tibrv_status SetDispatcherName( tibrvDispatcher disp, const char * name ) noexcept;
@@ -170,12 +171,13 @@ struct api_Listener {
   tibrvEvent               id;    /* listener id */
   tibrvQueue               queue; /* the queue that messages go to */
   tibrvTransport           tport; /* transport that has subscription */
+  bool                     is_state; /* transport state listener, not in ht */
   
   void * operator new( size_t, void *ptr ) { return ptr; }
   void operator delete( void *ptr ) { ::free( ptr ); }
   api_Listener( Tibrv_API &a,  tibrvId i ) : api( a ), next( 0 ), back( 0 ),
     subject( 0 ), cl( 0 ), len( 0 ), wild( 0 ), hash( 0 ), cb( 0 ), vcb( 0 ),
-    id( i ), queue( 0 ), tport( 0 ) {}
+    id( i ), queue( 0 ), tport( 0 ), is_state( false ) {}
 };                
 
 typedef DLinkList< api_Listener > TibrvListenerList;
@@ -274,6 +276,21 @@ struct api_BatchTimer : public EvTimerCallback {
   virtual ~api_BatchTimer() {}
 };
 
+/* Timer for reconnecting a transport whose daemon connection was lost; it
+ * runs on the epoll thread, so the client is only ever touched there */
+struct api_ReconnectTimer : public EvTimerCallback {
+  api_Transport * t;
+
+  api_ReconnectTimer( api_Transport * tp ) : t( tp ) {}
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  void operator delete( void * ) {}
+  virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
+  virtual ~api_ReconnectTimer() {}
+};
+
+static const double   RECONNECT_SECS      = 1.0;  /* retry period */
+static const uint32_t RECONNECT_MAX_TICKS = 10;   /* handshake stall limit */
+static const uint64_t RECONNECT_TIMER_ID  = 0x0772;
 
 struct api_Transport : public EvConnectionNotify, public RvClientCB,
                        public kv::EvSocket {
@@ -298,10 +315,14 @@ struct api_Transport : public EvConnectionNotify, public RvClientCB,
                 * sb_spare;         /* single buffer exchange pipeline writes */
   tibrv_f64       batch_ival;       /* batch-timer period in seconds (0=off) */
   api_BatchTimer  sb_timer;         /* EvTimerCallback fired on E */
+  api_ReconnectTimer
+                  rc_timer;         /* reconnect retry, fired on E */
+  api_Listener  * state_listener;   /* SetStateListener target, or NULL */
+  uint32_t        connect_ticks;    /* rc_timer ticks spent in the handshake */
   bool            sb_pending,       /* an OP_TPORT_DRAIN is already in flight */
                   sb_timer_active,
                   dispatch_flush,   /* flush at end of a dispatch pass that sent */
-                  reconnect_active,
+                  timer_armed,      /* rc_timer is running */
                   is_destroyed;
 
   struct TportReconnectArgs { /* saved state for reconnecting */
@@ -321,8 +342,9 @@ struct api_Transport : public EvConnectionNotify, public RvClientCB,
     inbox_count( 1 ), wait_limit( 0 ), batch_size( 0 ),
     batch_mode( TIBRV_TRANSPORT_DEFAULT_BATCH ), descr( 0 ),
     sb_fill( 0 ), sb_spare( 0 ), batch_ival( 0 ),
-    sb_timer( this ), sb_pending( false ), sb_timer_active( false ),
-    dispatch_flush( false ), reconnect_active( false ), is_destroyed( false ) {
+    sb_timer( this ), rc_timer( this ), state_listener( 0 ),
+    connect_ticks( 0 ), sb_pending( false ), sb_timer_active( false ),
+    dispatch_flush( false ), timer_armed( false ), is_destroyed( false ) {
     pthread_mutex_init( &this->mutex, NULL );
     pthread_cond_init( &this->cond, NULL );
     pthread_mutex_init( &this->batch_mutex, NULL );
@@ -331,6 +353,13 @@ struct api_Transport : public EvConnectionNotify, public RvClientCB,
   virtual void on_shutdown( EvSocket &conn,  const char *err,
                             size_t err_len ) noexcept;
   virtual bool on_rv_msg( EvPublish &pub ) noexcept;
+  /* epoll thread, mutex held: queue pub for listener l */
+  void deliver_msg( api_Listener &l,  EvPublish &pub,  RvMsg *rvmsg ) noexcept;
+  /* epoll thread: start rc_timer unless running / destroyed / never connected */
+  void arm_reconnect( void ) noexcept;
+  /* epoll thread: _RV.<cl>.SYSTEM.<nm> advisory to the state listener and to
+   * listeners subscribed to that subject */
+  void push_state( const char *cl,  const char *nm,  const char *de ) noexcept;
   void add_wildcard( uint16_t pref ) noexcept;
   void remove_wildcard( uint16_t pref ) noexcept;
 
