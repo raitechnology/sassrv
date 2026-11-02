@@ -71,16 +71,17 @@ enum RvAdv {
                         ADV_ORRS     = m(27),
                         ADV_TPORT    = m(28),
                         ADV_SESS_SUF = m(29),
+                        ADV_SUBDIGEST = m(30), /* sc, sx */
   #undef m
 
   ADV_HOST_START  = ADV_HOSTADDR | ADV_SN | ADV_OS | ADV_VER | ADV_HTTPADDR |
                     ADV_HTTPPORT | ADV_TIME | ADV_UP | ADV_RLI | ADV_IPPORT |
-                    ADV_SERVICE | ADV_NETWORK,
+                    ADV_SERVICE | ADV_NETWORK | ADV_SUBDIGEST,
   ADV_STATS       = ADV_MS | ADV_BS | ADV_MR | ADV_BR | ADV_PS | ADV_PR |
                     ADV_RX | ADV_PM | ADV_IDL | ADV_ODL | ADV_IRRS | ADV_ORRS,
   ADV_HOST_STATUS = ADV_HOSTADDR | ADV_SN | ADV_OS | ADV_VER | ADV_HTTPADDR |
                     ADV_HTTPPORT | ADV_TIME | ADV_UP | ADV_RLI | ADV_STATS |
-                    ADV_IPPORT | ADV_SERVICE | ADV_NETWORK,
+                    ADV_IPPORT | ADV_SERVICE | ADV_NETWORK | ADV_SUBDIGEST,
   ADV_HOST_STOP   = ADV_HOSTADDR | ADV_TIME,
   ADV_SESSION     = ADV_HOSTADDR | ADV_ID | ADV_USERID,
 
@@ -430,6 +431,12 @@ struct RvHost : public kv::EvSocket {
   size_t make_session( uint64_t ns,  char session[ MAX_SESSION_LEN ] ) noexcept;
 
   void send_host_status( void ) noexcept; /* send _RV.INFO.SYSTEM.HOST.STATUS */
+  /* sc = count of (session, subject) pairs held by the host's sessions,
+   * sx = xor of kv_crc_c( subject, kv_crc_c( session ) ) over them; the
+   * same view as the host query reply, subjects starting with '_' left
+   * out.  Sent in HOST.START / HOST.STATUS (rvd doesn't), a monitor that
+   * sees all LISTEN advisories compares and re-queries the host */
+  void get_sub_digest( uint32_t &sc,  uint32_t &sx ) noexcept;
   void send_outbound_data_loss( uint32_t msg_loss,  bool is_restart,
                           uint32_t pub_host, const char *pub_host_id ) noexcept;
   void data_loss_error( uint64_t bytes_lost,  const char *err,

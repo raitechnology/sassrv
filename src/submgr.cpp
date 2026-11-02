@@ -464,6 +464,40 @@ RvSubscriptionDB::host_start( uint32_t host_id,  uint16_t cid ) noexcept
   }
 }
 
+RvHostEntry *
+RvSubscriptionDB::find_host( uint32_t host_id,  uint16_t cid ) noexcept
+{
+  uint32_t i, h = hash_host_id( host_id, cid );
+  size_t   pos;
+  if ( this->host_ht != NULL && this->host_ht->find( h, pos, i ) &&
+       i < this->host_tab.count )
+    return &this->host_tab.ptr[ i ];
+  return NULL;
+}
+
+/* pair hash = kv_crc_c( subject, kv_crc_c( session ) ), the publisher's
+ * RvHost::get_sub_digest(); subjects starting with '_' are left out */
+void
+RvSubscriptionDB::host_digest( RvSessionEntry &sess,  RvSubscription &script,
+                               bool is_add ) noexcept
+{
+  if ( script.len == 0 || script.value[ 0 ] == '_' )
+    return;
+  RvHostEntry * host = this->find_host( sess.host_id, sess.cid );
+  if ( host == NULL )
+    return;
+  size_t slen = sess.len;
+  if ( slen > 0 && sess.value[ slen - 1 ] == '\0' )
+    slen--;
+  uint32_t ph = kv_crc_c( script.value, script.len,
+                          kv_crc_c( sess.value, slen, 0 ) );
+  if ( is_add )
+    host->sub_count++;
+  else if ( host->sub_count > 0 )
+    host->sub_count--;
+  host->sub_digest ^= ph;
+}
+
 void
 RvSubscriptionDB::host_stop( uint32_t host_id,  uint16_t cid ) noexcept
 {
@@ -525,6 +559,7 @@ RvSubscriptionDB::unsub_session( RvSessionEntry &sess ) noexcept
     bool coll = false;
     if ( sess.has_daemon )
       sub->ref7cnt = 0;
+    this->host_digest( sess, *sub, false );
     if ( --sub->refcnt == 0 ) {
       this->subscriptions.active--;
       this->subscriptions.removed++;
@@ -702,6 +737,8 @@ RvSubscriptionDB::listen_ref( RvSessionEntry & session,  const char *sub,
   else
     script->ref( this->cur_mono );
   is_added = session.add_subject( *script );
+  if ( is_added )
+    this->host_digest( session, *script, true );
   if ( is_added && script->refcnt == 1 ) {
     this->subscriptions.active++;
     coll = ( this->sub_hash_count( sub, sub_len, subj_hash ) > 1 );
@@ -719,6 +756,7 @@ RvSubscriptionDB::deref_subscription( RvSessionEntry &session,
 {
   if ( ! session.rem_subject( script ) )
     return false;
+  this->host_digest( session, script, false );
   if ( script.refcnt == 0 ) {
     this->subscriptions.active--;
     this->subscriptions.removed++;
@@ -1387,6 +1425,9 @@ RvSubscriptionDB::process_pub2( EvPublish &pub,  const char *subject,
              tlen  = 0,
              hlen  = 0,
              alen  = 0;
+    uint32_t sub_sc = 0, /* HOST.STATUS sc / sx, not from rvd */
+             sub_sx = 0;
+    bool     has_sx = false;
     uint32_t idl   = 0,
              odl   = 0,
              pid   = 0;
@@ -1485,6 +1526,8 @@ RvSubscriptionDB::process_pub2( EvPublish &pub,  const char *subject,
             rd.get_uint( odl );
           if ( rd.find( "cid" ) )
             rd.get_uint( cid );
+          if ( rd.find( "sc" ) && rd.get_uint( sub_sc ) )
+            has_sx = ( rd.find( "sx" ) && rd.get_uint( sub_sx ) );
         }
         else if ( match->kind == IS_UNREACHABLE ) {
           if ( rd.find( "tport" ) )
@@ -1526,6 +1569,27 @@ RvSubscriptionDB::process_pub2( EvPublish &pub,  const char *subject,
           host.data_loss = idl + odl;
           if ( host.host_id == ntohl( this->client.ipaddr ) )
             this->soft_host_query = this->host_tab.count;
+        }
+        /* the subscription digest, only when the daemon sends it (rvd
+         * doesn't) and every LISTEN advisory is seen (no filter) */
+        else if ( has_sx && this->is_all_subscribed &&
+                  host.state != RvHostEntry::RV_HOST_QUERY &&
+                  ( host.sub_count != sub_sc || host.sub_digest != sub_sx ) ) {
+          if ( this->mout != NULL ) {
+            this->mout->printf( "! query host %08X digest sc/sx %u/%08X != "
+                                "%u/%08X\n", host.host_id, host.sub_count,
+                                host.sub_digest, sub_sc, sub_sx );
+          }
+          host.state = RvHostEntry::RV_HOST_QUERY;
+          if ( host.host_id == ntohl( this->client.ipaddr ) )
+            this->soft_host_query = this->host_tab.count;
+        }
+        else if ( has_sx && this->mout != NULL ) {
+          this->mout->printf( "> host %08X digest sc/sx %u/%08X %s\n",
+            host.host_id, sub_sc, sub_sx,
+            ! this->is_all_subscribed ? "skipped, filtered" :
+            host.state == RvHostEntry::RV_HOST_QUERY ? "skipped, query" :
+            "ok" );
         }
         break;
       }

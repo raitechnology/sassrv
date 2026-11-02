@@ -119,6 +119,19 @@ same file; put everything here.
 
 ## Contracts and gotchas
 
+- **Host subscription digest (`sc`/`sx`, 2026-11-01).** sassrv's `RvHost`
+  adds `sc` and `sx` to HOST.START / HOST.STATUS (`ADV_SUBDIGEST`);
+  `get_sub_digest()` computes them at send time from the host query reply
+  view (all sockets of each session, subjects + patterns, `_`-prefixed
+  subjects left out): `sc` = (session, subject) pairs, `sx` = xor of
+  `kv_crc_c( sub, kv_crc_c( session ) )` -- session-seeded so two sessions
+  on one subject don't cancel. `RvSubscriptionDB` keeps the same per
+  `RvHostEntry` (`host_digest()` on add / deref / unsub_session) and on
+  HOST.STATUS sets `RV_HOST_QUERY` on a mismatch. Skipped when the fields
+  are absent (real rvd) or when filtered (`!is_all_subscribed`: unmatched
+  LISTENs never arrive). Debug log: `> host <id> digest sc/sx … ok|skipped`
+  / `! query host <id> digest`. Not yet exercised: a real mismatch.
+
 - `make_rv_msg` switches on the full 32-bit codec id from
   `EvPublish.msg_enc`; a bare `ftype` byte falls to the default and the
   payload is wrapped as opaque `_data_`. Convert with raimd's
