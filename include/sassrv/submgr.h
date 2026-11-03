@@ -154,7 +154,9 @@ struct RvHostEntry {
             stop_mono,
             query_mono,
             data_loss,
-            rv7_sess_id;
+            rv7_sess_id,
+            sub_count,  /* (session, subject) pairs held, cmp to sc */
+            sub_digest; /* xor of the pair hashes, cmp to sx */
   HostState state;
   uint16_t  cid;
 
@@ -170,6 +172,8 @@ struct RvHostEntry {
     this->query_mono  = 0;
     this->data_loss   = 0;
     this->rv7_sess_id = 0;
+    this->sub_count   = 0;
+    this->sub_digest  = 0;
     this->state       = is_start ? RV_HOST_START : RV_HOST_QUERY;
     if ( cid != 0 )
       this->state = RV_HOST_CID;
@@ -463,6 +467,10 @@ struct RvSubscriptionDB {
   void stop_marked_sessions( RvHostEntry &host ) noexcept;
 
   void host_start( uint32_t host_id,  uint16_t cid ) noexcept;
+  RvHostEntry * find_host( uint32_t host_id,  uint16_t cid ) noexcept;
+  /* the host's sc / sx: a (session, subject) pair added or removed */
+  void host_digest( RvSessionEntry &sess,  RvSubscription &script,
+                    bool is_add ) noexcept;
   void host_stop( uint32_t host_id,  uint16_t cid ) noexcept;
   RvHostEntry & host_ref( uint32_t host_id,  uint16_t cid,
                           bool is_status ) noexcept;

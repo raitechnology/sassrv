@@ -119,6 +119,19 @@ same file; put everything here.
 
 ## Contracts and gotchas
 
+- **Host subscription digest (`sc`/`sx`, 2026-11-01).** sassrv's `RvHost`
+  adds `sc` and `sx` to HOST.START / HOST.STATUS (`ADV_SUBDIGEST`);
+  `get_sub_digest()` computes them at send time from the host query reply
+  view (all sockets of each session, subjects + patterns, `_`-prefixed
+  subjects left out): `sc` = (session, subject) pairs, `sx` = xor of
+  `kv_crc_c( sub, kv_crc_c( session ) )` -- session-seeded so two sessions
+  on one subject don't cancel. `RvSubscriptionDB` keeps the same per
+  `RvHostEntry` (`host_digest()` on add / deref / unsub_session) and on
+  HOST.STATUS sets `RV_HOST_QUERY` on a mismatch. Skipped when the fields
+  are absent (real rvd) or when filtered (`!is_all_subscribed`: unmatched
+  LISTENs never arrive). Debug log: `> host <id> digest sc/sx … ok|skipped`
+  / `! query host <id> digest`. Not yet exercised: a real mismatch.
+
 - `make_rv_msg` switches on the full 32-bit codec id from
   `EvPublish.msg_enc`; a bare `ftype` byte falls to the default and the
   payload is wrapped as opaque `_data_`. Convert with raimd's
@@ -129,6 +142,33 @@ same file; put everything here.
   of the daemon a subscriber sits on before concluding tracking is broken.
 - Periodic stats in the tools print every 10 s; a test shorter than that
   never emits them.
+- rv7 transport reconnect (`rv7_api.cpp`, since 2026-10-23) is a timer on
+  the epoll thread, not a thread: `api_Transport::on_shutdown` →
+  `arm_reconnect()` → `api_ReconnectTimer::timer_cb` every
+  `RECONNECT_SECS` (1 s) calls `client.rv_connect()` directly when
+  `client.fd == -1`, and after `RECONNECT_MAX_TICKS` (10) in the
+  VERS..CONN handshake pushes `EV_CLOSE` so `release()` → `on_shutdown`
+  retries. `on_connect` with `timer_armed` set = a reconnect: it removes
+  the timer, refreshes `x.session` and calls `client.subscribe()` for every
+  listener in `ht` (no `OP_SUBSCRIBE` pipe hop — it is already the epoll
+  thread). The client is therefore only ever touched on the epoll thread;
+  the api thread's only reconnect interaction is `EvPipe::close_tport`
+  (from `DestroyTransport`, which sets `is_destroyed` *before* the close
+  op) stopping the timer. Same shape as omm's `api_Transport::timer_cb`
+  (omm lacks the handshake-stall tick, a latent gap there).
+- Transport state advisories: `push_state()` synthesizes
+  `_RV.ERROR.SYSTEM.RVD.DISCONNECTED` (only if `rv_state` was
+  `DATA_RECV`, so failed retries don't spam) and
+  `_RV.INFO.SYSTEM.RVD.CONNECTED` (reconnect only; the first connect is
+  awaited by `CreateTransport`) with ADV_CLASS/SOURCE/NAME/DESC, delivers
+  them to the `tibrvTransport_SetStateListener()` listener
+  (`api_Listener::is_state`, held in `state_listener`, never in `ht` or
+  subscribed; `DestroyEvent` must take the `is_state` branch) and then
+  routes them through `on_rv_msg()` so ordinary tibrv listeners on
+  `_RV.ERROR.SYSTEM.>` see them like a daemon advisory. Test rig:
+  `/tmp/rctest.c` + `/tmp/rc-scenario.sh` (kill rv_server, `nc -l`
+  stall, restart; expects DISCONNECTED, CONNECTED, then data on the
+  re-subscribed subject).
 - The replay rig (end to end with captured data):
   ```
   ms_server -d con.yaml -t rv.listen            # or: rv_server

@@ -953,6 +953,12 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
       if ( ( flags & ADV_ODL ) != 0 )
         msg.append_uint( SARG( "odl" ), host.stat.odl );
     }
+    if ( ( flags & ADV_SUBDIGEST ) != 0 ) {
+      uint32_t sc = 0, sx = 0;
+      host.get_sub_digest( sc, sx );
+      msg.append_uint( SARG( "sc" ), sc );
+      msg.append_uint( SARG( "sx" ), sx );
+    }
     if ( ( flags & ADV_IPPORT ) != 0 && host.ipport != 0 )
       msg.append_ipdata( SARG( "ipport" ), host.ipport );
     if ( ( flags & ADV_SERVICE ) != 0 )
@@ -973,6 +979,53 @@ RvFwdAdv::fwd( RvHost &host,  int flags ) noexcept
   if ( is_rv_debug )
     EvRvService::print( host.fd, msg.buf, msg_size );
   host.sub_route.forward_msg( pub );
+}
+
+void
+RvHost::get_sub_digest( uint32_t &sc,  uint32_t &sx ) noexcept
+{
+  PeerMatchArgs ka;
+  PeerMatchIter iter( *this, ka );
+  SubRouteDB    pairs;
+  RouteLoc      loc, ploc;
+  RouteSub    * s;
+  char          key[ 1024 ];
+
+  sc = 0;
+  sx = 0;
+  ka.skipme = true;
+  /* the host query reply view (RvDaemonRpc::send_subscriptions): every
+   * socket of a session, subjects and patterns, one pair per session */
+  for ( EvSocket *p = iter.first(); p != NULL; p = iter.next() ) {
+    char   sess[ MAX_SESSION_LEN ];
+    size_t n = p->get_session( this->service_num, sess );
+    if ( n == 0 )
+      continue;
+    if ( sess[ n - 1 ] == '\0' )
+      n--;
+    SubRouteDB subs, pats;
+    p->get_subscriptions( this->service_num, subs );
+    p->get_patterns( this->service_num, RV_PATTERN_FMT, pats );
+    uint32_t     seed = kv_crc_c( sess, n, 0 );
+    SubRouteDB * db[ 2 ] = { &subs, &pats };
+    for ( int k = 0; k < 2; k++ ) {
+      for ( s = db[ k ]->first( loc ); s != NULL; s = db[ k ]->next( loc ) ) {
+        if ( s->len == 0 || s->value[ 0 ] == '_' )
+          continue;
+        uint32_t ph = kv_crc_c( s->value, s->len, seed );
+        if ( n + 1 + s->len <= sizeof( key ) ) {
+          ::memcpy( key, sess, n );
+          key[ n ] = '\001';
+          ::memcpy( &key[ n + 1 ], s->value, s->len );
+          pairs.upsert( ph, key, n + 1 + s->len, ploc );
+          if ( ! ploc.is_new )
+            continue; /* same session, another socket */
+        }
+        sc++;
+        sx ^= ph;
+      }
+    }
+  }
 }
 
 void

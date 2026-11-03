@@ -296,6 +296,14 @@ tibrv_status tibrvTransport_SetBatchDispatchFlush( tibrvTransport tport, tibrv_b
 tibrv_status tibrvTransport_CreateLicensed( tibrvTransport * tport, const char * service,
                                             const char * network, const char * daemon, const char * );
 tibrv_status tibrvTransport_RequestReliability( tibrvTransport tport, tibrv_f64 reliability );
+/* sassrv extension: daemon connection state changes are delivered to cb on q
+ * as advisory msgs, _RV.INFO.SYSTEM.RVD.CONNECTED after a reconnect and
+ * _RV.ERROR.SYSTEM.RVD.DISCONNECTED when the connection is lost (ADV_CLASS,
+ * ADV_SOURCE, ADV_NAME, ADV_DESC fields); one per transport, a second call
+ * replaces the first.  Destroy with tibrvEvent_Destroy() */
+tibrv_status tibrvTransport_SetStateListener( tibrvTransport tport, tibrvQueue q,
+                                              tibrvEventCallback cb, const void * closure,
+                                              tibrvEvent * event );
 
 #define tibrvDispatcher_Create( disp, able ) tibrvDispatcher_CreateEx( disp, able, TIBRV_WAIT_FOREVER )
 tibrv_status tibrvDispatcher_CreateEx( tibrvDispatcher * disp, tibrvDispatchable able, tibrv_f64 idle_timeout );

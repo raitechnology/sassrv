@@ -49,6 +49,9 @@ api_status( ApiStatus st )
   }
 }
 
+/* epoll thread: the daemon handshake completed (DATA_RECV).  The first
+ * connect is awaited by CreateTransport(); a reconnect also refreshes the
+ * session and re-subscribes every listener of this transport */
 void
 api_Transport::on_connect( EvSocket &conn ) noexcept
 {
@@ -56,78 +59,42 @@ api_Transport::on_connect( EvSocket &conn ) noexcept
     int len = (int) conn.get_peer_address_strlen();
     printf( "Connected: %.*s\n", len, conn.peer_address.buf );
   }
+  bool reconnected = false;
   pthread_mutex_lock( &this->mutex );
+  if ( this->timer_armed ) {
+    this->timer_armed = false;
+    this->api.poll.timer.remove_timer_cb( this->rc_timer, RECONNECT_TIMER_ID,
+                                          this->id );
+    reconnected = true;
+    if ( this->x.session_len != this->client.session_len ||
+         ::memcmp( this->x.session, this->client.session,
+                   this->x.session_len ) != 0 ) {
+      if ( debug_rv7_api )
+        fprintf( stderr, "Session different: %.*s (old) != %.*s (new)\n",
+                 (int) this->x.session_len, this->x.session,
+                 (int) this->client.session_len, this->client.session );
+      ::memcpy( this->x.session, this->client.session,
+                this->client.session_len );
+      this->x.session_len = this->client.session_len;
+    }
+    /* the thread version pushed these through OP_SUBSCRIBE; this is the
+     * epoll thread, so call the client directly (EvPipe::subscribe body) */
+    for ( size_t i = 0; this->ht.ht != NULL && i <= this->ht.mask; i++ ) {
+      for ( api_Listener *l = this->ht.ht[ i ].hd; l != NULL; l = l->next ) {
+        if ( this->client.is_inbox( l->subject, l->len ) == 0 )
+          this->client.subscribe( l->subject, l->len, NULL, 0 );
+      }
+    }
+  }
   pthread_cond_broadcast( &this->cond );
   pthread_mutex_unlock( &this->mutex );
+  if ( reconnected )
+    this->push_state( _INFO, "RVD.CONNECTED", "daemon reconnected" );
 }
 
-void *
-tibrv_reconnect_thread( void *arg ) noexcept
-{
-  api_Transport & t = *(api_Transport *) arg;
-  pthread_cond_t wait_cond;
-  pthread_cond_init( &wait_cond, NULL );
-
-  for (;;) {
-    EvRvClientParameters parm( t.x.daemon, t.x.network, t.x.service );
-    parm.opts |= kv::OPT_CONNECT_NB;
-
-    EvPipeRec rec( OP_CREATE_TPORT, &t, &parm, &t.mutex, &t.cond );
-    struct timespec wait = ts_timeout( 1.0 ); /* pause 1 sec for reconnect */
-
-    pthread_mutex_lock( &t.mutex );
-    if ( pthread_cond_timedwait( &wait_cond, &t.mutex, &wait ) == ETIMEDOUT ) {
-      if ( ! t.is_destroyed )
-        t.api.ev_read->exec( rec );
-
-      if ( debug_rv7_api )
-        printf( "Reconnecting...\n" );
-      struct timespec ts = ts_timeout( 10.0 );
-      while ( ! t.is_destroyed  &&
-              t.client.rv_state > EvRvClient::ERR_CLOSE &&
-              t.client.rv_state < EvRvClient::DATA_RECV ) {
-        if ( pthread_cond_timedwait( &t.cond, &t.mutex, &ts ) == ETIMEDOUT ) {
-          EvPipeRec rec2( OP_CLOSE_TPORT, &t, &parm, &t.mutex, &t.cond );
-          t.api.ev_read->exec( rec2 );
-        }
-      }
-    }
-    if ( t.is_destroyed || t.client.rv_state == EvRvClient::DATA_RECV ) {
-      if ( debug_rv7_api )
-        printf( "Succussful reconnect...\n" );
-      break;
-    }
-    pthread_mutex_unlock( &t.mutex );
-  }
-  if ( t.client.rv_state == EvRvClient::DATA_RECV ) {
-    if ( t.x.session_len != t.client.session_len ||
-         ::memcmp( t.x.session, t.client.session, t.x.session_len ) != 0 ) {
-      fprintf( stderr, "Session different: %.*s (old) != %.*s (new)\n",
-              (int) t.x.session_len, t.x.session,
-              (int) t.client.session_len, t.client.session );
-      ::memcpy( t.x.session, t.client.session, t.client.session_len );
-      t.x.session_len = t.client.session_len;
-    }
-  }
-
-  if ( ! t.is_destroyed ) {
-    tibrvId max_id = t.api.next_id;
-    for ( tibrvId id = 0; ! t.is_destroyed && id < max_id; id++ ) {
-      api_Listener *l;
-      if ( (l = t.api.get<api_Listener>( id, TIBRV_LISTENER )) != NULL ) {
-        if ( l->tport == t.id &&
-             t.client.is_inbox( l->subject, l->len ) == 0 ) {
-          EvPipeRec rec( OP_SUBSCRIBE, &t, l, &t.mutex, &t.cond );
-          t.api.ev_read->exec( rec );
-        }
-      }
-    }
-    t.reconnect_active = false;
-  }
-  pthread_mutex_unlock( &t.mutex );
-  return NULL;
-}
-
+/* epoll thread, from EvRvClient::release(): the connection is going away.
+ * rv_state is still the state before the close, so DATA_RECV means a live
+ * connection was lost rather than a reconnect attempt that failed */
 void
 api_Transport::on_shutdown( EvSocket &conn,  const char *err,
                             size_t err_len ) noexcept
@@ -137,20 +104,91 @@ api_Transport::on_shutdown( EvSocket &conn,  const char *err,
     printf( "Shutdown: %.*s %.*s\n", len, conn.peer_address.buf,
                                      (int) err_len, err );
   }
-  /*if ( this->client.poll.quit == 0 )
-    this->client.poll.quit = 1;*/
+  bool was_connected = ( this->client.rv_state == EvRvClient::DATA_RECV );
   pthread_mutex_lock( &this->mutex );
   pthread_cond_broadcast( &this->cond );
+  pthread_mutex_unlock( &this->mutex );
+  if ( was_connected ) {
+    char text[ 256 ];
+    int  n = ::snprintf( text, sizeof( text ), "daemon disconnected%s%.*s",
+                         err_len > 0 ? ": " : "", (int) err_len,
+                         err != NULL ? err : "" );
+    if ( n < 0 || (size_t) n >= sizeof( text ) )
+      text[ sizeof( text ) - 1 ] = '\0';
+    this->push_state( _ERROR, "RVD.DISCONNECTED", text );
+  }
+  this->arm_reconnect();
+}
 
-  if ( ! this->reconnect_active && this->x.session_len > 0 ) {
-    this->reconnect_active = true;
-    pthread_t id;
-    pthread_attr_t attr;
-    pthread_attr_init( &attr );
-    pthread_attr_setdetachstate( &attr, 1 );
-    pthread_create( &id, &attr, tibrv_reconnect_thread, this );
+void
+api_Transport::arm_reconnect( void ) noexcept
+{
+  if ( this->is_destroyed || this->timer_armed || this->x.session_len == 0 ||
+       this->id == TIBRV_PROCESS_TRANSPORT )
+    return;
+  this->timer_armed   = true;
+  this->connect_ticks = 0;
+  this->api.poll.timer.add_timer_double( this->rc_timer, RECONNECT_SECS,
+                                         RECONNECT_TIMER_ID, this->id );
+}
+
+/* epoll thread, every RECONNECT_SECS while disconnected: start a connect
+ * when the socket is closed; if the handshake (VERS..CONN) stalls for
+ * RECONNECT_MAX_TICKS, close it so release() -> on_shutdown() retries */
+bool
+api_ReconnectTimer::timer_cb( uint64_t,  uint64_t ) noexcept
+{
+  api_Transport & t = *this->t;
+  if ( t.is_destroyed || t.client.rv_state == EvRvClient::DATA_RECV ) {
+    t.timer_armed = false;
+    return false;
+  }
+  if ( t.client.fd == -1 ) {
+    EvRvClientParameters parm( t.x.daemon, t.x.network, t.x.service );
+    parm.opts |= kv::OPT_CONNECT_NB;
+    if ( debug_rv7_api )
+      printf( "Reconnecting...\n" );
+    t.connect_ticks = 0;
+    t.client.rv_connect( parm, &t, &t ); /* failure -> on_shutdown, next tick */
+  }
+  else if ( ++t.connect_ticks >= RECONNECT_MAX_TICKS ) {
+    t.connect_ticks = 0;
+    if ( t.client.in_list( IN_ACTIVE_LIST ) )
+      t.client.idle_push( EV_CLOSE );
+  }
+  return true;
+}
+
+void
+api_Transport::push_state( const char *cl,  const char *nm,
+                           const char *de ) noexcept
+{
+  char subject[ 128 ];
+  CatPtr p( subject );
+  /* _RV.INFO.SYSTEM.RVD.CONNECTED, _RV.ERROR.SYSTEM.RVD.DISCONNECTED */
+  p.s( "_RV." ).s( cl ).s( "." _SYSTEM "." ).s( nm ).end();
+
+  MDMsgMem    mem;
+  RvMsgWriter msg( mem, mem.make( 1024 ), 1024 );
+  msg.append_string( SARG( _ADV_CLASS ), cl, ::strlen( cl ) + 1 );
+  msg.append_string( SARG( _ADV_SOURCE ), SARG( _SYSTEM ) );
+  msg.append_string( SARG( _ADV_NAME ), nm, ::strlen( nm ) + 1 );
+  if ( de != NULL )
+    msg.append_string( SARG( _ADV_DESC ), de, ::strlen( de ) + 1 );
+
+  uint32_t h = kv_crc_c( subject, p.len(), 0 );
+  EvPublish pub( subject, p.len(), NULL, 0, msg.buf, msg.update_hdr(),
+                 this->client.sub_route, *this->me, h, RVMSG_TYPE_ID );
+  pthread_mutex_lock( &this->mutex );
+  if ( this->state_listener != NULL ) {
+    RvMsg * rvmsg = this->client.make_rv_msg( (void *) pub.msg, pub.msg_len,
+                                              pub.msg_enc );
+    if ( rvmsg != NULL )
+      this->deliver_msg( *this->state_listener, pub, rvmsg );
   }
   pthread_mutex_unlock( &this->mutex );
+  /* listeners on _RV.ERROR.SYSTEM.> etc, as a tibrv daemon advisory would */
+  this->on_rv_msg( pub );
 }
 
 void
@@ -328,14 +366,7 @@ api_Transport::on_rv_msg( EvPublish &pub ) noexcept
            l->len != pub.subject_len ||
            ::memcmp( l->subject, pub.subject, l->len ) != 0 )
         continue;
-      api_Queue * q = this->api.get<api_Queue>( l->queue, TIBRV_QUEUE );
-      if ( q != NULL ) {
-        pthread_mutex_lock( &q->mutex );
-        if ( q->push( l->id, (void *) l->cb, (void *) l->vcb, l->cl,
-                      api_Msg::make( pub, rvmsg, &q->tether, l->id, l->cl ) ) )
-          ApiCore::queue_signal( *q );
-        pthread_mutex_unlock( &q->mutex );
-      }
+      this->deliver_msg( *l, pub, rvmsg );
     }
   }
   if ( this->wild_ht != NULL ) {
@@ -353,20 +384,27 @@ api_Transport::on_rv_msg( EvPublish &pub ) noexcept
              ! match_rv_wildcard( l->subject, l->len, pub.subject,
                                   pub.subject_len ) )
           continue;
-        api_Queue * q = this->api.get<api_Queue>( l->queue, TIBRV_QUEUE );
-        if ( q != NULL ) {
-          pthread_mutex_lock( &q->mutex );
-          if ( q->push( l->id, (void *) l->cb, (void *) l->vcb, l->cl,
-                   api_Msg::make( pub, rvmsg, &q->tether, l->id, l->cl ) ) )
-            ApiCore::queue_signal( *q );
-          pthread_mutex_unlock( &q->mutex );
-        }
+        this->deliver_msg( *l, pub, rvmsg );
       }
     }
   }
   pthread_mutex_unlock( &this->mutex );
 
   return true;
+}
+
+void
+api_Transport::deliver_msg( api_Listener &l,  EvPublish &pub,
+                            RvMsg *rvmsg ) noexcept
+{
+  api_Queue * q = this->api.get<api_Queue>( l.queue, TIBRV_QUEUE );
+  if ( q != NULL ) {
+    pthread_mutex_lock( &q->mutex );
+    if ( q->push( l.id, (void *) l.cb, (void *) l.vcb, l.cl,
+                  api_Msg::make( pub, rvmsg, &q->tether, l.id, l.cl ) ) )
+      ApiCore::queue_signal( *q );
+    pthread_mutex_unlock( &q->mutex );
+  }
 }
 
 /* Dispatch-flush bookkeeping, per thread: ids[] are the batching transports
@@ -613,14 +651,22 @@ Tibrv_API::DestroyEvent( tibrvEvent event,  tibrvEventOnComplete cb ) noexcept
         api_Transport * t = this->get<api_Transport>( l->tport, TIBRV_TRANSPORT );
         l->cb = NULL;
         if ( t != NULL ) {
-          EvPipeRec rec( OP_UNSUBSCRIBE, t, l, &t->mutex, &t->cond );
-          pthread_mutex_lock( &t->mutex );
-          if ( t->client.is_inbox( l->subject, l->len ) == 0 )
-            this->ev_read->exec( rec );
-          if ( l->wild != 0 )
-            t->remove_wildcard( l->wild );
-          t->ht.remove( l );
-          pthread_mutex_unlock( &t->mutex );
+          if ( l->is_state ) { /* not subscribed, not in ht */
+            pthread_mutex_lock( &t->mutex );
+            if ( t->state_listener == l )
+              t->state_listener = NULL;
+            pthread_mutex_unlock( &t->mutex );
+          }
+          else {
+            EvPipeRec rec( OP_UNSUBSCRIBE, t, l, &t->mutex, &t->cond );
+            pthread_mutex_lock( &t->mutex );
+            if ( t->client.is_inbox( l->subject, l->len ) == 0 )
+              this->ev_read->exec( rec );
+            if ( l->wild != 0 )
+              t->remove_wildcard( l->wild );
+            t->ht.remove( l );
+            pthread_mutex_unlock( &t->mutex );
+          }
         }
         delete l;
         break;
@@ -973,8 +1019,13 @@ EvPipe::create_tport( EvPipeRec &rec ) noexcept
 void
 EvPipe::close_tport( EvPipeRec &rec ) noexcept
 {
-  if ( rec.t->client.in_list( IN_ACTIVE_LIST ) )
-    rec.t->client.idle_push( EV_CLOSE );
+  api_Transport & t = *rec.t;
+  if ( t.timer_armed ) {
+    t.timer_armed = false;
+    t.api.poll.timer.remove_timer_cb( t.rc_timer, RECONNECT_TIMER_ID, t.id );
+  }
+  if ( t.client.in_list( IN_ACTIVE_LIST ) )
+    t.client.idle_push( EV_CLOSE );
 }
 
 /* head of the calling thread's chain of send accumulators (one per tport) */
@@ -1427,9 +1478,45 @@ Tibrv_API::DestroyTransport( tibrvTransport tport ) noexcept
   pthread_mutex_lock( &t->mutex );
   EvPipeRec rec2( OP_CLOSE_TPORT, t, (EvRvClientParameters *) NULL,
                   &t->mutex, &t->cond );
+  t->is_destroyed = true; /* before the close: on_shutdown must not re-arm */
   t->api.ev_read->exec( rec2 );
-  t->is_destroyed = true;
   pthread_mutex_unlock( &t->mutex );
+  return TIBRV_OK;
+}
+
+tibrv_status
+Tibrv_API::SetStateListener( tibrvTransport tport,  tibrvQueue queue,
+                             tibrvEventCallback cb,  const void * closure,
+                             tibrvEvent * event ) noexcept
+{
+  static const char subj[] = "_RV.*.SYSTEM.RVD.>";
+  *event = TIBRV_INVALID_ID;
+  api_Queue     * q = this->get<api_Queue>( queue, TIBRV_QUEUE );
+  api_Transport * t = this->get<api_Transport>( tport, TIBRV_TRANSPORT );
+  if ( q == NULL ) return TIBRV_INVALID_QUEUE;
+  if ( t == NULL ) return TIBRV_INVALID_TRANSPORT;
+  /* a listener for GetListenerSubject() etc, but never subscribed or in ht:
+   * push_state() hands it the advisory directly */
+  api_Listener * l = this->make<api_Listener>( TIBRV_LISTENER, sizeof( subj ) );
+  l->subject  = (char *) &l[ 1 ];
+  l->len      = sizeof( subj ) - 1;
+  l->hash     = kv_crc_c( subj, l->len, 0 );
+  l->cb       = cb;
+  l->cl       = closure;
+  l->queue    = queue;
+  l->tport    = tport;
+  l->is_state = true;
+  ::memcpy( l->subject, subj, sizeof( subj ) );
+
+  pthread_mutex_lock( &t->mutex );
+  api_Listener * old = t->state_listener;
+  t->state_listener = l;
+  pthread_mutex_unlock( &t->mutex );
+  if ( old != NULL ) {
+    this->rem<api_Listener>( old->id, TIBRV_LISTENER );
+    delete old;
+  }
+  *event = l->id;
   return TIBRV_OK;
 }
 
@@ -1987,6 +2074,14 @@ tibrvTransport_CreateLicensed( tibrvTransport * tport, const char * service,
                                const char * )
 {
   return tibrvTransport_Create( tport, service, network, daemon );
+}
+
+tibrv_status
+tibrvTransport_SetStateListener( tibrvTransport tport, tibrvQueue q,
+                                 tibrvEventCallback cb, const void * closure,
+                                 tibrvEvent * event )
+{
+  API_CALL( SetStateListener )( tport, q, cb, closure, event );
 }
 
 tibrv_status
